@@ -84,14 +84,18 @@ class BattlesnakeEnv:
     def num_actions(self) -> int:
         return NUM_ACTIONS
 
-    def reset(self, key: jax.Array) -> tuple[State, TimeStep]:
-        """Start a new game (engine turn 0)."""
+    def init_state(self, key: jax.Array) -> State:
+        """The turn-0 state of a new game (without computing observations)."""
         state = self.map.setup(key, self.config)
         if self.config.ruleset.constrictor:
             # The engine runs the ruleset once at initialization; constrictor
             # removes all food then.
             state = state._replace(food=jnp.zeros_like(state.food))
-        state = state._replace(done=rules.is_game_over(state.alive, self.config))
+        return state._replace(done=rules.is_game_over(state.alive, self.config))
+
+    def reset(self, key: jax.Array) -> tuple[State, TimeStep]:
+        """Start a new game (engine turn 0)."""
+        state = self.init_state(key)
         zeros = jnp.zeros((self.num_agents,), jnp.float32)
         return state, self._timestep(state, zeros, jnp.zeros((), bool))
 
@@ -124,21 +128,21 @@ class BattlesnakeEnv:
 
         ``reward``, ``done`` and ``truncated`` describe the transition that just
         happened; ``obs``, ``alive`` and ``action_mask`` (and the returned
-        state) belong to the new game when ``done`` is True.
+        state) belong to the new game when ``done`` is True. ``final_obs`` is
+        always the observation of the state the transition reached (before any
+        reset), e.g. for bootstrapping values on truncation.
         """
         k_step, k_reset = jax.random.split(key)
         new, ts = self.step(k_step, state, actions)
-        fresh, fresh_ts = self.reset(k_reset)
-
-        def pick(a, b):
-            return jax.tree.map(lambda x, y: jnp.where(ts.done, x, y), a, b)
-
+        fresh = self.init_state(k_reset)
+        nxt = jax.tree.map(lambda a, b: jnp.where(ts.done, a, b), fresh, new)
         ts = ts._replace(
-            obs=pick(fresh_ts.obs, ts.obs),
-            alive=pick(fresh_ts.alive, ts.alive),
-            action_mask=pick(fresh_ts.action_mask, ts.action_mask),
+            obs=self.observe(nxt),
+            alive=nxt.alive,
+            action_mask=self.action_mask(nxt),
+            final_obs=ts.obs,
         )
-        return pick(fresh, new), ts
+        return nxt, ts
 
     def observe(self, state: State) -> Any:
         return () if self.obs_fn is None else self.obs_fn(state)

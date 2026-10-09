@@ -9,12 +9,23 @@ from __future__ import annotations
 import dataclasses
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from slinky.engine_json import state_from_engine, state_to_engine
 from slinky.rules import action_mask, rules_step
-from slinky.types import ACTION_NAMES, DOWN, LEFT, RIGHT, UP, Cause, GameConfig, Ruleset
+from slinky.types import (
+    ACTION_NAMES,
+    DOWN,
+    LEFT,
+    RIGHT,
+    UP,
+    Cause,
+    GameConfig,
+    Ruleset,
+    empty_state,
+)
 
 
 @dataclasses.dataclass
@@ -359,3 +370,93 @@ def test_countdown_roundtrip():
     back = state_to_engine(state_from_engine(d, config), config)
     assert back["snakes"] == d["snakes"]
     assert back["food"] == d["food"] and back["hazards"] == d["hazards"]
+
+
+def test_action_mask_ignores_bodies_of_starving_snakes():
+    # Snake 0 is boxed in by snake 1's body, but snake 1 (health 1, no food in
+    # reach) starves before collisions are checked, so moving up is safe.
+    config = GameConfig(width=7, height=7, num_snakes=2)
+    d = {
+        "width": 7,
+        "height": 7,
+        "turn": 20,
+        "food": [],
+        "hazards": [],
+        "snakes": [
+            {"id": "s0", "body": [[0, 0], [1, 0], [2, 0]], "health": 50},
+            {"id": "s1", "body": [[3, 2], [2, 2], [1, 2], [0, 2], [0, 1], [1, 1]], "health": 1},
+        ],
+    }
+    state = state_from_engine(d, config)
+    mask = np.asarray(action_mask(state, config))
+    assert mask[0, UP]
+    out = rules_step(state, np.array([UP, UP]), config)
+    assert bool(out.alive[0]) and not bool(out.alive[1])
+
+
+def test_action_mask_rows_are_never_all_false():
+    config = GameConfig(num_snakes=3)
+    d = {
+        "width": 11,
+        "height": 11,
+        "turn": 5,
+        "food": [],
+        "hazards": [],
+        "snakes": [
+            # Trapped in the corner by its own body: no safe move.
+            {"id": "s0", "body": [[0, 0], [1, 0], [1, 1], [0, 1], [0, 2]], "health": 50},
+            {"id": "s1", "body": [[8, 8], [8, 7], [8, 6]], "health": 50},
+            {
+                "id": "s2",
+                "body": [[5, 5], [5, 4], [5, 3]],
+                "health": 50,
+                "eliminated_cause": "wall-collision",
+                "eliminated_on_turn": 2,
+            },
+        ],
+    }
+    mask = np.asarray(action_mask(state_from_engine(d, config), config))
+    assert mask[0].all() and mask[2].all()
+    assert mask[1].tolist() == [True, False, True, True]
+
+
+@pytest.mark.parametrize("damage,layers,health", [(10**9, 3, 0), (-(10**9), 2, 100), (1, 300, 0)])
+def test_extreme_hazard_damage_saturates(damage, layers, health):
+    config = GameConfig(num_snakes=2, hazard_damage_per_turn=damage)
+    d = {
+        "width": 11,
+        "height": 11,
+        "turn": 5,
+        "food": [],
+        "hazards": [[5, 5]] * layers,
+        "snakes": [
+            {"id": "s0", "body": [[4, 5], [3, 5], [2, 5]], "health": 60},
+            {"id": "s1", "body": [[8, 8], [8, 7], [8, 6]], "health": 60},
+        ],
+    }
+    out = rules_step(state_from_engine(d, config), np.array([RIGHT, UP]), config)
+    assert int(out.health[0]) == health
+    assert bool(out.alive[0]) == (health > 0)
+
+
+def test_royale_rules_step_is_not_silently_standard():
+    config = GameConfig(ruleset=Ruleset.ROYALE)
+    with pytest.raises(NotImplementedError):
+        rules_step(jax.tree.map(jnp.asarray, empty_state(config)), np.zeros(2, int), config)
+
+
+def test_duplicate_food_is_rejected():
+    config = GameConfig(num_snakes=2)
+    d = {
+        "width": 11,
+        "height": 11,
+        "turn": 5,
+        "food": [[5, 5], [5, 5]],
+        "hazards": [],
+        "snakes": [
+            {"id": "s0", "body": [[4, 5], [3, 5], [2, 5]], "health": 60},
+            {"id": "s1", "body": [[8, 8], [8, 7], [8, 6]], "health": 60},
+        ],
+    }
+    with pytest.raises(ValueError, match="duplicate food"):
+        state_from_engine(d, config)

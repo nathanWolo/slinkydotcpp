@@ -33,7 +33,7 @@ type gamesConfig struct {
 	PCareful          float64           `json:"p_careful"`
 	Solo              bool              `json:"solo"`      // derived: snakes == 1
 	Settings          map[string]string `json:"settings"`  // derived: params passed to the engine
-	GameSeed          int64             `json:"game_seed"` // derived: seed + game index
+	GameSeed          int64             `json:"game_seed"` // derived: hash of (seed, game index)
 }
 
 type initialRecord struct {
@@ -62,7 +62,7 @@ func runGames(args []string) error {
 	fs.IntVar(&c.Height, "height", 11, "board height")
 	fs.IntVar(&c.Snakes, "snakes", 2, "number of snakes (1 => solo game-over rule, like the CLI)")
 	fs.IntVar(&c.Games, "games", 10, "number of games")
-	fs.Int64Var(&c.Seed, "seed", 1, "base seed; game g uses seed+g for the engine and the policy")
+	fs.Int64Var(&c.Seed, "seed", 1, "base seed; game g uses a hash of (seed, g) for the engine and the policy")
 	fs.IntVar(&c.MaxTurns, "max-turns", 500, "maximum number of transitions recorded per game")
 	fs.IntVar(&c.FoodSpawnChance, "food-spawn-chance", 15, "engine foodSpawnChance")
 	fs.IntVar(&c.MinimumFood, "minimum-food", 1, "engine minimumFood")
@@ -115,12 +115,7 @@ func runGames(args []string) error {
 
 	for g := 0; g < c.Games; g++ {
 		gc := c
-		gc.GameSeed = c.Seed + int64(g)
-		if gc.GameSeed == 0 {
-			// Settings.GetRand treats seed 0 as "unseeded" and falls back to
-			// the global math/rand source, which would make games irreproducible.
-			return fmt.Errorf("game %d would use seed 0, which the engine treats as unseeded; pick another --seed", g)
-		}
+		gc.GameSeed = gameSeed(c.Seed, g)
 		if err := playGame(enc, g, gc, gameMap, params, wrapped); err != nil {
 			return fmt.Errorf("game %d (seed %d): %w", g, gc.GameSeed, err)
 		}
@@ -203,4 +198,21 @@ func playGame(enc *json.Encoder, g int, c gamesConfig, gameMap maps.GameMap, par
 		board = postMap
 	}
 	return nil
+}
+
+// gameSeed derives game g's seed by hashing (base seed, g) with splitmix64.
+// Consecutive math/rand seeds give correlated streams, and the engine seeds
+// turn T with gameSeed+T, so consecutive per-game seeds would make games share
+// food rolls and skew start-position statistics. The result is positive, below
+// 2^62 (so adding turn numbers can't overflow) and never 0 (which the engine
+// treats as "unseeded").
+func gameSeed(base int64, g int) int64 {
+	z := uint64(base)*0x9E3779B97F4A7C15 + uint64(g) + 0x9E3779B97F4A7C15
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+	z ^= z >> 31
+	if s := int64(z >> 2); s != 0 {
+		return s
+	}
+	return 1
 }

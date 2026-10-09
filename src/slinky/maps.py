@@ -7,11 +7,14 @@ mirrors the engine's ``maps.GameMap`` interface (``SetupBoard`` and
 so far, so it is omitted until a map needs it.
 
 Random choices match the engine's *distributions*, not its exact random
-stream (the engine uses Go's ``math/rand``).
+stream (the engine uses Go's ``math/rand``). Each random operation draws one
+block of raw bits and derives every choice from it: on CPU every PRNG call is
+a small loop, so few, larger draws are much faster than many small ones.
 """
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Protocol
 
 import jax
@@ -37,6 +40,8 @@ class GameMap(Protocol):
 
 # --- Snake placement -----------------------------------------------------------
 
+MAX_PLAYERS = 16  # the engine's standard and empty maps reject more snakes
+
 
 def _fixed_start_points(config: GameConfig) -> tuple[np.ndarray, np.ndarray]:
     """The engine's 4 corner and 4 cardinal start points (square boards >= 7)."""
@@ -46,13 +51,18 @@ def _fixed_start_points(config: GameConfig) -> tuple[np.ndarray, np.ndarray]:
     return corners, cardinals
 
 
-def _place_fixed(key: jax.Array, config: GameConfig) -> jax.Array:
-    k_corner, k_card, k_order = jax.random.split(key, 3)
+def _scores(bits: jax.Array) -> jax.Array:
+    """Positive int32 random scores from uint32 bits (0 is reserved for "invalid")."""
+    return (bits >> 2).astype(jnp.int32) + 1
+
+
+def _place_fixed(bits: jax.Array, config: GameConfig) -> jax.Array:
+    """Shuffle corners and cardinals; corners first or cardinals first, 50/50."""
     corners, cardinals = _fixed_start_points(config)
-    corners = jax.random.permutation(k_corner, jnp.asarray(corners))
-    cardinals = jax.random.permutation(k_card, jnp.asarray(cardinals))
+    corners = jnp.asarray(corners)[jnp.argsort(bits[0:4])]
+    cardinals = jnp.asarray(cardinals)[jnp.argsort(bits[4:8])]
     points = jnp.where(
-        jax.random.bernoulli(k_order),
+        (bits[8] & 1) == 1,
         jnp.concatenate([corners, cardinals]),
         jnp.concatenate([cardinals, corners]),
     )
@@ -71,53 +81,72 @@ def _quadrant_points(config: GameConfig) -> np.ndarray:
     return np.stack([q0, q1, q2, q3])
 
 
-def _place_distributed(key: jax.Array, config: GameConfig) -> jax.Array:
-    k_start, k_perm = jax.random.split(key)
+def _place_distributed(bits: jax.Array, config: GameConfig) -> jax.Array:
+    """Cycle through the quadrants from a random one, a random free point in each."""
     quads = jnp.asarray(_quadrant_points(config))
-    perms = jax.vmap(lambda k: jax.random.permutation(k, 4))(jax.random.split(k_perm, 4))
-    start = jax.random.randint(k_start, (), 0, 4)
+    perms = jnp.argsort(bits[:16].reshape(4, 4), axis=1)
+    start = bits[16] % 4
     i = jnp.arange(config.num_snakes)
     quad = (start + i) % 4
     return quads[quad, perms[quad, i // 4]]
 
 
-def _random_cells(key: jax.Array, valid: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
+def _random_cells(bits: jax.Array, valid: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
     """Up to ``k`` distinct uniformly random cells from bool[H, W] ``valid``.
 
-    Returns (xy int32[k, 2], ok bool[k]); ``ok`` is False where there were not
-    enough valid cells.
+    ``bits`` is uint32[H*W]. Returns (xy int32[k, 2], ok bool[k]); ``ok`` is
+    False where there were not enough valid cells.
     """
     h, w = valid.shape
-    scores = jnp.where(valid.ravel(), jax.random.uniform(key, (h * w,)), -1.0)
-    top, idx = jax.lax.top_k(scores, k)
+    scores = jnp.where(valid.ravel(), _scores(bits), 0)
+    if k == 1:
+        idx = jnp.argmax(scores)[None]
+        top = scores[idx]
+    else:
+        top, idx = jax.lax.top_k(scores, k)
     xy = jnp.stack([idx % w, idx // w], axis=1).astype(jnp.int32)
-    return xy, top >= 0.0
+    return xy, top > 0
 
 
-def _place_random(key: jax.Array, config: GameConfig) -> jax.Array:
-    """Random distinct cells with even x+y parity, excluding the centre."""
+def _random_start_cells(config: GameConfig) -> np.ndarray:
+    """Cells the engine's random placement may use: even x+y parity, not the centre."""
     ys, xs = np.mgrid[: config.height, : config.width]
     valid = (xs + ys) % 2 == 0
     valid[(config.height - 1) // 2, (config.width - 1) // 2] = False
     if valid.sum() < config.num_snakes:
         raise ValueError("not enough room to place snakes")
-    xy, _ = _random_cells(key, jnp.asarray(valid), config.num_snakes)
-    return xy
+    return valid
 
 
-def place_snakes(key: jax.Array, config: GameConfig) -> jax.Array:
-    """int32[N, 2] start points, following the engine's ``PlaceSnakesAutomatically``."""
+def placement_kind(config: GameConfig) -> str:
+    """Which of the engine's ``PlaceSnakesAutomatically`` strategies applies."""
     n, w = config.num_snakes, config.width
+    if n > MAX_PLAYERS:
+        raise ValueError(f"the standard maps allow at most {MAX_PLAYERS} snakes")
     if config.width == config.height:
         if n > 8 and w < 7:
             raise ValueError("too many snakes for this board size")
         if n <= 8 and w >= 7:
-            return _place_fixed(key, config)
+            return "fixed"
         if w >= 11:
-            if n > 16:
-                raise ValueError("too many snakes for distributed placement")
-            return _place_distributed(key, config)
-    return _place_random(key, config)
+            return "distributed"
+    return "random"
+
+
+def _placement_bits(config: GameConfig) -> int:
+    kind = placement_kind(config)
+    return {"fixed": 9, "distributed": 17}.get(kind, config.width * config.height)
+
+
+def place_snakes(bits: jax.Array, config: GameConfig) -> jax.Array:
+    """int32[N, 2] start points from uint32 ``bits[_placement_bits(config)]``."""
+    kind = placement_kind(config)
+    if kind == "fixed":
+        return _place_fixed(bits, config)
+    if kind == "distributed":
+        return _place_distributed(bits, config)
+    xy, _ = _random_cells(bits, jnp.asarray(_random_start_cells(config)), config.num_snakes)
+    return xy
 
 
 def snakes_at(state: State, points: jax.Array, config: GameConfig) -> State:
@@ -144,20 +173,22 @@ def spawn_mask(state: State, config: GameConfig, exclude_head_moves: bool = True
     """
     occupied = state.food | jnp.any((state.body > 0) & state.alive[:, None, None], axis=0)
     if exclude_head_moves:
-        offsets = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]], jnp.int32)
-        near = (state.head[:, None, :] + offsets[None]).reshape(-1, 2)
-        near_alive = jnp.repeat(state.alive, 4)
-        occupied |= jnp.any(one_hot_cells(near, config) & near_alive[:, None, None], axis=0)
+        heads = jnp.any(one_hot_cells(state.head, config) & state.alive[:, None, None], axis=0)
+        p = jnp.pad(heads, 1)  # dilate by one cell in the 4 directions, no wrapping
+        occupied |= p[:-2, 1:-1] | p[2:, 1:-1] | p[1:-1, :-2] | p[1:-1, 2:]
     return ~occupied
 
 
 def place_food_random(
-    key: jax.Array, state: State, config: GameConfig, n: jax.Array, max_n: int
+    bits: jax.Array, state: State, config: GameConfig, n: jax.Array, max_n: int
 ) -> State:
-    """Add ``n`` (traced, ``<= max_n``) food at distinct random valid cells."""
+    """Add ``n`` (traced, ``<= max_n``) food at distinct random valid cells.
+
+    ``bits`` is uint32[H*W].
+    """
     if max_n <= 0:
         return state
-    xy, ok = _random_cells(key, spawn_mask(state, config), max_n)
+    xy, ok = _random_cells(bits, spawn_mask(state, config), max_n)
     use = ok & (jnp.arange(max_n) < n)
     new = jnp.any(one_hot_cells(xy, config) & use[:, None, None], axis=0)
     return state._replace(food=state.food | new)
@@ -186,33 +217,87 @@ def _fixed_food_candidates(head: jax.Array, config: GameConfig) -> tuple[jax.Arr
     return xy, away & ~corner & ~centre & on_board
 
 
-def place_food_fixed(key: jax.Array, state: State, config: GameConfig) -> State:
-    """The engine's ``PlaceFoodFixed``: one food diagonal to each head, one in the centre."""
+@functools.cache
+def _fixed_candidates_disjoint(config: GameConfig) -> bool:
+    """Whether no two fixed start points share an allowed starting-food cell.
+
+    Then each snake's choice is independent of the others' (no "already food"
+    exclusions), so the engine's sequential placement can be vectorized.
+    Evaluated in numpy at trace time.
+    """
+    if placement_kind(config) != "fixed":
+        return False
+    cx, cy = (config.width - 1) // 2, (config.height - 1) // 2
+    w, h = config.width, config.height
+
+    def candidates(hx: int, hy: int) -> set[tuple[int, int]]:
+        cells = set()
+        for px, py in ((hx - 1, hy - 1), (hx - 1, hy + 1), (hx + 1, hy - 1), (hx + 1, hy + 1)):
+            away = (px < hx < cx) or (cx < hx < px) or (py < hy < cy) or (cy < hy < py)
+            corner = px in (0, w - 1) and py in (0, h - 1)
+            on_board = 0 <= px < w and 0 <= py < h
+            if away and not corner and (px, py) != (cx, cy) and on_board:
+                cells.add((px, py))
+        return cells
+
+    corners, cardinals = _fixed_start_points(config)
+    # With <= 4 snakes, all start on corners or all on cardinals.
+    groups = (
+        [corners, cardinals] if config.num_snakes <= 4 else [np.concatenate([corners, cardinals])]
+    )
+    for group in groups:
+        seen: set[tuple[int, int]] = set()
+        for hx, hy in group.tolist():
+            cells = candidates(hx, hy)
+            if cells & seen:
+                return False
+            seen |= cells
+    return True
+
+
+def place_food_fixed(bits: jax.Array, state: State, config: GameConfig) -> State:
+    """The engine's ``PlaceFoodFixed``: one food diagonal to each head, one in the centre.
+
+    ``bits`` is uint32[4 * N]: random scores for each snake's 4 candidates.
+    """
     food = state.food
     small = config.width * config.height < 11 * 11
+    scores = _scores(bits).reshape(config.num_snakes, 4)
     if config.num_snakes <= 4 or not small:
+        xy, allowed = jax.vmap(lambda h: _fixed_food_candidates(h, config))(state.head)
+        if _fixed_candidates_disjoint(config):
+            # Uniform choice among each snake's allowed candidates.
+            pick = jnp.argmax(jnp.where(allowed, scores, 0), axis=1)
+            chosen = jnp.take_along_axis(xy, pick[:, None, None], axis=1)[:, 0]
+            ok = jnp.any(allowed, axis=1)
+            food |= jnp.any(one_hot_cells(chosen, config) & ok[:, None, None], axis=0)
+        else:
 
-        def place_one(food, inputs):
-            head, k = inputs
-            xy, allowed = _fixed_food_candidates(head, config)
-            allowed &= ~value_at(food, xy, config)
-            # Uniform choice among allowed candidates (the engine errors if none).
-            pick = jax.random.categorical(k, jnp.where(allowed, 0.0, -jnp.inf))
-            x, y = xy[pick, 0], xy[pick, 1]
-            return food.at[y, x].set(food[y, x] | jnp.any(allowed)), None
+            def place_one(food, inputs):
+                xy, allowed, score = inputs
+                allowed &= ~value_at(food, xy, config)
+                # Uniform choice among allowed candidates (the engine errors if none).
+                pick = jnp.argmax(jnp.where(allowed, score, 0))
+                x, y = xy[pick, 0], xy[pick, 1]
+                return food.at[y, x].set(food[y, x] | jnp.any(allowed)), None
 
-        keys = jax.random.split(key, config.num_snakes)
-        food, _ = jax.lax.scan(place_one, food, (state.head, keys))
+            food, _ = jax.lax.scan(place_one, food, (xy, allowed, scores))
     cx, cy = (config.width - 1) // 2, (config.height - 1) // 2
     return state._replace(food=food.at[cy, cx].set(True))
 
 
-def place_initial_food(key: jax.Array, state: State, config: GameConfig) -> State:
-    """The engine's ``PlaceFoodAutomatically``."""
+def _initial_food_bits(config: GameConfig) -> int:
     if config.width == config.height and config.width >= 7:
-        return place_food_fixed(key, state, config)
-    n = config.num_snakes
-    return place_food_random(key, state, config, jnp.int32(n), n)
+        return 4 * config.num_snakes
+    return config.width * config.height
+
+
+def place_initial_food(bits: jax.Array, state: State, config: GameConfig) -> State:
+    """The engine's ``PlaceFoodAutomatically``, from uint32 ``bits[_initial_food_bits]``."""
+    if config.width == config.height and config.width >= 7:
+        return place_food_fixed(bits, state, config)
+    n = min(config.num_snakes, config.width * config.height)
+    return place_food_random(bits, state, config, jnp.int32(n), n)
 
 
 def spawn_food_standard(key: jax.Array, state: State, config: GameConfig) -> State:
@@ -223,16 +308,17 @@ def spawn_food_standard(key: jax.Array, state: State, config: GameConfig) -> Sta
     ``100 - rand.Intn(100) < chance``, which is true for ``chance - 1`` of the
     100 outcomes).
     """
-    k_chance, k_place = jax.random.split(key)
+    bits = jax.random.bits(key, (1 + config.width * config.height,), jnp.uint32)
     count = jnp.sum(state.food, dtype=jnp.int32)
-    roll = 100 - jax.random.randint(k_chance, (), 0, 100)
+    roll = 100 - (bits[0] % 100).astype(jnp.int32)  # modulo bias ~1e-8, negligible
     chance = config.food_spawn_chance
     need = jnp.where(
         count < config.minimum_food,
         config.minimum_food - count,
         jnp.where((chance > 0) & (roll < chance), 1, 0),
     )
-    return place_food_random(k_place, state, config, need, max(config.minimum_food, 1))
+    max_n = min(max(config.minimum_food, 1), config.width * config.height)
+    return place_food_random(bits[1:], state, config, need, max_n)
 
 
 # --- Maps ----------------------------------------------------------------------
@@ -245,10 +331,11 @@ class StandardMap:
         return ()
 
     def setup(self, key: jax.Array, config: GameConfig) -> State:
-        k_snakes, k_food = jax.random.split(key)
+        n_place = _placement_bits(config)
+        bits = jax.random.bits(key, (n_place + _initial_food_bits(config),), jnp.uint32)
         state = empty_state(config, self.init_map_state(config))
-        state = snakes_at(state, place_snakes(k_snakes, config), config)
-        return place_initial_food(k_food, state, config)
+        state = snakes_at(state, place_snakes(bits[:n_place], config), config)
+        return place_initial_food(bits[n_place:], state, config)
 
     def post_update(self, key: jax.Array, state: State, config: GameConfig) -> State:
         return spawn_food_standard(key, state, config)
@@ -261,8 +348,9 @@ class EmptyMap:
         return ()
 
     def setup(self, key: jax.Array, config: GameConfig) -> State:
+        bits = jax.random.bits(key, (_placement_bits(config),), jnp.uint32)
         state = empty_state(config, self.init_map_state(config))
-        return snakes_at(state, place_snakes(key, config), config)
+        return snakes_at(state, place_snakes(bits, config), config)
 
     def post_update(self, key: jax.Array, state: State, config: GameConfig) -> State:
         return state

@@ -84,7 +84,7 @@ bin/oracle games --ruleset royale --map royale --snakes 4 --games 100 --seed 1 >
 | `--width`, `--height` | 11 | board size |
 | `--snakes` | 2 | snake ids are `s0`..`s{N-1}`; `snakes == 1` enables the solo game-over rule, like the CLI |
 | `--games` | 10 | |
-| `--seed` | 1 | game `g` (0-based) uses `seed+g` for the engine seed and for the policy RNG |
+| `--seed` | 1 | game `g` (0-based) uses a hash of `(seed, g)` for the engine seed and for the policy RNG (consecutive Go `math/rand` seeds give correlated streams) |
 | `--max-turns` | 500 | maximum transitions per game |
 | `--food-spawn-chance` | 15 | engine `foodSpawnChance` |
 | `--minimum-food` | 1 | engine `minimumFood` |

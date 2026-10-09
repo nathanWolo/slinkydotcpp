@@ -122,10 +122,15 @@ def state_from_engine(d: dict[str, Any], config: GameConfig, map_state: Any = ()
             body[i] = body_to_countdown(segs, h, w)
     food = np.zeros((h, w), bool)
     for x, y in d["food"]:
+        if food[y, x]:
+            # The engine would feed a snake once per copy; no map produces this.
+            raise ValueError(f"duplicate food at {(x, y)} is not representable")
         food[y, x] = True
-    hazard = np.zeros((h, w), np.int8)
+    hazard = np.zeros((h, w), np.int16)
     for x, y in d.get("hazards", []):
-        # Some maps (snail_mode) keep off-board hazards; they can never matter.
+        # Some maps (snail_mode) keep off-board hazards. They can only affect a
+        # snake that is leaving the board anyway (changing its elimination
+        # cause from wall-collision to hazard), so they are dropped.
         if 0 <= x < w and 0 <= y < h:
             hazard[y, x] += 1
     base = empty_state(config, map_state)

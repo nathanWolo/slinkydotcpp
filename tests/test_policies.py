@@ -164,7 +164,7 @@ def test_legal_policy_restricts_to_legal_and_falls_back_when_trapped():
     env = BattlesnakeEnv(GameConfig(width=5, height=5), obs=None)
     state = _boxed_in_state()
     mask = np.asarray(env.action_mask(state))
-    assert not mask[0].any()
+    assert mask[0].all()  # trapped: the mask allows everything
     assert set(np.flatnonzero(mask[1])) == {UP, RIGHT}
 
     keys = jax.random.split(jax.random.key(0), 256)

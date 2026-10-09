@@ -128,7 +128,7 @@ class State(NamedTuple):
     # Equals the engine's neck->head "default move", used for invalid actions.
     last_move: jax.Array
     food: jax.Array  # bool[H, W]
-    hazard: jax.Array  # int8[H, W] number of stacked hazards on each cell
+    hazard: jax.Array  # int16[H, W] number of stacked hazards on each cell
     turn: jax.Array  # int32[] engine turn number (0 at reset)
     elim_cause: jax.Array  # int8[N] Cause code, 0 while alive
     elim_turn: jax.Array  # int32[N] engine "eliminatedOnTurn", 0 while alive
@@ -144,7 +144,10 @@ class TimeStep(NamedTuple):
     done: jax.Array  # bool[] game over (terminated) or truncated
     truncated: jax.Array  # bool[] ended by max_turns rather than by the rules
     alive: jax.Array  # bool[N] which agents are still in the game
-    action_mask: jax.Array  # bool[N, 4] moves not immediately fatal by static obstacles
+    action_mask: jax.Array  # bool[N, 4] moves not certainly fatal; never an all-False row
+    # Observation of the state reached by the transition. Only set by
+    # ``step_autoreset`` (where ``obs`` belongs to the next game when done).
+    final_obs: Any = None
 
 
 def empty_state(config: GameConfig, map_state: Any = ()) -> State:
@@ -158,7 +161,7 @@ def empty_state(config: GameConfig, map_state: Any = ()) -> State:
         alive=jnp.zeros((n,), bool),
         last_move=jnp.full((n,), UP, jnp.int8),
         food=jnp.zeros((h, w), bool),
-        hazard=jnp.zeros((h, w), jnp.int8),
+        hazard=jnp.zeros((h, w), jnp.int16),
         turn=jnp.zeros((), jnp.int32),
         elim_cause=jnp.zeros((n,), jnp.int8),
         elim_turn=jnp.zeros((n,), jnp.int32),

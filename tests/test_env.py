@@ -145,3 +145,37 @@ def test_constrictor_reset_has_no_food():
     env = BattlesnakeEnv(GameConfig(ruleset=Ruleset.CONSTRICTOR), obs=None)
     state, _ = env.reset(jax.random.key(0))
     assert not bool(state.food.any())
+
+
+def test_autoreset_keeps_final_obs():
+    config = GameConfig(max_turns=3)
+    env = BattlesnakeEnv(config)
+    state, _ = env.reset(jax.random.key(0))
+    step = jax.jit(env.step_autoreset)
+    for t in range(3):
+        actions = jnp.argmax(env.action_mask(state), axis=1)
+        prev = state
+        state, ts = step(jax.random.key(t), state, actions)
+    assert bool(ts.done) and bool(ts.truncated) and int(state.turn) == 0
+    # final_obs is the observation of the truncated (turn 3) state.
+    reached, _ = env.step(jax.random.key(2), prev, actions)
+    assert int(reached.turn) == 3
+    np.testing.assert_array_equal(ts.final_obs, env.observe(reached))
+    np.testing.assert_array_equal(ts.obs, env.observe(state))
+
+
+def test_huge_minimum_food_fills_the_board_without_crashing():
+    config = GameConfig(width=7, height=7, minimum_food=500)
+    env = BattlesnakeEnv(config, obs=None)
+    state, _ = env.reset(jax.random.key(0))
+    state, _ = jax.jit(env.step)(jax.random.key(1), state, jnp.array([UP, UP]))
+    assert int(state.food.sum()) > 30
+
+
+def test_more_than_16_snakes_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="at most 16"):
+        BattlesnakeEnv(GameConfig(width=19, height=19, num_snakes=17), obs=None).reset(
+            jax.random.key(0)
+        )

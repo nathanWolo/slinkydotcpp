@@ -32,14 +32,12 @@ def random_policy(key: jax.Array, state: State, env: BattlesnakeEnv) -> jax.Arra
 def random_legal_policy(key: jax.Array, state: State, env: BattlesnakeEnv) -> jax.Array:
     """Uniformly random over each snake's legal moves (``env.action_mask(state)``).
 
-    A snake whose mask row is all-False (it is dead, or every move is certain
-    death) picks uniformly over all 4 actions instead, so the result is always
-    a valid action id.
+    The mask never has an all-False row: dead snakes and snakes for which every
+    move is certain death get all-True rows, so they pick uniformly.
 
     Returns:
       int32[N] actions, one per snake.
     """
     mask = env.action_mask(state)  # bool[N, 4]
-    mask = jnp.where(jnp.any(mask, axis=-1, keepdims=True), mask, True)
     logits = jnp.where(mask, 0.0, -jnp.inf)
     return jax.random.categorical(key, logits, axis=-1).astype(jnp.int32)

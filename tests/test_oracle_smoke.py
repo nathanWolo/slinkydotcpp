@@ -184,7 +184,7 @@ def test_games_well_formed_and_chained(games):
     for g in per_game:
         cfg = g["config"]
         n = cfg["snakes"]
-        assert cfg["game_seed"] == cfg["seed"] + g["game"]
+        assert 0 < cfg["game_seed"] < 2**62  # a hash of (seed, game index)
         assert cfg["solo"] == (n == 1)
         init = g["initial"]
         assert init["turn"] == 0

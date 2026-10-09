@@ -22,6 +22,7 @@ from slinky.types import (
     NUM_ACTIONS,
     Cause,
     GameConfig,
+    Ruleset,
     State,
 )
 
@@ -85,6 +86,8 @@ def rules_step(state: State, actions: jax.Array, config: GameConfig) -> State:
     Returns the state after the engine's ``ruleset.Execute``. If the game was
     already over, the state is returned unchanged (as the engine does).
     """
+    if config.ruleset == Ruleset.ROYALE:
+        raise NotImplementedError("the royale ruleset's hazard stage is not implemented yet")
     alive0 = state.alive
     move, head = next_heads(state, actions, config)
     on_board = in_bounds(head, config)
@@ -101,7 +104,11 @@ def rules_step(state: State, actions: jax.Array, config: GameConfig) -> State:
     food_at_head = value_at(state.food, head, config)
     layers = value_at(state.hazard, head, config).astype(jnp.int32)
     hit = alive0 & (layers > 0) & ~food_at_head
-    damaged = jnp.clip(health - layers * config.hazard_damage_per_turn, 0, MAX_HEALTH)
+    # The engine clamps health to [0, 100] after each layer, so per-layer damage
+    # beyond +-100 and more than 101 layers change nothing; saturating both keeps
+    # the product far from int32 overflow.
+    damage = max(-MAX_HEALTH, min(MAX_HEALTH, config.hazard_damage_per_turn))
+    damaged = jnp.clip(health - jnp.minimum(layers, MAX_HEALTH + 1) * damage, 0, MAX_HEALTH)
     health = jnp.where(hit, damaged, health)
     hazard_elim = hit & (health <= 0)
     alive1 = alive0 & ~hazard_elim
@@ -175,25 +182,54 @@ def rules_step(state: State, actions: jax.Array, config: GameConfig) -> State:
     return jax.tree.map(lambda old, new: jnp.where(over, old, new), state, new_state)
 
 
-def blocked_cells(state: State) -> jax.Array:
+def _neighbours(head: jax.Array, config: GameConfig) -> jax.Array:
+    """int32[N, 4, 2] cells reached by each action (wrapped if the ruleset wraps)."""
+    nxt = head[:, None, :] + _DELTAS[None, :, :]
+    if config.ruleset.wrapped:
+        nxt = nxt % jnp.array([config.width, config.height], jnp.int32)
+    return nxt
+
+
+def certainly_starving(state: State, config: GameConfig) -> jax.Array:
+    """bool[N] living snakes that will be eliminated before collisions next turn.
+
+    A snake on 1 health dies of starvation (in the engine's first elimination
+    pass, before collisions are checked) unless it eats, or unless a healing
+    hazard (negative damage) restores it. Such a snake's body cannot block
+    anyone.
+    """
+    nxt = _neighbours(state.head, config).reshape(-1, 2)
+    rescue = value_at(state.food, nxt, config)
+    if config.hazard_damage_per_turn < 0:
+        rescue |= value_at(state.hazard, nxt, config) > 0
+    rescue = jnp.any(rescue.reshape(config.num_snakes, NUM_ACTIONS), axis=1)
+    return state.alive & (state.health <= 1) & ~rescue
+
+
+def blocked_cells(state: State, config: GameConfig) -> jax.Array:
     """bool[H, W] cells that will hold a body segment next turn whatever anyone does.
 
     A cell is freed by a tail pop when its countdown is 1; anything above that
     (including a stacked tail, countdown 2) is still occupied after moving.
+    Bodies of snakes that will certainly starve first don't count.
     """
-    return jnp.any((state.body > 1) & state.alive[:, None, None], axis=0)
+    solid = state.alive & ~certainly_starving(state, config)
+    return jnp.any((state.body > 1) & solid[:, None, None], axis=0)
 
 
 def action_mask(state: State, config: GameConfig) -> jax.Array:
     """bool[N, 4] moves that don't certainly die to a wall or a body next turn.
 
-    Ignores hazards, starvation and head-to-heads (which depend on the other
-    snakes' choices). Rows for dead snakes are all False; a living snake with
-    no safe move also gets an all-False row.
+    A move is masked out only if it leaves the board or enters a cell that
+    will hold a body segment whatever the other snakes do (tail rule
+    included). Hazards, starvation and head-to-heads are not considered.
+
+    Rows are never all-False, so masked softmaxes stay finite: dead snakes,
+    snakes certain to starve and snakes with no safe move get all-True rows
+    (every action is equally good, or equally fatal, for them).
     """
-    head = state.head[:, None, :] + _DELTAS[None, :, :]  # [N, 4, 2]
-    if config.ruleset.wrapped:
-        head = head % jnp.array([config.width, config.height], jnp.int32)
-    flat = head.reshape(-1, 2)
-    ok = in_bounds(flat, config) & ~value_at(blocked_cells(state), flat, config)
-    return ok.reshape(config.num_snakes, NUM_ACTIONS) & state.alive[:, None]
+    flat = _neighbours(state.head, config).reshape(-1, 2)
+    ok = in_bounds(flat, config) & ~value_at(blocked_cells(state, config), flat, config)
+    ok = ok.reshape(config.num_snakes, NUM_ACTIONS)
+    trivial = ~state.alive | certainly_starving(state, config) | ~jnp.any(ok, axis=1)
+    return ok | trivial[:, None]
