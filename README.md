@@ -58,8 +58,8 @@ states, ts = batch_reset(jax.random.split(key, 4096))
 | `GameConfig` | Static settings: `width`, `height`, `num_snakes`, `ruleset` (`standard`, `solo`, `wrapped`, `constrictor`, `wrapped_constrictor`), `map` (`standard`, `empty`), `food_spawn_chance`, `minimum_food`, `hazard_damage_per_turn`, `max_turns`. Defaults are the official 1v1 setup. |
 | `env.reset(key)` | Returns `(State, TimeStep)` at turn 0, with snakes placed and starting food. |
 | `env.step(key, state, actions)` | `actions` is `int[N]`: `0=up, 1=down, 2=left, 3=right`. Any other value is an invalid move, and the snake repeats its last move, as in the engine. |
-| `env.step_autoreset(...)` | Same as `step`, but a finished game is replaced by a new one. |
-| `TimeStep` | `obs[N, ...]`, `reward[N]`, `done`, `truncated`, `alive[N]`, `action_mask[N, 4]`. |
+| `env.step_autoreset(...)` | Same as `step`, but a finished game is replaced by a new one. `ts.final_obs` keeps the observation of the state the game ended in, for bootstrapping values on truncation. |
+| `TimeStep` | `obs[N, ...]`, `reward[N]`, `done`, `truncated`, `alive[N]`, `action_mask[N, 4]` (and `final_obs` from `step_autoreset`). |
 
 - **Rewards** (default `win_loss_reward`):
   - −1 on the turn a snake is eliminated;
@@ -77,10 +77,14 @@ states, ts = batch_reset(jax.random.split(key, 4096))
     opponent bodies, opponent body countdown, opponent health, own health and
     own length.
   - Pass `obs=` a function to use your own, or `None` to skip observations.
-- **Action mask:** marks moves that don't certainly hit a wall or a body next
-  turn. It applies the tail rule exactly: a tail square is open unless that
-  tail is stacked. It does not consider hazards, starvation or
-  head-to-heads, since those depend on other snakes' choices.
+- **Action mask:** masks out a move only if it certainly hits a wall or a
+  body next turn, whatever the other snakes do.
+  - It applies the tail rule exactly: a tail square is open unless that tail
+    is stacked.
+  - It ignores the bodies of snakes that are certain to starve first.
+  - It does not consider hazards, your own starvation or head-to-heads.
+  - **Rows are never all False.** Dead snakes, and snakes with no move that
+    can survive, get all-True rows, so masked softmaxes never produce NaNs.
 
 ## How it works
 
@@ -124,8 +128,18 @@ It is only used for testing; see its README. The tests use it in three ways:
   must follow the engine's rules, in both directions: engine states fit our
   rules, and our states are ones the engine could produce.
 
-`tests/test_rules.py` also has hand-written edge cases with explicit
-expected outcomes, each confirmed against the engine.
+Two more test files check the rules directly:
+
+- `tests/test_rules.py` has hand-written edge cases with explicit expected
+  outcomes, each confirmed against the engine.
+- `tests/test_fuzz_rules.py` fuzzes the rules against the engine with random
+  states that games rarely reach: tightly coiled and fully stacked bodies,
+  3- and 4-way head-ons with food on the square, stacked hazards with zero,
+  negative or very large damage, 1-wide and non-square boards, up to 16
+  snakes, and invalid moves.
+
+An independent review ran more than 300k fuzzed and rollout transitions
+through the engine and found no differences in the rules.
 
 Food positions are random, so games can't be replayed turn for turn. The
 random choices (start positions, food) follow the engine's *distributions*,
@@ -136,7 +150,22 @@ not Go's random-number stream.
 Run `python benchmarks/throughput.py` to measure steps per second (a step is
 one game advancing one turn) with a random policy that avoids certain death.
 
-BENCHMARK_TABLE
+Measured on a 4-core cloud CPU (no GPU) with jax 0.11.2, using a random
+policy that avoids certain death and `step_autoreset`. A step is one game
+advancing one turn, so multiply by the number of snakes for per-agent steps.
+
+| config | batch | steps/s, no obs | steps/s, egocentric obs |
+|---|--:|--:|--:|
+| 11×11 duel | 1 | 32k | 18k |
+| 11×11 duel | 1,024 | 381k | 99k |
+| 11×11 duel | 8,192 | 627k | 69k |
+| 11×11, 4 snakes | 8,192 | 420k | 29k |
+| 19×19, 4 snakes | 8,192 | 212k | 10k |
+
+Without observations the simulation is cheap: about 2–5 µs per game-step
+on CPU. Building float32 observation tensors (a `[21, 21, 13]` image per
+agent in a duel) then dominates, which is memory-bound on CPU. Accelerators
+should scale much better with batch size.
 
 ## Roadmap
 
