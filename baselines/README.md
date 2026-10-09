@@ -111,3 +111,8 @@ I did not inspect replays.
   - past checkpoints and other algorithms, via `play_match` or Elo/TrueSkill
     over a population;
   - PPO self-play on the same setup.
+
+The final network from this run is kept in
+[`checkpoints/dqn-duel-seed0/`](checkpoints/dqn-duel-seed0/) (2.6 MB) as a
+fixed opponent for benchmarks:
+`python baselines/dqn.py --eval-only baselines/checkpoints/dqn-duel-seed0`.
