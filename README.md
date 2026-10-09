@@ -20,7 +20,7 @@ algorithms.
 ## Quickstart
 
 ```bash
-uv venv && uv pip install -e . --group dev   # or: pip install -e .
+uv venv && uv pip install -e . --group dev   # or: pip install -e ".[rl]"
 ```
 
 ```python
@@ -85,6 +85,33 @@ states, ts = batch_reset(jax.random.split(key, 4096))
   - It does not consider hazards, your own starvation or head-to-heads.
   - **Rows are never all False.** Dead snakes, and snakes with no move that
     can survive, get all-True rows, so masked softmaxes never produce NaNs.
+
+## Evaluating policies
+
+`slinky.evaluate.play_match` plays two policies against each other over
+thousands of games at once and reports wins, draws and losses from the
+first policy's point of view, with a 95% confidence interval on the score
+(win = 1, draw = ½). Seats are rotated across games, so neither policy gets
+the better starting seat more often.
+
+```python
+from slinky.evaluate import greedy_from_q, play_match, random_legal
+
+result = play_match(env, greedy_from_q(q_fn), random_legal(env), key, num_games=1000)
+print(result.wins, result.draws, result.losses, result.score, "+/-", result.score_ci95)
+```
+
+A policy is a function `(key, state, timestep) -> int32[N]` for one game.
+`random_legal(env)` is the reference opponent: it picks uniformly among the
+moves that don't certainly die next turn.
+
+## Baselines
+
+[`baselines/`](baselines/) has single-file RL baselines trained by self-play.
+See [`baselines/README.md`](baselines/README.md) for results.
+
+- **DQN** (`baselines/dqn.py`): Double DQN with one shared network playing
+  both snakes in the 1v1 duel.
 
 ## How it works
 
@@ -176,6 +203,7 @@ should scale much better with batch size.
    - official API JSON (`/move` request) conversion, so a trained policy can
      play on the real Battlesnake servers.
 3. **RL baselines:**
+   - self-play DQN (done; see `baselines/`);
    - independent PPO with self-play;
    - population or league training;
    - search-based agents (MCTS/AlphaZero via `mctx`, adapted to
@@ -185,7 +213,8 @@ should scale much better with batch size.
 
 ```
 src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
-                  engine_json, policies
+                  engine_json, policies, evaluate (matches between policies)
+baselines/        RL baselines (self-play DQN)
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
 benchmarks/       throughput benchmark
