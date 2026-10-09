@@ -44,8 +44,8 @@ _Z95 = 1.959963984540054
 class MatchResult(NamedTuple):
     """Outcome counts of a match, from policy A's point of view.
 
-    ``truncated`` games (cut off by ``max_turns`` while two or more snakes were
-    alive) count as draws and are *also* counted in ``truncated``, so
+    ``truncated`` games (cut off by ``max_turns`` while A and at least one other
+    snake were alive) count as draws and are *also* counted in ``truncated``, so
     ``wins + draws + losses == num_games`` and ``truncated <= draws``.
     """
 
@@ -135,9 +135,15 @@ def _compiled_batch(
 
         remaining = jnp.sum(states.alive, axis=-1)  # [B]
         a_alive = jnp.take_along_axis(states.alive, seat[:, None], axis=1)[:, 0]
-        outcome = jnp.where(remaining == 1, jnp.where(a_alive, _WIN, _LOSS), _DRAW)  # 0 alive: draw
+        a_elim = jnp.take_along_axis(states.elim_turn, seat[:, None], axis=1)[:, 0]
         # Two or more alive means the game was cut off (max_turns), not decided.
-        return outcome.astype(jnp.int32), remaining >= 2, states.turn
+        cut_off = a_alive & (remaining >= 2)
+        # A died on the final turn together with everyone else (as win_loss_reward).
+        all_died = ~a_alive & (remaining == 0) & (a_elim == states.elim_turn.max(axis=-1))
+        outcome = jnp.where(
+            a_alive & (remaining == 1), _WIN, jnp.where(cut_off | all_died, _DRAW, _LOSS)
+        )
+        return outcome.astype(jnp.int32), cut_off, states.turn
 
     return jax.jit(run)
 
@@ -156,9 +162,11 @@ def play_match(
     Game ``g`` puts A in seat ``g % N`` and B in every other seat, so seats are
     balanced. A game ends when the rules end it or after ``max_turns`` turns; in
     the latter case (or if ``env.config.max_turns`` cuts it off first) it is a
-    draw and counted in ``truncated``. From A's seat, a win is being the only
-    snake alive, a draw is nobody alive (or truncation), and a loss is being
-    eliminated while another snake survives.
+    draw and counted in ``truncated``. From A's seat, as in ``win_loss_reward``:
+    a win is being the last snake standing; a draw is being eliminated on the
+    final turn together with every other snake (or truncation while still
+    alive); a loss is any other elimination. With more than two snakes, A can
+    lose even if the game is later truncated or ends with nobody alive.
 
     ``batch_size`` games run at once (the last batch is padded). If
     ``num_games < batch_size`` the batch shrinks to ``num_games`` to avoid

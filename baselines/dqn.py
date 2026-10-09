@@ -21,6 +21,7 @@ checkpoints::
     python baselines/dqn.py                                   # default run
     python baselines/dqn.py --total-env-steps 100000 --lr 5e-4
     python baselines/dqn.py --eval-only runs/dqn-20261009-120000
+    python baselines/dqn.py --resume runs/dqn-20261009-120000   # after an interruption
 
 An *env step* is one game advancing one turn. It gives one *agent-transition*
 per snake, so two in a duel.
@@ -100,6 +101,7 @@ class DQNConfig:
     log_every: int = 16_000  # env steps per jitted chunk (one log line)
     eval_every: int = 256_000  # env steps between evaluations (and checkpoints)
     eval_games: int = 1000  # greedy DQN vs random_legal
+    checkpoint_every: int = 128_000  # env steps between full checkpoints (for --resume)
     run_dir: str | None = None  # default: runs/dqn-<timestamp>
 
     def __post_init__(self) -> None:
@@ -107,9 +109,12 @@ class DQNConfig:
             raise ValueError("conv_channels and conv_strides must have the same length")
         if self.buffer_capacity < self.num_envs:
             raise ValueError("buffer_capacity must be at least num_envs")
+        if self.learning_starts > self.buffer_capacity // self.num_envs * self.num_envs:
+            # The buffer never fills that far, so learning would never start.
+            raise ValueError("learning_starts must not exceed the (rounded) buffer_capacity")
         positive = (
             "max_turns", "num_envs", "total_env_steps", "batch_size", "updates_per_step",
-            "target_update_period", "log_every", "eval_every",
+            "target_update_period", "log_every", "eval_every", "checkpoint_every",
         )  # fmt: skip
         for name in positive:
             if getattr(self, name) < 1:
@@ -569,6 +574,39 @@ def load_params(run_dir: str, cfg: DQNConfig | None = None) -> Params:
     return jax.tree.unflatten(treedef, leaves)
 
 
+def save_runner(run_dir: str, runner: RunnerState, agent_transitions: int) -> None:
+    """Write the whole training state (replay buffer included) to ``runner.npz`` atomically."""
+    runner = runner._replace(key=jax.random.key_data(runner.key))
+    leaves = {f"leaf{i}": np.asarray(x) for i, x in enumerate(jax.tree.leaves(runner))}
+    tmp = os.path.join(run_dir, "runner.tmp.npz")
+    np.savez(tmp, agent_transitions=agent_transitions, **leaves)
+    os.replace(tmp, os.path.join(run_dir, "runner.npz"))
+
+
+def load_runner(run_dir: str, template: RunnerState) -> tuple[RunnerState, int]:
+    """``(runner, agent_transitions)`` from ``runner.npz``, structured like ``template``."""
+    template = template._replace(key=jax.random.key_data(template.key))
+    refs, treedef = jax.tree.flatten(template)
+    with np.load(os.path.join(run_dir, "runner.npz")) as f:
+        leaves = [f[f"leaf{i}"] for i in range(len(refs))]
+        agent_transitions = int(f["agent_transitions"])
+    for leaf, ref in zip(leaves, refs, strict=True):
+        if leaf.shape != ref.shape or leaf.dtype != ref.dtype:
+            raise ValueError(f"runner.npz does not match the config: {leaf.shape} vs {ref.shape}")
+    runner = jax.tree.unflatten(treedef, [jnp.asarray(x) for x in leaves])
+    return runner._replace(key=jax.random.wrap_key_data(runner.key)), agent_transitions
+
+
+def _truncate_metrics(path: str, env_steps: int) -> None:
+    """Drop records logged after the checkpoint we resume from (they will be redone)."""
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        records = [line for line in f if json.loads(line)["env_steps"] <= env_steps]
+    with open(path, "w") as f:
+        f.writelines(records)
+
+
 def evaluate_run(run_dir: str, num_games: int, seed: int = 0) -> MatchResult:
     """Load ``run_dir``'s checkpoint and play it against ``random_legal``."""
     cfg = load_config(run_dir)
@@ -635,16 +673,29 @@ def format_record(r: dict[str, Any], total_steps: int, agent_total: int) -> str:
 # --- Main loop -----------------------------------------------------------------------
 
 
-def train(cfg: DQNConfig) -> tuple[str, Params]:
-    """Run a full training; returns ``(run_dir, final params)``."""
+def train(cfg: DQNConfig, resume: bool = False) -> tuple[str, Params]:
+    """Run a full training; returns ``(run_dir, final params)``.
+
+    With ``resume``, continue from ``run_dir/runner.npz`` (written every
+    ``checkpoint_every`` env steps) if it exists. Resuming is exact: the run
+    continues as if it had never stopped.
+    """
     run_dir = cfg.run_dir or os.path.join("runs", time.strftime("dqn-%Y%m%d-%H%M%S"))
     os.makedirs(run_dir, exist_ok=True)
     cfg = dataclasses.replace(cfg, run_dir=run_dir)
     save_config(run_dir, cfg)
+    metrics_path = os.path.join(run_dir, "metrics.jsonl")
 
     env, sim = make_envs(cfg)
-    key, k_init = jax.random.split(jax.random.key(cfg.seed))
-    runner = init_runner(cfg, sim, k_init)
+    k_eval, k_init = jax.random.split(jax.random.key(cfg.seed))
+    runner = jax.jit(init_runner, static_argnums=(0, 1))(cfg, sim, k_init)
+    agent_total = 0
+    if resume and os.path.exists(os.path.join(run_dir, "runner.npz")):
+        runner, agent_total = load_runner(run_dir, runner)
+        _truncate_metrics(metrics_path, int(runner.env_steps))
+        print(f"resuming from env step {int(runner.env_steps):,}")
+    elif os.path.exists(metrics_path):
+        os.remove(metrics_path)  # a fresh run in an old directory
 
     chunk_iters = max(cfg.log_every // cfg.num_envs, 1)
     chunk_steps = chunk_iters * cfg.num_envs
@@ -667,8 +718,6 @@ def train(cfg: DQNConfig) -> tuple[str, Params]:
     )
     print(f"compiled train_chunk in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    metrics_path = os.path.join(run_dir, "metrics.jsonl")
-    agent_total = 0
     start = time.perf_counter()
     with open(metrics_path, "a") as log:
 
@@ -676,7 +725,10 @@ def train(cfg: DQNConfig) -> tuple[str, Params]:
             log.write(json.dumps(record) + "\n")
             log.flush()
 
-        for chunk in range(num_chunks):
+        def crossed(every: int, steps: int) -> bool:
+            return steps // every > (steps - chunk_steps) // every
+
+        for chunk in range(int(runner.env_steps) // chunk_steps, num_chunks):
             t = time.perf_counter()
             runner, m = train_chunk(runner)
             m = jax.device_get(m)
@@ -690,12 +742,12 @@ def train(cfg: DQNConfig) -> tuple[str, Params]:
 
             steps = record["env_steps"]
             last = chunk == num_chunks - 1
-            if last or steps // cfg.eval_every > (steps - chunk_steps) // cfg.eval_every:
+            if last or crossed(cfg.eval_every, steps):
                 save_checkpoint(run_dir, runner.params)
                 if cfg.eval_games > 0:
-                    key, k_eval = jax.random.split(key)
                     t = time.perf_counter()
-                    r = evaluate_params(runner.params, cfg, env, k_eval, cfg.eval_games)
+                    k = jax.random.fold_in(k_eval, steps)
+                    r = evaluate_params(runner.params, cfg, env, k, cfg.eval_games)
                     seconds = time.perf_counter() - t
                     write(
                         {
@@ -707,6 +759,9 @@ def train(cfg: DQNConfig) -> tuple[str, Params]:
                         }
                     )
                     print(f"eval @ {steps:,} vs random_legal: {format_eval(r)} ({seconds:.0f}s)")
+            # After the eval, so an interrupted eval is redone on resume.
+            if last or crossed(cfg.checkpoint_every, steps):
+                save_runner(run_dir, runner, agent_total)
     print(f"done in {time.perf_counter() - start:.0f}s; checkpoint in {run_dir}")
     return run_dir, runner.params
 
@@ -730,6 +785,12 @@ def parse_args(argv: list[str] | None = None) -> tuple[DQNConfig, argparse.Names
         metavar="RUN_DIR",
         help="load RUN_DIR's checkpoint and play --eval-games games (with --seed) vs "
         "random_legal instead of training",
+    )
+    p.add_argument(
+        "--resume",
+        metavar="RUN_DIR",
+        help="continue an interrupted run from its last full checkpoint, with its saved "
+        "config (other flags are ignored)",
     )
     for f in dataclasses.fields(DQNConfig):
         default = f.default
@@ -758,6 +819,9 @@ def main(argv: list[str] | None = None) -> None:
         seconds = time.perf_counter() - t
         print(f"{args.eval_only} vs random_legal: {format_eval(r)} ({seconds:.0f}s)")
         print(json.dumps(r._asdict()))
+        return
+    if args.resume:
+        train(dataclasses.replace(load_config(args.resume), run_dir=args.resume), resume=True)
         return
     train(cfg)
 

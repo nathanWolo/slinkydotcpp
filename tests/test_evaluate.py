@@ -108,6 +108,24 @@ def test_max_turns_truncation_counts_as_draw():
     assert r.mean_turns == 3
 
 
+def test_eliminated_policy_loses_with_more_snakes():
+    # With 3 snakes the game goes on after A dies. A must score a loss even if the
+    # survivors are then cut off by max_turns, or all die later on the same turn.
+    env = BattlesnakeEnv(GameConfig(num_snakes=3), obs=None)
+
+    def left(key, state, ts):
+        return jnp.full((3,), LEFT, jnp.int32)
+
+    p = random_legal(env)
+    r = play_match(env, left, p, jax.random.key(12), 150, max_turns=15, batch_size=150)
+    check_consistent(r, 150)
+    assert r.truncated == 0  # A is dead by turn 15 in every game
+    assert r.losses >= 0.9 * 150
+    r = play_match(env, left, p, jax.random.key(13), 150, batch_size=150)
+    check_consistent(r, 150)
+    assert r.score < 0.1
+
+
 def test_padding_is_ignored():
     p = random_legal(ENV)
     r = play_match(ENV, p, p, jax.random.key(7), num_games=70, max_turns=2, batch_size=32)

@@ -206,6 +206,52 @@ def test_tiny_training_run_checkpoints_and_eval_only(tmp_path, capsys):
     assert result["wins"] + result["draws"] + result["losses"] == 8
 
 
+def test_resume_continues_exactly(tmp_path, monkeypatch):
+    def argv(run_dir):
+        return [
+            "--num-envs", "4", "--total-env-steps", "1600", "--log-every", "400",
+            "--checkpoint-every", "400", "--learning-starts", "200", "--batch-size", "8",
+            "--buffer-capacity", "600", "--conv-channels", "4", "--conv-strides", "2",
+            "--hidden", "16", "--eval-every", "1600", "--eval-games", "4", "--run-dir", run_dir,
+        ]  # fmt: skip
+
+    full_dir, cut_dir = str(tmp_path / "full"), str(tmp_path / "cut")
+    _, full = dqn.train(dqn.parse_args(argv(full_dir))[0])
+
+    # Interrupt the second run during its third chunk, after two full checkpoints.
+    calls = []
+    chunk_record = dqn.chunk_record
+
+    def interrupted(*args):
+        calls.append(None)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+        return chunk_record(*args)
+
+    monkeypatch.setattr(dqn, "chunk_record", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        dqn.train(dqn.parse_args(argv(cut_dir))[0])
+    monkeypatch.setattr(dqn, "chunk_record", chunk_record)
+    dqn.main(["--resume", cut_dir])
+
+    resumed = dqn.load_params(cut_dir)
+    for a, b in zip(jax.tree.leaves(resumed), jax.tree.leaves(full), strict=True):
+        np.testing.assert_array_equal(a, b)
+
+    def records(run_dir):
+        lines = Path(run_dir, "metrics.jsonl").read_text().splitlines()
+        drop = ("seconds", "elapsed", "updates_per_s", "env_steps_per_s")
+        return [{k: v for k, v in json.loads(x).items() if k not in drop} for x in lines]
+
+    assert records(cut_dir) == records(full_dir)  # no duplicated or missing records
+
+
+def test_learning_starts_must_fit_in_the_buffer():
+    with pytest.raises(ValueError, match="learning_starts"):
+        dqn.DQNConfig(buffer_capacity=10_000, num_envs=32)  # rounds down to 9,984
+    dqn.DQNConfig(buffer_capacity=10_016, num_envs=32)
+
+
 # --- (4) Action selection ---------------------------------------------------------
 
 
