@@ -10,3 +10,5 @@ build/
 tools/oracle/oracle
 tools/oracle/bin/
 .oracle-cache/
+# Training runs (checkpoints, metrics)
+runs/

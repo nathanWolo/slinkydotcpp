@@ -9,10 +9,17 @@ dependencies = [
     "numpy>=1.26",
 ]
 
+[project.optional-dependencies]
+# Reinforcement-learning baselines (baselines/).
+rl = [
+    "optax>=0.2",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    "optax>=0.2",
 ]
 
 [build-system]
