@@ -32,15 +32,18 @@ def win_loss_reward(prev: State, state: State, config: GameConfig) -> jax.Array:
     """Sparse zero-sum-style reward.
 
     * -1 on the turn a snake is eliminated,
-    * +1 to the last snake standing when the game ends (not in solo games),
+    * +1 to the last snake standing when the game ends,
     * 0 to snakes eliminated on the final turn if *nobody* survives (a draw).
+
+    In solo games there is no winner and no draw: dying is simply -1.
     """
     newly_dead = prev.alive & ~state.alive
+    if config.solo:
+        return jnp.where(newly_dead, -1.0, 0.0).astype(jnp.float32)
     over = rules.is_game_over(state.alive, config) & ~prev.done
     draw = over & ~jnp.any(state.alive)
     reward = jnp.where(newly_dead & ~draw, -1.0, 0.0)
-    if not config.solo:
-        reward = jnp.where(over & state.alive, 1.0, reward)
+    reward = jnp.where(over & state.alive, 1.0, reward)
     return reward.astype(jnp.float32)
 
 

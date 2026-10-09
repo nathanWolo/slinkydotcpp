@@ -55,7 +55,12 @@ Standard order, from `standard.go`, `standardRulesetStages`:
 
 1. **Game-over check** (runs *before* the moves are applied).
    - Standard: the game is over when **≤ 1** snakes remain.
-   - Solo: the game is over when **0** snakes remain.
+   - Solo: the game is over when **0** snakes remain. The CLI also uses the
+     solo check for any game with exactly 1 snake.
+   - If the game is over, the pipeline **stops here** and nothing else in
+     this list happens. The CLI still runs the map update and the turn
+     increment on that final call, so one extra "turn" can appear at the
+     end of a recorded game.
 2. **Move.** For each living snake: put the new head at the front, then
    **remove one segment from the tail**.
 3. **Starvation.** Every living snake loses 1 health.
@@ -76,10 +81,25 @@ The variants change the pipeline as follows:
 |---|---|
 | `standard` | The baseline above. |
 | `solo` | The game ends only when every snake is dead. |
-| `royale` | Standard rules plus a hazard map that shrinks the board (section 7). |
+| `royale` | Standard rules plus a final stage, after elimination, that clears the hazards and regenerates the shrinking safe zone for the next turn (section 7). |
 | `wrapped` | After moving, a head that went past an edge wraps to the opposite edge. Nobody goes out of bounds. |
 | `constrictor` | After elimination: **all food is removed**, health is reset to 100, and every snake grows by 1 every turn, so tails never move. |
 | `wrapped_constrictor` | Wrapped and constrictor combined. |
+
+Constrictor details, confirmed against the engine:
+
+- **At initialization.** The CLI runs the ruleset once at setup, with no
+  moves. In constrictor this removes the map's starting food.
+- **Food from the map.** The standard map still spawns food after every
+  turn, so constrictor states shown to snakes usually contain food.
+  - Eating it has no net effect: the snake is already at full health, and
+    the grow stage skips a snake whose tail is already stacked.
+  - The next rules step clears that food.
+- **Eliminated snakes.** The constrictor stages also apply to eliminated
+  snakes: their health is set to 100 and they get an extra tail segment.
+  This has no effect on play.
+- **First move.** Live snakes do not grow on their first move, because the
+  starting body is stacked. After that they grow by 1 every turn.
 
 ## 4. Health and food: consequences of the order
 
@@ -141,9 +161,11 @@ stopping at the first hit:
    - Lengths are compared **after feeding**. If both heads ate the same
      food, both grew by 1, so the comparison is unchanged.
 
-Because collision results are applied together, a snake that dies from a
-body collision this turn can still win a head-to-head against a shorter
-snake on the same turn. That shorter snake also dies.
+Because collision results are applied together, the order in which snakes
+are processed does not affect who dies. A snake that collides with a body
+still counts as an obstacle for other snakes on the same turn. (A snake
+cannot lose a head-to-head to a snake that hit a body, because both heads
+are on the same square, so both hit that body.)
 
 ### The tail rule (important for move generation)
 
@@ -205,13 +227,27 @@ This runs after the ruleset pipeline, on the board after eliminations.
 So new food never appears right next to a head, and you can never be
 surprised by food appearing in your next square.
 
+The map's random generator for turn `T` is seeded with `game_seed + T`. So
+two games whose seeds differ by `k` share their food rolls, offset by `k`
+turns. Keep this in mind when doing statistics on engine-generated games.
+
 ### Royale
 
 - The board uses standard food spawning.
 - Every `shrinkEveryNTurns` turns (CLI default 25; your request contains the
   real value), the safe zone shrinks by one row or column on a randomly
   chosen side.
-- Every square outside the safe zone is a hazard.
+  - The sequence of sides comes from a generator seeded with the game seed
+    alone, so it is fixed for the whole game.
+- Every square outside the safe zone is a hazard. The list contains no
+  duplicates.
+- **Both the `royale` ruleset and the `royale` map compute the hazards.**
+  - The ruleset does it as its last stage, so hazards for the next turn are
+    already present in the ruleset's output.
+  - The map does the same after the ruleset.
+  - The two produce identical lists.
+  - The `royale` ruleset clears all hazards every turn, so combining it
+    with another hazard map wipes that map's hazards.
 
 ### Other maps in the engine
 
