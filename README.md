@@ -111,7 +111,9 @@ moves that don't certainly die next turn.
 See [`baselines/README.md`](baselines/README.md) for results.
 
 - **DQN** (`baselines/dqn.py`): Double DQN with one shared network playing
-  both snakes in the 1v1 duel.
+  both snakes in the 1v1 duel. After 31 minutes of training on a 4-core CPU,
+  it scores 0.993 ± 0.002 against `random_legal` (99.2% wins over 5,000
+  games).
 
 ## How it works
 
