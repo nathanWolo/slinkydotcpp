@@ -3,15 +3,15 @@
 The module has three layers. Each can be used on its own, and all of them are
 pure, fixed-shape functions of one (unbatched) game that ``jit`` and ``vmap``.
 
-1. **Grid utilities** (:func:`neighbours`, :func:`flood_fill`,
-   :func:`distances`, :func:`arrival_times`, :func:`voronoi`). These are
-   breadth-first fills on ``[..., H, W]`` boolean grids, built from
-   pad-and-shift 4-neighbour dilation (``jnp.roll`` on wrapped boards), as in
-   ``maps.spawn_mask``. :func:`arrival_times` is the time-aware fill. It reads
-   the countdown grid (:func:`free_after`): a body cell with countdown ``k``
-   can be entered on the ``d``-th move from now iff ``k <= d``, because that
-   snake's tail has passed it by then (assuming it doesn't eat). Treating
-   bodies as permanent walls instead plays much worse.
+1. **Grid utilities** (:func:`neighbours`, :func:`distances`,
+   :func:`flood_fill`, :func:`free_after`, :func:`arrival_times`,
+   :func:`voronoi`). These are breadth-first fills on ``[..., H, W]`` boolean
+   grids, built from pad-and-shift 4-neighbour dilation (``jnp.roll`` on
+   wrapped boards), as in ``maps.spawn_mask``. :func:`arrival_times` is the
+   time-aware fill. It reads the countdown grid (:func:`free_after`): a body
+   cell with countdown ``k`` can be entered on the ``d``-th move from now iff
+   ``k <= d``, because that snake's tail has passed it by then (assuming it
+   doesn't eat). Treating bodies as permanent walls instead plays much worse.
 
 2. **A static evaluator**, :func:`evaluate`, which gives each snake a value in
    ``[-1, 1]``. Terminal states get the exact outcome, as in
@@ -19,34 +19,42 @@ pure, fixed-shape functions of one (unbatched) game that ``jit`` and ``vmap``.
    (:class:`Weights`, :func:`snake_terms`). The score is built from Voronoi
    territory (cells a snake reaches strictly first, with ties going to the
    longer snake), food inside that territory, length, a starvation term and a
-   trap term. In a duel the value is exactly antisymmetric. It costs two fills
-   per state, so it is cheap enough to call at every MCTS leaf.
+   trap term. In a duel the value is exactly antisymmetric. All snakes' fills
+   run together as a race on bit-packed rows (one ``uint32`` per board row),
+   which gives the same numbers as :func:`arrival_times` plus :func:`voronoi`
+   about 4x faster. An evaluation costs about 1.5 ``env.step``\\ s, so it is
+   cheap enough for every MCTS leaf.
 
 3. **A policy**, :func:`heuristic_policy` (and :func:`heuristic`, the cached
    ``evaluate.Policy``). Each snake ranks its candidate moves
    lexicographically:
 
    * tier 1, legal: ``env.action_mask``, minus moves that certainly starve;
-   * tier 2, no losing head-to-head: no opponent that would survive the
-     meeting can move to the same cell;
+   * tier 2, no losing head-to-head: no opponent reply kills the snake while
+     the opponent survives;
    * tier 3, fits: after the move, the time-aware reachable area holds the
      snake, or its own tail can be reached (trap avoidance);
-   * then a strategic score. In a duel this is a one-ply simultaneous-move
-     search over the exact rules. Every joint move ``(a, b)`` is applied with
-     ``rules.rules_step`` and evaluated, and move ``a`` scores
-     ``min_b M[a, b] + mean_weight * mean_b M[a, b]`` over the opponent's
-     legal replies ``b``. A mutual elimination is worth ``-contempt``, so the
-     snake trades heads only when it is otherwise losing. With other numbers
-     of snakes (solo, or 3 or more), a weighted sum of the per-move features
-     in :class:`MoveFeatures` is used instead.
+   * then a strategic score.
+
+   In a duel the tiers and the score come from a one-ply simultaneous-move
+   search over the exact rules (:func:`duel_scores`). All 16 joint moves
+   ``(a, b)`` are applied with ``rules.rules_step`` and evaluated, and move
+   ``a`` scores ``min_b M[a, b] + mean_weight * mean_b M[a, b]`` over the
+   opponent's legal replies ``b``. A mutual elimination is worth
+   ``-contempt``, so the snake trades heads only when it is otherwise losing.
+   This one matrix covers both kinds of head-to-head exactly: danger from an
+   equal-or-longer snake, and the chance to kill a shorter one. With other
+   numbers of snakes (solo, or three or more), the tiers and a weighted sum
+   come from per-move features instead (:func:`move_features`), with no
+   simulation.
 
    Exact ties are broken uniformly at random with the policy's key.
 
-The policy follows the "P1" spec of ``docs/research/battlesnake_heuristics.md``
-and was re-tuned on held-out games; see the docstring of :class:`Weights`.
-Only the duel on the ``standard`` ruleset was tuned. Wrapped boards and
-constrictor (where bodies never shrink) are handled in the fills. Hazards are
-not modelled outside the exact one-ply rules step.
+The duel policy is the "P1" design of
+``docs/research/battlesnake_heuristics.md``, with tiers added. Only the 11x11
+duel on the ``standard`` ruleset was tuned. Wrapped boards and constrictor
+(where bodies never shrink) are handled in the fills. Hazards only enter
+through the exact rules step of the duel search.
 """
 
 from __future__ import annotations
@@ -65,6 +73,8 @@ from slinky.types import ACTION_DELTAS, NUM_ACTIONS, GameConfig, State, TimeStep
 INF = 1000  # distance / arrival time of cells that are not reached
 _NEVER = 30_000  # countdown of cells that never free up (constrictor bodies)
 _DELTAS = jnp.array(ACTION_DELTAS, jnp.int32)  # [4, 2] (dx, dy)
+_ALL_BITS = 0xFFFFFFFF
+_MAX_PACKED_WIDTH = 32  # boards up to 32 wide use bit-packed rows
 
 Policy = Callable[[jax.Array, State, TimeStep], jax.Array]
 
@@ -176,11 +186,11 @@ def arrival_times(
 
     A cell can be entered on move ``d`` iff ``countdown <= d``. Use
     :func:`free_after` for ``countdown``: a body cell becomes free on the move
-    its tail leaves it, which also gives the tail rule (countdown 1 can be
-    entered on the next move, a stacked tail, countdown 2, cannot). Other
-    arguments are as in :func:`distances`. This is pessimistic about snakes
-    that eat (they keep their tail one move longer) and ignores where the
-    other snakes' heads go.
+    its tail leaves it. This also gives the tail rule: countdown 1 can be
+    entered on the next move, but a stacked tail (countdown 2) cannot. Other
+    arguments are as in :func:`distances`. Two simplifications: snakes that
+    eat keep their tail one move longer than assumed, and other snakes' future
+    head positions are ignored.
     """
     countdown = jnp.asarray(countdown)
     return distances(
@@ -219,6 +229,139 @@ def _at(grid: jax.Array, xy: jax.Array, config: GameConfig) -> jax.Array:
     return jnp.where(rules.in_bounds(xy, config), vals, jnp.zeros_like(vals))
 
 
+# --- The race: all snakes' time-aware fills at once -----------------------------------
+
+
+class FillStats(NamedTuple):
+    """Per-snake results of one simultaneous time-aware fill (all ``[N]``)."""
+
+    space: jax.Array  # int32: cells reachable within the fill (including the start cell)
+    territory: jax.Array  # int32: cells claimed (see :func:`voronoi`)
+    food_territory: jax.Array  # int32: food cells claimed
+    dist_food: jax.Array  # int32: arrival time of the nearest reachable food, INF if none
+    tail_reachable: jax.Array  # bool: the given tail cell is reachable
+
+
+def fill_stats(
+    countdown: jax.Array,
+    heads: jax.Array,
+    lengths: jax.Array,
+    food: jax.Array,
+    tails: jax.Array,
+    steps: int,
+    *,
+    wrapped: bool = False,
+    wait: bool = False,
+) -> FillStats:
+    """Space, Voronoi territory and food distance of ``N`` snakes from one time-aware race.
+
+    Equivalent to running :func:`arrival_times` from each row of ``heads``
+    (bool[N, H, W], all-False for dead snakes) and splitting the cells with
+    :func:`voronoi`. ``tails`` is int32[N, 2], the (x, y) cell whose
+    reachability is reported. Boards up to 32 wide use bit-packed rows, which
+    is several times faster on CPU; wider boards use the boolean grids.
+    """
+    if heads.shape[-1] > _MAX_PACKED_WIDTH:
+        return _fill_stats_grid(countdown, heads, lengths, food, tails, steps, wrapped, wait)
+    return _fill_stats_packed(countdown, heads, lengths, food, tails, steps, wrapped, wait)
+
+
+def _fill_stats_grid(countdown, heads, lengths, food, tails, steps, wrapped, wait) -> FillStats:
+    """Reference implementation of :func:`fill_stats` with arrival-time grids."""
+    arr = arrival_times(countdown, heads, steps, wrapped=wrapped, wait=wait)
+    claims = voronoi(arr, lengths)
+    reach = arr < INF
+    h, w = food.shape
+    tx, ty = jnp.clip(tails[:, 0], 0, w - 1), jnp.clip(tails[:, 1], 0, h - 1)
+    return FillStats(
+        space=jnp.sum(reach, axis=(1, 2), dtype=jnp.int32),
+        territory=jnp.sum(claims, axis=(1, 2), dtype=jnp.int32),
+        food_territory=jnp.sum(claims & food, axis=(1, 2), dtype=jnp.int32),
+        dist_food=jnp.min(jnp.where(food, arr, INF), axis=(1, 2)),
+        tail_reachable=reach[jnp.arange(reach.shape[0]), ty, tx],
+    )
+
+
+def _pack(grid: jax.Array) -> jax.Array:
+    """uint32[..., H]: each row of a bool[..., H, W] grid as a bit mask (bit x is column x)."""
+    bits = jnp.left_shift(jnp.uint32(1), jnp.arange(grid.shape[-1], dtype=jnp.uint32))
+    return jnp.sum(jnp.where(grid, bits, jnp.uint32(0)), axis=-1, dtype=jnp.uint32)
+
+
+def _packed_neighbours(rows: jax.Array, width: int, wrapped: bool) -> jax.Array:
+    """:func:`neighbours` on bit-packed rows uint32[..., H]."""
+    full = jnp.uint32((1 << width) - 1)
+    if wrapped:
+        left = (rows << 1) | (rows >> (width - 1))
+        right = (rows >> 1) | (rows << (width - 1))
+        return ((left | right) & full) | jnp.roll(rows, 1, axis=-1) | jnp.roll(rows, -1, axis=-1)
+    zero = jnp.zeros_like(rows[..., :1])
+    up = jnp.concatenate([zero, rows[..., :-1]], axis=-1)
+    down = jnp.concatenate([rows[..., 1:], zero], axis=-1)
+    return (((rows << 1) | (rows >> 1)) & full) | up | down
+
+
+def _fill_stats_packed(countdown, heads, lengths, food, tails, steps, wrapped, wait) -> FillStats:
+    """:func:`fill_stats` on bit-packed rows: one uint32 per board row and snake.
+
+    Each step, every snake's new cells are ``neighbours(frontier) & ~visited &
+    open``, where ``open`` is ``countdown <= d``. A new cell that nobody reached
+    earlier is claimed by the snake reaching it, unless another snake that is
+    at least as long reaches it on the same step.
+    """
+    n, h, w = heads.shape
+    alive = jnp.any(heads, axis=(1, 2))
+
+    def any_snake(rows: jax.Array) -> jax.Array:  # [N, H] -> [N, H], OR over snakes, broadcast
+        merged = functools.reduce(jnp.bitwise_or, [rows[j] for j in range(n)])
+        return jnp.broadcast_to(merged, (n, h))
+
+    # beats[i, j]: snake j takes a cell from snake i when both reach it on the same step.
+    beats = ~jnp.eye(n, dtype=bool) & alive[None, :] & (lengths[None, :] >= lengths[:, None])
+    beat_masks = jnp.where(beats, jnp.uint32(_ALL_BITS), jnp.uint32(0))
+
+    def claim(fresh: jax.Array) -> jax.Array:
+        beaten = functools.reduce(
+            jnp.bitwise_or, [fresh[j][None] & beat_masks[:, j, None] for j in range(n)]
+        )
+        return fresh & ~beaten
+
+    seeds = _pack(heads)
+    food_rows = jnp.broadcast_to(_pack(food), (n, h))
+    d_all = jnp.arange(1, steps + 1)
+    # The open cells for each step, precomputed, broadcast to every snake. Pre-broadcasting
+    # keeps broadcasts out of the loop body, which is noticeably faster on CPU.
+    open_rows = jnp.broadcast_to(_pack(countdown[None] <= d_all[:, None, None])[:, None], (steps, n, h))
+    dist0 = jnp.where(jnp.any((seeds & food_rows) != 0, axis=-1), 0, INF)
+
+    def step(carry, x):
+        d, open_d = x
+        visited, frontier, claimed, reached, dist_food = carry
+        grow_from = visited if wait else frontier
+        new = _packed_neighbours(grow_from, w, wrapped) & ~visited & open_d
+        claimed = claimed | claim(new & ~reached)
+        hit = jnp.any((new & food_rows) != 0, axis=-1)
+        dist_food = jnp.where((dist_food == INF) & hit, d, dist_food)
+        return (visited | new, new, claimed, reached | any_snake(new), dist_food), None
+
+    init = (seeds, seeds, claim(seeds), any_snake(seeds), dist0)
+    (visited, _, claimed, _, dist_food), _ = jax.lax.scan(step, init, (d_all, open_rows))
+
+    def count(rows: jax.Array) -> jax.Array:
+        return jnp.sum(jax.lax.population_count(rows), axis=-1, dtype=jnp.int32)
+
+    tx = jnp.clip(tails[:, 0], 0, w - 1).astype(jnp.uint32)
+    ty = jnp.clip(tails[:, 1], 0, h - 1)
+    tail_row = jnp.take_along_axis(visited, ty[:, None], axis=1)[:, 0]
+    return FillStats(
+        space=count(visited),
+        territory=count(claimed),
+        food_territory=count(claimed & food_rows),
+        dist_food=dist_food.astype(jnp.int32),
+        tail_reachable=((tail_row >> tx) & 1) == 1,
+    )
+
+
 # --- Static evaluator ----------------------------------------------------------------
 
 
@@ -242,6 +385,7 @@ class Weights(NamedTuple):
     * ``greedy_*``: the weighted sum used when the game is not a duel (see
       :func:`greedy_scores`).
     * ``fill_steps``: length of every flood fill; ``None`` means ``H + W``.
+    * ``fill_wait``: the fills' ``wait`` flag (see :func:`distances`).
 
     The defaults come from ``docs/research/battlesnake_heuristics.md`` (fitted
     on 46.5k sampled states, then hand-tuned), followed by a held-out tuning
@@ -263,6 +407,7 @@ class Weights(NamedTuple):
     greedy_space: float = 0.25
     greedy_kill: float = 0.5
     fill_steps: int | None = None
+    fill_wait: bool = False
 
 
 DEFAULT_WEIGHTS = Weights()
@@ -292,6 +437,7 @@ class SnakeTerms(NamedTuple):
     """Per-snake evaluator terms (all ``[N]``; meaningless for dead snakes)."""
 
     space: jax.Array  # int32: cells reachable by the time-aware fill (including the head)
+    tail_reachable: jax.Array  # bool: the fill reaches the snake's own tail cell
     territory: jax.Array  # float32: cells claimed / (H * W)
     food_territory: jax.Array  # float32: food claimed / max(1, food on the board)
     dist_food: jax.Array  # int32: moves to the nearest reachable food, INF if none
@@ -300,22 +446,32 @@ class SnakeTerms(NamedTuple):
     score: jax.Array  # float32: the weighted sum (see :class:`Weights`)
 
 
+def tail_cells(state: State, config: GameConfig) -> jax.Array:
+    """int32[N, 2] each snake's tail (x, y): its occupied cell with the smallest countdown."""
+    body = state.body.reshape(config.num_snakes, -1)
+    idx = jnp.argmin(jnp.where(body > 0, body, jnp.iinfo(body.dtype).max), axis=1)
+    return jnp.stack([idx % config.width, idx // config.width], axis=1).astype(jnp.int32)
+
+
 def snake_terms(state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS) -> SnakeTerms:
-    """The evaluator's terms for every snake, from one time-aware fill per snake."""
+    """The evaluator's terms for every snake, from one time-aware race of all snakes."""
     h, w = config.height, config.width
-    tf = free_after(state, config)
     heads = _cells(state.head, config) & state.alive[:, None, None]
-    arr = arrival_times(tf, heads, _fill_steps(config, weights), wrapped=config.ruleset.wrapped)
-    claims = voronoi(arr, state.length)
-    food = state.food
-    reach = arr < INF
-    space = jnp.sum(reach, axis=(1, 2))
-    territory = jnp.sum(claims, axis=(1, 2)) / (h * w)
-    food_territory = jnp.sum(claims & food, axis=(1, 2)) / jnp.maximum(1, jnp.sum(food))
-    dist_food = jnp.min(jnp.where(food, arr, INF), axis=(1, 2))
-    hun = hunger(state.health, dist_food, space)
+    stats = fill_stats(
+        free_after(state, config),
+        heads,
+        state.length,
+        state.food,
+        tail_cells(state, config),
+        _fill_steps(config, weights),
+        wrapped=config.ruleset.wrapped,
+        wait=weights.fill_wait,
+    )
+    territory = stats.territory / (h * w)
+    food_territory = stats.food_territory / jnp.maximum(1, jnp.sum(state.food))
+    hun = hunger(state.health, stats.dist_food, stats.space)
     length = state.length.astype(jnp.float32)
-    short = jnp.clip(1.0 - space / jnp.maximum(length, 1.0), 0.0, 1.0)
+    short = jnp.clip(1.0 - stats.space / jnp.maximum(length, 1.0), 0.0, 1.0)
     score = (
         weights.territory * territory
         + weights.food_territory * food_territory
@@ -324,12 +480,13 @@ def snake_terms(state: State, config: GameConfig, weights: Weights = DEFAULT_WEI
         - weights.shortfall * short
     )
     return SnakeTerms(
-        space=space,
+        space=stats.space,
+        tail_reachable=stats.tail_reachable,
         territory=territory.astype(jnp.float32),
         food_territory=food_territory.astype(jnp.float32),
-        dist_food=dist_food,
+        dist_food=stats.dist_food,
         hunger=hun,
-        shortfall=short,
+        shortfall=short.astype(jnp.float32),
         score=score.astype(jnp.float32),
     )
 
@@ -351,6 +508,21 @@ def terminal_values(state: State, config: GameConfig, draw_value: float = 0.0) -
     last = state.elim_turn == jnp.max(state.elim_turn)
     draw = over & ~jnp.any(alive) & last
     return jnp.where(draw, draw_value, value).astype(jnp.float32)
+
+
+def _values(
+    state: State, config: GameConfig, terms: SnakeTerms, weights: Weights, draw_value: float
+) -> jax.Array:
+    """:func:`evaluate` given precomputed :func:`snake_terms`."""
+    alive = state.alive
+    others = ~jnp.eye(config.num_snakes, dtype=bool) & alive[None, :]
+    best_other = jnp.max(jnp.where(others, terms.score[None, :], -jnp.inf), axis=1)
+    solo_z = -(weights.hunger * terms.hunger + weights.shortfall * terms.shortfall)
+    z = jnp.where(jnp.any(others, axis=1), terms.score - best_other, solo_z)
+    value = jnp.clip(jnp.tanh(weights.sharpness * z), -0.99, 0.99)
+    value = jnp.where(alive, value, -1.0)
+    over = rules.is_game_over(alive, config)
+    return jnp.where(over, terminal_values(state, config, draw_value), value).astype(jnp.float32)
 
 
 def evaluate(
@@ -383,19 +555,10 @@ def evaluate(
     * shortfall: reachable area smaller than the snake.
     """
     terms = snake_terms(state, config, weights)
-    alive = state.alive
-    n = config.num_snakes
-    others = ~jnp.eye(n, dtype=bool) & alive[None, :]
-    best_other = jnp.max(jnp.where(others, terms.score[None, :], -jnp.inf), axis=1)
-    solo_z = -(weights.hunger * terms.hunger + weights.shortfall * terms.shortfall)
-    z = jnp.where(jnp.any(others, axis=1), terms.score - best_other, solo_z)
-    value = jnp.clip(jnp.tanh(weights.sharpness * z), -0.99, 0.99)
-    value = jnp.where(alive, value, -1.0)
-    over = rules.is_game_over(alive, config)
-    return jnp.where(over, terminal_values(state, config, draw_value), value).astype(jnp.float32)
+    return _values(state, config, terms, weights, draw_value)
 
 
-# --- Per-move features -----------------------------------------------------------------
+# --- Per-move features (any number of snakes) -------------------------------------------
 
 
 class MoveFeatures(NamedTuple):
@@ -425,6 +588,13 @@ def next_cells(state: State, config: GameConfig) -> jax.Array:
     return nxt
 
 
+def legal_moves(state: State, config: GameConfig) -> jax.Array:
+    """bool[N, 4] ``rules.action_mask`` minus moves that certainly starve (health 1, no food)."""
+    eat = _at(state.food, next_cells(state, config).reshape(-1, 2), config)
+    starves = (state.health <= 1)[:, None] & ~eat.reshape(config.num_snakes, NUM_ACTIONS)
+    return rules.action_mask(state, config) & ~starves & state.alive[:, None]
+
+
 def move_features(
     state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS
 ) -> MoveFeatures:
@@ -433,22 +603,22 @@ def move_features(
     Each snake's field after move ``a`` is a time-aware fill from the cell moved
     to, starting at move 1. Opponents' fields start at their heads at move 0,
     so both run on one clock, which models the simultaneous move. Territory is
-    the Voronoi split between the two.
+    the Voronoi split between the two. This costs ``5 N`` fills on boolean
+    grids, so it is several times slower than :func:`evaluate`.
     """
     n, h, w = config.num_snakes, config.height, config.width
     k = _fill_steps(config, weights)
-    wrapped = config.ruleset.wrapped
+    wrapped, wait = config.ruleset.wrapped, weights.fill_wait
     alive, length = state.alive, state.length
     tf = free_after(state, config)
     nxt = next_cells(state, config)  # [N, 4, 2]
     flat = nxt.reshape(-1, 2)
     eat = _at(state.food, flat, config).reshape(n, NUM_ACTIONS)
     mask = rules.action_mask(state, config)
-    starves = (state.health <= 1)[:, None] & ~eat
-    legal = mask & ~starves & alive[:, None]
 
     # Opponents' fields from their heads (move 0), merged into one per snake.
-    base = arrival_times(tf, _cells(state.head, config) & alive[:, None, None], k, wrapped=wrapped)
+    heads = _cells(state.head, config) & alive[:, None, None]
+    base = arrival_times(tf, heads, k, wrapped=wrapped, wait=wait)
     others = ~jnp.eye(n, dtype=bool) & alive[None, :]  # [i, j]
     opp = jnp.where(others[:, :, None, None], base[None], INF)  # [i, j, H, W]
     opp_first = jnp.min(opp, axis=1)  # [N, H, W]
@@ -457,7 +627,7 @@ def move_features(
 
     # My field after each move (move 1 onward); illegal moves get an empty field.
     seeds = _cells(nxt, config) & (mask & alive[:, None])[:, :, None, None]
-    mine = arrival_times(tf, seeds, k + 1, start=1, wrapped=wrapped)  # [N, 4, H, W]
+    mine = arrival_times(tf, seeds, k + 1, start=1, wrapped=wrapped, wait=wait)  # [N, 4, H, W]
     reach = mine < INF
     me_len = length[:, None, None, None]
     b, lb = opp_first[:, None], opp_len[:, None]
@@ -466,15 +636,15 @@ def move_features(
     food = state.food
     n_food = jnp.maximum(1, jnp.sum(food))
     territory = (jnp.sum(claim, axis=(2, 3)) - jnp.sum(lost, axis=(2, 3))) / (h * w)
-    food_territory = (jnp.sum(claim & food, axis=(2, 3)) - jnp.sum(lost & food, axis=(2, 3))) / n_food
-    space = jnp.sum(reach, axis=(2, 3))
+    food_territory = (
+        jnp.sum(claim & food, axis=(2, 3)) - jnp.sum(lost & food, axis=(2, 3))
+    ) / n_food
+    space = jnp.sum(reach, axis=(2, 3), dtype=jnp.int32)
     dist_food = jnp.min(jnp.where(food, mine, INF), axis=(2, 3))
 
-    # Own tail: the occupied cell with the smallest countdown.
-    body = state.body.reshape(n, -1)
-    tail = jnp.argmin(jnp.where(body > 0, body, jnp.iinfo(body.dtype).max), axis=1)
-    tail_ok = jnp.take_along_axis(reach.reshape(n, NUM_ACTIONS, -1), tail[:, None, None], axis=2)
-    fits = tail_ok[..., 0] | (space >= length[:, None] + eat)
+    tail = tail_cells(state, config)  # [N, 2]
+    tail_ok = reach[jnp.arange(n), :, tail[:, 1], tail[:, 0]]  # [N, 4]
+    fits = tail_ok | (space >= length[:, None] + eat)
 
     # Head-to-heads: which opponents can move to each of my cells next turn.
     can = _at(base == 1, flat, config).reshape(n, n, NUM_ACTIONS)  # [j, i, a]
@@ -486,9 +656,8 @@ def move_features(
     n_moves = jnp.maximum(1, jnp.sum(base == 1, axis=(1, 2)))  # [j]
     kill_chance = jnp.sum(jnp.where(can & (lj < li), 1.0 / n_moves[None, None, :], 0.0), axis=2)
 
-    hun = hunger(state.health[:, None], dist_food, space)
     return MoveFeatures(
-        legal=legal,
+        legal=legal_moves(state, config),
         eat=eat,
         space=space,
         fits=fits,
@@ -498,14 +667,12 @@ def move_features(
         territory=territory.astype(jnp.float32),
         food_territory=food_territory.astype(jnp.float32),
         dist_food=dist_food,
-        hunger=hun,
+        hunger=hunger(state.health[:, None], dist_food, space),
     )
 
 
-def move_tiers(features: MoveFeatures) -> jax.Array:
-    """int32[N, 4] lexicographic safety tier: 4 * legal + 2 * (no losing h2h) + fits."""
-    f = features
-    return 4 * f.legal.astype(jnp.int32) + 2 * (~f.h2h_loss).astype(jnp.int32) + f.fits
+def _tiers(legal: jax.Array, safe: jax.Array, fits: jax.Array) -> jax.Array:
+    return 4 * legal.astype(jnp.int32) + 2 * safe.astype(jnp.int32) + fits.astype(jnp.int32)
 
 
 def greedy_scores(
@@ -516,8 +683,7 @@ def greedy_scores(
     ``territory + food territory - hunger * distance to food + eating
     (more when hungry) + space / length (capped at 2) + kill chance``,
     weighted by the ``greedy_*`` fields of :class:`Weights`. This is the "P0"
-    snake of the research note. It is the policy's fallback when the game is
-    not a duel.
+    snake of the research note, used when the game is not a duel.
     """
     f, wt = features, weights
     dist = jnp.where(f.dist_food < INF, f.dist_food, 30).astype(jnp.float32)
@@ -532,6 +698,40 @@ def greedy_scores(
     ).astype(jnp.float32)
 
 
+def feature_scores(
+    state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS
+) -> tuple[jax.Array, jax.Array]:
+    """(tier int32[N, 4], score float32[N, 4]) from :func:`move_features` (any number of snakes).
+
+    The tier is ``4 * legal + 2 * (no losing head-to-head) + fits``.
+    """
+    f = move_features(state, config, weights)
+    return _tiers(f.legal, ~f.h2h_loss, f.fits), greedy_scores(f, state, weights)
+
+
+# --- One-ply duel search ------------------------------------------------------------------
+
+
+def _joint_outcomes(
+    state: State, config: GameConfig, weights: Weights
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """(value, alive, fits), each ``[4, 4, 2]`` = ``[action 0, action 1, snake]``."""
+    if config.num_snakes != 2:
+        raise ValueError("the joint-move search is for duels (num_snakes == 2)")
+    a = jnp.arange(NUM_ACTIONS)
+    acts = jnp.stack(jnp.meshgrid(a, a, indexing="ij"), axis=-1).reshape(-1, 2)
+
+    def outcome(joint: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        nxt = rules.rules_step(state, joint, config)
+        terms = snake_terms(nxt, config, weights)
+        value = _values(nxt, config, terms, weights, -weights.contempt)
+        fits = terms.tail_reachable | (terms.space >= nxt.length)
+        return value, nxt.alive, fits
+
+    shape = (NUM_ACTIONS, NUM_ACTIONS, 2)
+    return tuple(x.reshape(shape) for x in jax.vmap(outcome)(acts))
+
+
 def joint_values(
     state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS
 ) -> jax.Array:
@@ -540,37 +740,60 @@ def joint_values(
     Each joint move is applied with the exact ``rules.rules_step`` (no food
     spawn) and scored by :func:`evaluate`, with a draw worth ``-contempt``.
     """
-    if config.num_snakes != 2:
-        raise ValueError("joint_values is for duels (num_snakes == 2)")
-    a = jnp.arange(NUM_ACTIONS)
-    acts = jnp.stack(jnp.meshgrid(a, a, indexing="ij"), axis=-1).reshape(-1, 2)
-
-    def value(joint: jax.Array) -> jax.Array:
-        nxt = rules.rules_step(state, joint, config)
-        return evaluate(nxt, config, weights, draw_value=-weights.contempt)
-
-    return jax.vmap(value)(acts).reshape(NUM_ACTIONS, NUM_ACTIONS, 2)
+    return _joint_outcomes(state, config, weights)[0]
 
 
-def lookahead_scores(
+def duel_scores(
     state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS
-) -> jax.Array:
-    """float32[2, 4] one-ply simultaneous-move score of each snake's moves (duel).
+) -> tuple[jax.Array, jax.Array]:
+    """(tier int32[2, 4], score float32[2, 4]) from the one-ply simultaneous-move search.
 
-    ``min_b M[a, b] + mean_weight * mean_b M[a, b]``, where ``M`` is
-    :func:`joint_values` from the snake's own point of view and ``b`` ranges
-    over the opponent's moves allowed by ``rules.action_mask``.
+    For snake ``i`` and its move ``a``, with ``b`` ranging over the opponent's
+    replies allowed by ``rules.action_mask``:
+
+    * score: ``min_b M[a, b] + mean_weight * mean_b M[a, b]``, where ``M`` is
+      :func:`joint_values` from snake ``i``'s point of view;
+    * tier: ``4 * legal + 2 * safe + fits``. ``safe`` means no reply ``b``
+      leaves ``i`` dead and the opponent alive. That covers a longer snake's
+      head, and also an opponent's tail that stays put because it eats.
+      ``fits`` means that after every reply ``b`` that ``i`` survives, its
+      reachable area holds it or reaches its tail.
     """
-    vals = joint_values(state, config, weights)
+    value, alive, fits = _joint_outcomes(state, config, weights)
     mask = rules.action_mask(state, config)
-    out = []
+    legal = legal_moves(state, config)
+    tiers, scores = [], []
     for i in range(2):
-        m = vals[:, :, 0] if i == 0 else vals[:, :, 1].T  # [own move, opponent move]
+
+        def own(x: jax.Array, snake: int, i: int = i) -> jax.Array:
+            """[own move, opponent move] view of ``x[..., snake]`` for seat ``i``."""
+            return x[:, :, snake] if i == 0 else x[:, :, snake].T
+
+        m = own(value, i)
         replies = mask[1 - i][None, :]
+        me_alive, op_alive = own(alive, i), own(alive, 1 - i)
+        safe = ~jnp.any(replies & ~me_alive & op_alive, axis=1)
+        fit = jnp.all(~replies | ~me_alive | own(fits, i), axis=1)
         worst = jnp.min(jnp.where(replies, m, jnp.inf), axis=1)
         mean = jnp.sum(jnp.where(replies, m, 0.0), axis=1) / jnp.sum(replies)
-        out.append(worst + weights.mean_weight * mean)
-    return jnp.stack(out)
+        tiers.append(_tiers(legal[i], safe, fit))
+        scores.append(worst + weights.mean_weight * mean)
+    return jnp.stack(tiers), jnp.stack(scores)
+
+
+# --- Policy ------------------------------------------------------------------------------
+
+
+def move_scores(
+    state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS
+) -> tuple[jax.Array, jax.Array]:
+    """(tier int32[N, 4], score float32[N, 4]) that :func:`heuristic_policy` ranks by.
+
+    Duels use :func:`duel_scores`; other games use :func:`feature_scores`.
+    """
+    if config.num_snakes == 2:
+        return duel_scores(state, config, weights)
+    return feature_scores(state, config, weights)
 
 
 def _lexicographic_choice(key: jax.Array, tier: jax.Array, score: jax.Array) -> jax.Array:
@@ -581,31 +804,15 @@ def _lexicographic_choice(key: jax.Array, tier: jax.Array, score: jax.Array) -> 
     return jax.random.categorical(key, jnp.where(ties, 0.0, -jnp.inf), axis=-1).astype(jnp.int32)
 
 
-def move_scores(
-    state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS
-) -> tuple[jax.Array, jax.Array]:
-    """(tier int32[N, 4], score float32[N, 4]) that :func:`heuristic_policy` ranks by.
-
-    The duel uses :func:`lookahead_scores`; other games use :func:`greedy_scores`.
-    """
-    features = move_features(state, config, weights)
-    tier = move_tiers(features)
-    if config.num_snakes == 2:
-        score = lookahead_scores(state, config, weights)
-    else:
-        score = greedy_scores(features, state, weights)
-    return tier, score
-
-
 def heuristic_policy(
     key: jax.Array, state: State, env: BattlesnakeEnv, weights: Weights = DEFAULT_WEIGHTS
 ) -> jax.Array:
     """int32[N] the heuristic snake's move for every snake, each from its own point of view.
 
-    Moves are ranked by safety tier (:func:`move_tiers`), then by strategic
-    score (:func:`move_scores`), and exact ties are broken at random with
-    ``key``. Only ``env.config`` is used (observations are ignored), so
-    close over ``env`` rather than passing it through ``jit``/``vmap``.
+    Moves are ranked by safety tier, then by strategic score
+    (:func:`move_scores`). Exact ties are broken at random with ``key``. Only
+    ``env.config`` is used (observations are ignored), so close over ``env``
+    rather than passing it through ``jit``/``vmap``.
     """
     tier, score = move_scores(state, env.config, weights)
     return _lexicographic_choice(key, tier, score)
