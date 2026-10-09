@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+# Built Go oracle binary and generated test data
+tools/oracle/oracle
+tools/oracle/bin/
+.oracle-cache/
