@@ -43,8 +43,9 @@ simulation grows only slowly with ``M`` (cache misses, deeper descents).
    here; a truncated game is 0 for every living snake). Otherwise
    optional rollouts (``rollout_steps`` turns of ``rollout_policy``) and then
    :func:`slinky.heuristic.evaluate` (``leaf="heuristic"``, in ``[-0.99,
-   0.99]`` so exact outcomes always dominate) or 0 for living snakes
-   (``leaf="none"``).
+   0.99]`` so exact outcomes always dominate), 0 for living snakes
+   (``leaf="none"``) or a user-supplied evaluator, such as a value network
+   (``leaf="network"``; see *AlphaZero* below).
 4. *Backup* of the per-player value vector ``v[N]`` to every node on the path,
    one scatter-add per statistic. Each player's statistics use its own value.
 
@@ -80,12 +81,51 @@ usual UCB1 meaning.
   regret, where ``Q(b)`` is the joint table's mean for ``b`` against the other
   players' sampled moves. RM empirically converges to a Nash equilibrium
   (Lisy et al. 2013); DUCT need not.
+* ``"puct"``, decoupled PUCT: AlphaZero's rule, applied by each player to its
+  own moves. Player ``p`` takes ``argmax_a q01 + c_puct * P(a) * sqrt(max(N,
+  1)) / (1 + n_a) + tie_noise * U(0, 1)`` over its legal moves, where ``P`` is
+  its prior at the node (``Tree.prior``) and ``N`` its visits there. An
+  unvisited move's ``q01`` is the node's own stored value minus
+  ``fpu_reduction`` (first-play urgency, as in Leela Zero and KataGo), mapped
+  to ``[0, 1]``. There is no unvisited-first rule: the prior decides which
+  moves are tried, so a move with a small prior may get no visit at all.
 
 **Final move** (``final``). ``"max"`` (default) plays each player's most
-visited move (DUCT) or the largest average-strategy move (RM), breaking ties
-by mean value. ``"sample"`` draws from the visit distribution (DUCT) or the
-average strategy (RM), which is what the convergence results are about.
+visited move (DUCT, PUCT) or the largest average-strategy move (RM), breaking
+ties by mean value. ``"sample"`` draws from the visit distribution (DUCT,
+PUCT) or the average strategy (RM), which is what the convergence results are
+about.
 DUCT(max) beat DUCT(mix) 58% in Tron (Lanctot et al. 2013).
+
+**AlphaZero: priors, network leaves and root noise.** Under PUCT each node
+stores its priors (``Tree.prior``, ``float32[M, N, 4]``, 32 bytes per node in
+a duel; ``None`` under DUCT and RM, which are unchanged), set when it is
+expanded: uniform over the legal moves (``prior="uniform"``) or a softmax of
+the evaluator's logits over them (``prior="network"``). A forced row (dead or
+starving snake) is 1 on its move. The evaluator is passed to
+:func:`search` as ``evaluator(state) -> (value f32[N], logits f32[N, 4])``
+and called on ONE unbatched state, at the root and once per simulation on
+its new node; a ``vmap`` of the search over B games makes each call one
+network evaluation over B states (2B observations in a duel). It is a
+closure, so the network's parameters can be traced arguments of the jitted
+self-play step, and new parameters need no recompilation. They cannot live
+in the hashable ``MCTSConfig``, which is also why :func:`mcts` refuses
+configs that need an evaluator: a trainer or a network agent builds its own
+``Policy`` around ``search(..., evaluator=...)``. ``leaf="network"`` uses
+the evaluator's value (clipped to ``[-1, 1]``) at non-terminal leaves; exact
+outcomes still override it, so value targets should be the game's outcome
+per snake on the same scale (``heuristic.terminal_values`` with the search's
+``draw_value``). The two settings mix freely: network priors with the
+heuristic leaf, or a network leaf with uniform priors (or under DUCT).
+``root_noise_frac > 0`` mixes ``Dirichlet(root_dirichlet_alpha)`` noise over
+each player's legal moves into its root priors, for self-play exploration;
+its key is folded from the search key, so everything else in the search
+draws the same randomness as without it. ``SearchOutput.policy`` (each
+player's share of its root visits) is the policy target, and
+``SearchOutput.root_prior`` reports the root priors used (after the noise).
+Self-play should sample its opening moves from ``policy`` outside the
+search: ``final`` is static, and sampling every move is weak (see the
+``final="max"`` default below).
 
 **Defaults and why.** Measured in the 11x11 duel against the heuristic snake
 (:func:`slinky.heuristic.heuristic`), with 95% confidence intervals. Unless
@@ -126,6 +166,19 @@ positions, against the final default's 0.594 +- 0.043:
 * ``tie_noise=0.01``: without it, 0.561 +- 0.046 (within noise).
 * ``max_depth=32``: never reached in practice (the deepest node at 1024
   simulations was 10-11 moves down), but it bounds the path buffer.
+* PUCT's ``c_puct=0.5`` and ``fpu_reduction=0.2`` were measured without a
+  network (uniform priors, heuristic leaves), 512 games at 64 and 256
+  simulations against DUCT's 0.603 and 0.715 (+- 0.04): ``c_puct`` 0.1
+  scored 0.471 and 0.692, 0.25 0.591 and 0.725, 0.5 0.595 and 0.692, and
+  AlphaZero's 1.25 only 0.500 and 0.599 (2.5: 0.426 and 0.527). As for
+  DUCT's ``C``, the heuristic's compressed values want little exploration.
+  At ``c_puct=0.5``, ``fpu_reduction`` 0 scored 0.585 and 0.695 and 0.5
+  scored 0.561 (64 simulations), within noise of 0.2. With network priors
+  and a value trained on outcomes both are untuned.
+* No root noise (``root_noise_frac=0``): it is for self-play only (AlphaZero
+  used 0.25). ``root_dirichlet_alpha=0.5`` is untuned. A snake has 2-3 legal
+  moves; AlphaZero's alphas (0.3 in chess, 0.03 in Go) are about 10 over the
+  typical number of moves, which would give 3-5 here, nearly flat noise.
 
 **Speed** (4-core CPU, ``jit(vmap(search))``, default config): about 5 us per
 simulation at a batch of 256 games (3.9 at 16 simulations, 6.0 at 256; 165k to
@@ -139,13 +192,26 @@ simulations (72 ms at 4096, 296 ms at 16384, 626 ms at 32768). So about 26k
 simulations fit a 500 ms move at the median latency (24k at p90), and 21k fit
 400 ms (18k at p90).
 
+PUCT and network leaves, on one pinned core (``taskset -c 0``, the other
+cores idle), ``jit(vmap(search))`` over 64 games at 64 simulations, on live
+positions from heuristic games: DUCT takes 4.9 us per simulation and PUCT
+with uniform priors 5.0-5.1 (+3-5%, mostly the prior table). With the PPO
+baseline's network as the evaluator (``baselines/ppo.py``: both snakes'
+egocentric 21x21x13 observations, conv 16-32-32, dense 256, ``tanh`` value)
+for priors and leaf values it is 85-89 us, about 18x: the network is about
+95% of a simulation. Network priors with heuristic leaves take 94 us, and
+root noise costs nothing measurable.
+
 **Limits.** The children table has ``4**N`` entries per node, so ``N <= 4``
 (256 joint actions; more snakes raise ``ValueError``). The spec was written for
 duels; 3 and 4 snakes run (values are per player, not constant-sum), but they
 have not been tuned or benchmarked. The tree is rebuilt every turn, since a
 ``Policy`` keeps no state between turns. Food spawns inside the tree are either
 ignored (the default) or sampled once per node, so a node never stands for an
-average over spawns.
+average over spawns. The evaluator runs on every simulation, also one that
+re-selects a terminal node (or stops at ``max_depth``) and expands nothing:
+free under ``vmap``, where both branches would run anyway, but one unbatched
+search pays the network for those simulations too.
 """
 
 from __future__ import annotations
@@ -231,7 +297,7 @@ class MCTSConfig:
     ucb1_tuned: bool = False
     tie_noise: float = 0.01
     rm_gamma: float = 0.2
-    c_puct: float = 1.25
+    c_puct: float = 0.5
     fpu_reduction: float = 0.2
     prior: str = "uniform"
     root_noise_frac: float = 0.0

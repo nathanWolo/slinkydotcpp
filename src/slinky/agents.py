@@ -47,8 +47,10 @@ parses back to the same config, so two different configs never share a name
 ``mcts-64-rollout10``). A field set twice is an error, and so is a setting
 with no effect on the search, which would otherwise give one agent two names:
 ``gamma`` without ``rm``; ``c``, ``noise`` or ``tuned`` with ``rm``; ``c``
-with ``tuned``; ``rollout_policy`` without rollout steps; ``depth`` above the
-number of simulations (the search caps it there).
+with ``tuned``; ``c`` or ``tuned`` with ``:selection=puct``; ``c_puct``,
+``fpu_reduction`` or ``root_dirichlet_alpha`` without it (and the alpha
+without ``root_noise_frac``); ``rollout_policy`` without rollout steps;
+``depth`` above the number of simulations (the search caps it there).
 
 Agents are cached per ``(canonical name, config)``: calling :func:`make_agent`
 twice returns the same policy object, which keeps ``play_match``'s jit cache
@@ -657,8 +659,20 @@ def _inert_settings(c: Any, d: Any) -> list[str]:
         ]
     elif changed("rm_gamma"):
         out.append("gamma (rm_gamma) has no effect without rm")
-    if c.selection != "rm" and c.ucb1_tuned and changed("exploration"):
+    if c.selection == "duct" and c.ucb1_tuned and changed("exploration"):
         out.append("c (exploration) has no effect with tuned")
+    if c.selection == "puct":
+        duct_only = (("c", "exploration"), ("tuned", "ucb1_tuned"))
+        out += [
+            f"{what} ({field}) has no effect with puct"
+            for what, field in duct_only
+            if changed(field)
+        ]
+        if c.root_noise_frac == 0 and changed("root_dirichlet_alpha"):
+            out.append("root_dirichlet_alpha has no effect without root_noise_frac")
+    else:  # (MCTSConfig itself refuses prior and root_noise_frac without PUCT)
+        puct_only = ("c_puct", "fpu_reduction", "root_dirichlet_alpha")
+        out += [f"{field} has no effect without puct" for field in puct_only if changed(field)]
     if c.rollout_steps == 0 and changed("rollout_policy"):
         out.append("rollout_policy has no effect without rollout steps")
     sims = c.num_simulations
