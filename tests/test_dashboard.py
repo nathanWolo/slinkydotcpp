@@ -77,6 +77,26 @@ def test_total_steps_rounds_up_to_whole_chunks():
     assert dash.total_steps({}) is None
 
 
+def test_alphazero_headline_eval_is_the_search_agent(tmp_path):
+    config = {
+        "algorithm": "az",
+        "total_env_steps": 3000,
+        "log_every": 2048,
+        "num_envs": 64,
+        "num_steps": 32,
+    }
+    evals = [
+        {"opponent": "random_legal", "mode": "raw", "score": 0.95},
+        {"opponent": "random_legal", "mode": "search", "score": 0.99},
+        {"opponent": "heuristic", "mode": "search", "score": 0.4},
+    ]
+    lines = [train(2048), *(json.dumps({"type": "eval", "env_steps": 2048, **e}) for e in evals)]
+    run = write_run(tmp_path, "az-d", config, lines)
+    summary = dash.run_summary("az-d", run)
+    assert summary["algorithm"] == "az" and summary["total_steps"] == 4096
+    assert summary["last_eval"]["score"] == 0.99
+
+
 def test_find_runs_and_summaries(runs):
     found = dash.find_runs([runs])
     assert sorted(p.name for p in found.values()) == ["dqn-b", "ppo-c", "rainbow-a"]

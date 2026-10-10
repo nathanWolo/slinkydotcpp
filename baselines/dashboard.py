@@ -102,15 +102,15 @@ def total_steps(config: dict[str, Any]) -> int | None:
 
 
 def is_headline_eval(record: dict[str, Any]) -> bool:
-    """An eval of the greedy policy against ``random_legal``, which every baseline logs.
+    """An eval of the main agent against ``random_legal``, which every baseline logs.
 
-    PPO also evaluates against other opponents and with a sampled policy; DQN and
-    Rainbow records have neither field.
+    The main agent is the greedy policy, or for AlphaZero the network with search
+    (mode "search"). PPO also evaluates against other opponents and with a sampled
+    policy, AlphaZero also the raw network; DQN and Rainbow records have neither field.
     """
-    return (
-        record.get("opponent", "random_legal") == "random_legal"
-        and record.get("mode", "greedy") == "greedy"
-    )
+    return record.get("opponent", "random_legal") == "random_legal" and record.get(
+        "mode", "greedy"
+    ) in ("greedy", "search")
 
 
 def read_run(run: Path) -> tuple[list[dict[str, Any]], float, str]:

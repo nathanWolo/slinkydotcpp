@@ -145,7 +145,7 @@ th:first-child, td:first-child { text-align: left; }
   </header>
   <p class="error" id="error" hidden></p>
   <section class="runs" id="runs" aria-label="Runs (select to plot)"></section>
-  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence; PPO's value loss and policy entropy have their own charts.</p>
+  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence, AlphaZero policy cross-entropy plus value MSE; PPO's and AlphaZero's value loss and policy entropy have their own charts.</p>
   <h2>Training curves</h2>
   <section class="charts" id="charts"></section>
   <h2>How snakes die in self-play</h2>
@@ -355,10 +355,13 @@ th:first-child, td:first-child { text-align: left; }
   // --- Charts -------------------------------------------------------------------------
   // Greedy-policy evals by opponent. DQN and Rainbow evaluate only against
   // random_legal and log no opponent or mode; PPO also plays the heuristic and the
-  // DQN, greedy and sampled.
+  // DQN, greedy and sampled. AlphaZero's main agent is the network with search
+  // (mode "search"); it also logs the raw network (mode "raw").
   const isPPO = (d) => d.algorithm === "ppo";
+  const isAZ = (d) => d.algorithm === "az";
+  const MAIN_MODES = ["greedy", "search"];
   const evalChart = (opponent, sub) => {
-    const match = (r) => (r.opponent ?? "random_legal") === opponent && (r.mode ?? "greedy") === "greedy";
+    const match = (r) => (r.opponent ?? "random_legal") === opponent && MAIN_MODES.includes(r.mode ?? "greedy");
     return {
       id: `eval-${opponent}`, title: `Score vs ${opponent}`, sub, source: "evals",
       y: (r) => (match(r) ? r.score : null),
@@ -370,17 +373,19 @@ th:first-child, td:first-child { text-align: left; }
     };
   };
   const CHARTS = [
-    evalChart("random_legal", "Greedy policy; win = 1, draw = ½. Band: 95% confidence interval."),
-    evalChart("heuristic", "PPO runs; greedy policy. Band: 95% confidence interval."),
+    evalChart("random_legal", "Greedy policy (AlphaZero: with search); win = 1, draw = ½. Band: 95% confidence interval."),
+    evalChart("heuristic", "PPO and AlphaZero runs; greedy policy or search. Band: 95% confidence interval."),
     evalChart("dqn", "PPO runs, against the committed DQN; greedy policy. Band: 95% confidence interval."),
-    { id: "loss", title: "Training loss", sub: "DQN and Rainbow: mean over the updates in each chunk (log scale).",
+    evalChart("ppo", "AlphaZero runs, against the committed PPO; with search. Band: 95% confidence interval."),
+    evalChart("mcts-64", "AlphaZero runs, against 64-iteration MCTS; with search. Band: 95% confidence interval."),
+    { id: "loss", title: "Training loss", sub: "DQN, Rainbow and AlphaZero: mean over the updates in each chunk (log scale).",
       source: "train", y: (r) => r.loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => !isPPO(d) },
-    { id: "vloss", title: "Value loss", sub: "PPO runs: the critic's squared error, mean over each chunk (log scale).",
-      source: "train", y: (r) => r.v_loss, log: true, fmt: (v) => v.toPrecision(3), applies: isPPO },
-    { id: "q", title: "Value estimate", sub: "Mean Q of the moves taken (DQN, Rainbow) or mean critic value (PPO). An unbiased value in this symmetric zero-sum game is near 0.",
+    { id: "vloss", title: "Value loss", sub: "PPO and AlphaZero runs: the value head's squared error, mean over each chunk (log scale).",
+      source: "train", y: (r) => r.v_loss ?? r.value_loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => isPPO(d) || isAZ(d) },
+    { id: "q", title: "Value estimate", sub: "Mean Q of the moves taken (DQN, Rainbow) or mean value-head output (PPO, AlphaZero). An unbiased value in this symmetric zero-sum game is near 0.",
       source: "train", y: (r) => r.mean_q ?? r.value_mean, fmt: (v) => (v >= 0 ? "+" : "") + v.toFixed(3), zero: true },
-    { id: "entropy", title: "Policy entropy", sub: "PPO runs: mean entropy of the move distribution, in nats (ln 4 ≈ 1.386 is uniform).",
-      source: "train", y: (r) => r.entropy, fmt: (v) => v.toFixed(3), zeroBase: true, applies: isPPO },
+    { id: "entropy", title: "Policy entropy", sub: "PPO and AlphaZero runs: mean entropy of the network's move distribution, in nats (ln 4 ≈ 1.386 is uniform).",
+      source: "train", y: (r) => r.entropy ?? r.net_entropy, fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => isPPO(d) || isAZ(d) },
     { id: "len", title: "Self-play game length", sub: "Mean turns of the games that finished in each chunk.",
       source: "train", y: (r) => r.mean_game_len, fmt: (v) => v.toFixed(0), zeroBase: true },
     { id: "draws", title: "Self-play draw rate", sub: "Share of finished games that were draws (both snakes out on the same turn).",
