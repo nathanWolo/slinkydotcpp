@@ -5,15 +5,15 @@ standard rules), trained by self-play on slinky.
 
 | baseline | file | training | vs `random_legal` | vs heuristic | checkpoint |
 |---|---|---|---|---|---|
-| Double DQN | `dqn.py` | 31 min, 1.28M env steps | 0.993 | 0.053 | `checkpoints/dqn-duel-seed0/` |
+| Double DQN | `dqn.py` | 31 min, 1.28M env steps | 0.998 | 0.053 | `checkpoints/dqn-duel-seed0/` |
 | PPO | `ppo.py` | 67 min, 5.24M env steps | 0.998 | 0.296 | `checkpoints/ppo-duel-seed0/` |
 
 - **Hardware:** both trained on a 4-core cloud CPU, with no GPU.
 - **Head-to-head:** PPO beats the DQN 0.868 over 1,024 games (888 / 2 / 134).
-- **Sources:** the PPO scores and both heuristic scores are from the strength
-  benchmark ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games
-  each). The DQN's score against `random_legal` is its 5,000-game evaluation
-  below.
+- **Sources:** the scores are from the strength benchmark
+  ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games each). In
+  its own 5,000-game evaluation below, the DQN scores 0.993 against
+  `random_legal`.
 
 ```bash
 uv pip install -e ".[rl]"            # adds optax
@@ -125,8 +125,7 @@ I did not inspect replays.
   each):
   - the hand-written heuristic beats this DQN 0.947 (967 / 6 / 51);
   - on the MCTS scale, the DQN beats MCTS with 4 simulations (MCTS scores
-    0.427) and loses to MCTS with 16 (0.947).
-
+    0.427) and loses to MCTS with 16 (0.947);
   - PPO self-play on the same setup (below) beats it 0.868.
 
   Still to try: past checkpoints and other algorithms (Elo or TrueSkill over
@@ -166,8 +165,8 @@ it shares no code with `dqn.py`.
   Training runs at about 1,400 env-steps/s on 3 pinned cores, and the
   updates take about 90% of the time.
 - **Play mode.** The `ppo` agent in `slinky.agents` plays greedily (the masked
-  argmax); `ppo-sample` samples. Greedy was as strong or stronger in almost
-  every evaluation (below).
+  argmax); `ppo-sample` samples. Greedy was ahead or within noise in every
+  evaluation, and it beats sampled play 0.549 head-to-head (below).
 
 ### Results
 
@@ -201,16 +200,17 @@ evaluation rounds included.
 - **On the MCTS scale**, PPO plays between 4 and 16 simulations. MCTS-4
   scores 0.127 against it and MCTS-16 0.642, while MCTS at 500 ms per move
   (24,000 simulations) scores 0.949.
-- **How it loses:** PPO rarely draws, so it wins more games against strong
-  MCTS than the heuristic does, but it scores less against it.
+- **How it loses:** against MCTS-2048 and MCTS-4096, PPO wins 6.4–6.6% of
+  its games (the heuristic 0.4–2.7%). But it draws far less and loses more,
+  so it scores 0.09 against them while the heuristic scores 0.15–0.16.
 
 **Self-play dynamics.**
 
 - Early on, 82% of self-play deaths are head-to-heads and games last about 55
   turns.
 - By the end, games between the two copies last about 195 turns,
-  head-to-heads are down to 18% of deaths, and running into its own body is
-  the most common death (52%).
+  head-to-heads are down to about 20% of deaths, and running into its own
+  body is the most common death (about half).
 - The policy's entropy falls from 0.90 to 0.24 nats.
 - The value function stays weak: explained variance is only 0.1–0.2. A review
   found no bug behind it, and turning off value clipping or raising the value

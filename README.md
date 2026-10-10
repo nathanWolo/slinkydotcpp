@@ -146,10 +146,10 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
   heuristic's evaluation at the leaves).
   - Against the heuristic it scores 0.53 at 32 simulations, 0.78 at 1024 and
     0.85 at 2048. It levels off there, held back by opening head-on draws.
-  - At Battlesnake's 500 ms per move (24,000 simulations for one game on one
-    core) it scores 0.875 against the heuristic and 0.949 against PPO.
-  - It costs about 3.5–6 µs per simulation per CPU core in batches, and about
-    18 µs for one game alone.
+  - At Battlesnake's 500 ms per move (24,000 simulations: one game's move on
+    one core, at p90) it scores 0.875 against the heuristic and 0.949 against PPO.
+  - It costs about 3.5–6 µs per simulation per CPU core in batches (up to
+    4096 simulations), and about 18 µs for one game alone.
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 

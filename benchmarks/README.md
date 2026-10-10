@@ -17,12 +17,13 @@ four fixed opponents, by simulations per move:
 - **Scoring:** seats alternate, and the score is (wins + draws/2) / games.
   Brackets are 95% Wilson intervals.
 - **Games:** 512 per matchup, with three exceptions:
-  - 256 for MCTS-2048 and MCTS-4096 against `random_legal`, the DQN and the
-    heuristic;
+  - 256 for MCTS-2048 and MCTS-4096 against the DQN and the heuristic (they
+    did not play `random_legal`);
   - 128 for MCTS-24000 against PPO and the heuristic;
   - 64 for MCTS-24000 against `random_legal` and the DQN.
-- **MCTS-24000** is the 500 ms budget: the most simulations that one game's
-  move fits in 500 ms on one core (see [below](#mcts-at-500-ms-per-move)).
+- **MCTS-24000** is the 500 ms budget: the most simulations for which one
+  game's move takes at most 500 ms at p90 on one core (see
+  [below](#mcts-at-500-ms-per-move)).
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](results/strength.svg)
 
@@ -88,14 +89,14 @@ batched throughput above. `mcts_latency.py` measures it:
 - **Program:** `jax.jit(slinky.mcts.search)` on one game, pinned to one core,
   with the other three cores busy. Dispatch and waiting for the result are
   included; compilation, JSON parsing and the network are not.
-- **Positions:** 12 positions from real games (turns 8, 50 and 150), 8
-  searches each.
+- **Positions:** 12 positions from games of MCTS-32 against the heuristic
+  (turns 8, 50 and 150), 8 searches each.
 - **Budget:** the largest multiple of 1,000 simulations whose p90 latency is
   within 500 ms.
 
 That is **24,000 simulations**: median 439 ms, p90 489 ms, max 535 ms, about
-18 µs per simulation. At the median, about 26,000–27,000 simulations fit;
-for 400 ms, which leaves time for the network, about 18,000 fit at p90.
+18 µs per simulation. At the median latency, about 26,000 simulations fit.
+For 400 ms, which leaves time for the network, about 18,000 fit at p90.
 
 MCTS-24000 then played the benchmark like any other budget (batched, so the
 games run faster than real time):
@@ -126,8 +127,9 @@ games run faster than real time):
 - **PPO loses to MCTS differently from the heuristic.**
   - Against PPO, MCTS flattens at 0.79–0.84 from 32 to 512 simulations, then
     climbs to 0.91 at 2048–4096 and 0.95 at 500 ms.
-  - PPO rarely draws: 20–63 draws in 512 games against MCTS-32 to MCTS-4096,
-    while the heuristic draws 68–77 of 256 against MCTS-2048 and MCTS-4096.
+  - PPO rarely draws. Against MCTS-32 to MCTS-4096 it draws 4–12% of its
+    games, the heuristic 27–47%. At 2048 and 4096 alone it is 4–5% against
+    27–30%.
   - PPO also wins more. From 256 simulations up, MCTS loses more games to PPO
     than to the heuristic: 6.4% and 6.6% at 2048 and 4096, against 0.4% and
     2.7%.
@@ -146,9 +148,8 @@ games run faster than real time):
   - The heuristic itself takes such trades (see contempt below). Avoiding them
     means reading its move in a simultaneous-move game, which DUCT does not
     model.
-- **Against the DQN**, MCTS scores at least 0.94 from 16 simulations and about
-  0.97–0.99 beyond. A few losses remain at every budget (6–7 of 256 at 2048
-  and 4096).
+- **Against the DQN**, MCTS scores 0.94–0.99 from 16 to 4096 simulations. A
+  few losses remain at every budget up to 4096 (6–7 of 256 at 2048 and 4096).
 - **Against `random_legal`** the benchmark is saturated from 16 simulations.
   MCTS-1 is a sanity check: with one simulation the root has one visited move,
   picked uniformly among the legal ones, so it plays like `random_legal`
@@ -158,7 +159,8 @@ games run faster than real time):
     MCTS-2048 (0.846) and MCTS-4096 (0.840). Six times the simulations of
     MCTS-4096 does not move this score measurably: 26 of the 128 games were
     draws and 3 were losses.
-  - Against PPO it scores 0.949 (5 draws, 4 losses), up from 0.914 at 4096.
+  - Against PPO it scores 0.949 (5 draws, 4 losses). That is up from 0.914 at
+    4096, but the intervals overlap.
   - Against MCTS-4096 it scores 0.730 [0.648, 0.800], about +173 Elo for
     2.55 doublings. That is about 68 Elo per doubling (the interval spans
     about 40–95), in line with the top of the ladder (+48 to +59).
@@ -181,7 +183,7 @@ replay exactly the same games.
   pinned workers, at commit `506a4c2`, all with one code fingerprint
   (`68a75d04928ededb`).
 - **PPO and 500 ms runs:** about 4 hours of wall time on the same machine,
-  one pinned process per matchup.
+  with four pinned single-worker processes taking matchups from a queue.
   - The five MCTS-24000 matchups took 12 minutes to 2.9 hours each (6.9
     core-hours in all).
   - The PPO matchups against MCTS-4096 and below took about 2 core-hours.
