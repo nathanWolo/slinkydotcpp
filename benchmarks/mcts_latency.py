@@ -33,7 +33,7 @@ disturb timings (``--core`` pins this process; ``taskset -c 3 python ...`` also 
 
     taskset -c 3 python benchmarks/mcts_latency.py
     python benchmarks/mcts_latency.py --core 3 --sims 4096,16384 --budget-ms 500
-    python benchmarks/mcts_latency.py --core 3 --sims 1024 --budget-ms 50 --quick
+    python benchmarks/mcts_latency.py --core 3 --sims 256,1024 --budget-ms 50 --quick
 
 Progress goes to stderr; stdout carries only the markdown report. The numbers describe
 the search plus dispatch, not JSON parsing or the network.
