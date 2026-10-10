@@ -140,6 +140,8 @@ class MCTSConfig:
       max_depth: the deepest a simulation descends (edges from the root). A
         selection that reaches it backs up that node's stored leaf value.
       final: ``"max"`` or ``"sample"`` (see the module docstring).
+      draw_value: value of a mutual elimination inside the search (0 matches
+        ``env.win_loss_reward``; negative values are "contempt" for draws).
     """
 
     num_simulations: int = 128
@@ -154,6 +156,7 @@ class MCTSConfig:
     weights: heuristic.Weights = heuristic.DEFAULT_WEIGHTS
     max_depth: int = 64
     final: str = "max"
+    draw_value: float = 0.0
 
     def __post_init__(self) -> None:
         if self.num_simulations < 1:
@@ -213,6 +216,7 @@ class _Descent(NamedTuple):
     path_node: jax.Array  # int32[D]: node at each level of the path
     path_joint: jax.Array  # int32[D]: joint action taken there
     expand: jax.Array  # bool: stopped at an unexpanded joint action of ``node``
+    stored: jax.Array  # float32[N]: ``tree.value[node]`` (backed up when not expanding)
     active: jax.Array  # bool
 
 
@@ -243,7 +247,7 @@ def _leaf_value(
     """float32[N] value of a newly expanded node (``mask`` is its ``env.action_mask``)."""
     if config.rollout_steps > 0:
         state = _rollout(key, state, mask, env, config)
-    exact = heuristic.terminal_values(state, env.config)
+    exact = heuristic.terminal_values(state, env.config, config.draw_value)
     if config.leaf == "heuristic":
         estimate = heuristic.evaluate(state, env.config, config.weights)
     else:
@@ -338,7 +342,8 @@ def _init_tree(
         estimate = heuristic.evaluate(state, env.config, config.weights)
     else:
         estimate = jnp.where(state.alive, 0.0, -1.0)
-    value = jnp.where(state.done, heuristic.terminal_values(state, env.config), estimate)
+    exact = heuristic.terminal_values(state, env.config, config.draw_value)
+    value = jnp.where(state.done, exact, estimate)
 
     def stack(x: jax.Array) -> jax.Array:
         x = jnp.asarray(x)
@@ -388,6 +393,7 @@ def _descend(
             path_node=c.path_node.at[c.depth].set(c.node),
             path_joint=c.path_joint.at[c.depth].set(joint),
             expand=expand,
+            stored=tree.value[node],
             active=~stop,
         )
 
@@ -398,6 +404,7 @@ def _descend(
         path_node=jnp.zeros((max_depth,), jnp.int32),
         path_joint=jnp.zeros((max_depth,), jnp.int32),
         expand=jnp.zeros((), bool),
+        stored=tree.value[0],
         active=~tree.terminal[0],
     )
     return jax.lax.while_loop(lambda c: c.active, body, init)
@@ -474,7 +481,8 @@ def search(
         parent = jax.tree.map(lambda x: x[leaf], tree.state)
         child, ts = env.step(jax.random.fold_in(k_spawn, slot), parent, digits[joint])
         new_value = _leaf_value(jax.random.fold_in(k_roll, slot), child, ts.action_mask, env, config)
-        value = jnp.where(path.expand, new_value, tree.value[leaf])
+        # Reading ``tree.value[leaf]`` here instead would make XLA copy the array.
+        value = jnp.where(path.expand, new_value, path.stored)
         tree = tree._replace(
             state=jax.tree.map(lambda a, x: a.at[slot].set(x), tree.state, child),
             children=tree.children.at[jnp.where(path.expand, leaf, num_sims + 1), joint].set(
