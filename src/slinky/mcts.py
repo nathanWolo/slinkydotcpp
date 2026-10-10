@@ -131,7 +131,12 @@ positions, against the final default's 0.594 +- 0.043:
 simulation at a batch of 256 games (3.9 at 16 simulations, 6.0 at 256; 165k to
 255k simulations/s in all) and 6 us at a batch of 64 (64 simulations). The
 heuristic leaf is about 1.5 us of that, and the tree takes 1.04 KB per node
-(0.27 MB per game at 256 simulations).
+(0.27 MB per game at 256 simulations). One unbatched game (``jit(search)`` on
+one core, the Battlesnake server setting; ``benchmarks/mcts_latency.py``, on
+positions from real games, with the other three cores busy) takes about 17 us
+per simulation from 1024 to 16384 simulations (17.5 ms at 1024, 286 ms at
+16384) and 19 us at 65536. So 27k simulations fit a 500 ms move at the median
+latency (24k at p90), and 22k fit 400 ms (19k at p90).
 
 **Limits.** The children table has ``4**N`` entries per node, so ``N <= 4``
 (256 joint actions; more snakes raise ``ValueError``). The spec was written for
