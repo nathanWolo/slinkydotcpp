@@ -54,7 +54,10 @@ pure, fixed-shape functions of one (unbatched) game that ``jit`` and ``vmap``.
 The duel policy is the "P1" design of
 ``docs/research/battlesnake_heuristics.md``, with tiers added. Only the 11x11
 duel on the ``standard`` ruleset was tuned. Wrapped boards and constrictor
-(where bodies never shrink) are handled in the fills. Hazards only enter
+(where bodies never shrink) are handled in the fills. Constrictor has no food
+and keeps health full, so the hunger term there only charges small spaces
+(see :func:`hunger`). It is kept on purpose: dropping it scored 0.436 +- 0.040
+against the snake that keeps it (256 constrictor duels). Hazards only enter
 through the exact rules step of the duel search.
 """
 
@@ -436,7 +439,9 @@ def hunger(health: jax.Array, dist_food: jax.Array, space: jax.Array) -> jax.Arr
 
     ``margin = health - dist_food``, the health left on reaching the nearest
     reachable food. If no food is reachable, ``margin = min(health, space) - 5``.
-    The pressure is ``clip((30 - margin) / 30, 0, 1) ** 2``.
+    The pressure is ``clip((30 - margin) / 30, 0, 1) ** 2``. With full health
+    and no food (always the case under constrictor) it is a penalty on spaces
+    smaller than 35 cells.
     """
     health = health.astype(jnp.float32)
     margin = jnp.where(
@@ -766,10 +771,13 @@ def duel_scores(
     * score: ``min_b M[a, b] + mean_weight * mean_b M[a, b]``, where ``M`` is
       :func:`joint_values` from snake ``i``'s point of view;
     * tier: ``4 * legal + 2 * safe + fits``. ``safe`` means no reply ``b``
-      leaves ``i`` dead and the opponent alive. That covers a longer snake's
-      head, and also an opponent's tail that stays put because it eats.
-      ``fits`` means that after every reply ``b`` that ``i`` survives, its
-      reachable area holds it or reaches its tail.
+      leaves ``i`` dead and the opponent alive, e.g. a losing head-to-head or
+      a lethal hazard. (Bodies, a stacked tail included, are already masked; a
+      tail whose snake eats this turn is still vacated.) ``fits`` means that
+      ``i`` survives at least one reply, and that after every reply both
+      snakes survive, its reachable area holds it or reaches its tail. A
+      certain mutual elimination therefore does not fit, and a reply that
+      kills the opponent is not judged on the finished board.
     """
     value, alive, fits = _joint_outcomes(state, config, weights)
     mask = rules.action_mask(state, config)
@@ -785,7 +793,8 @@ def duel_scores(
         replies = mask[1 - i][None, :]
         me_alive, op_alive = own(alive, i), own(alive, 1 - i)
         safe = ~jnp.any(replies & ~me_alive & op_alive, axis=1)
-        fit = jnp.all(~replies | ~me_alive | own(fits, i), axis=1)
+        both = me_alive & op_alive
+        fit = jnp.all(~replies | ~both | own(fits, i), axis=1) & jnp.any(replies & me_alive, axis=1)
         worst = jnp.min(jnp.where(replies, m, jnp.inf), axis=1)
         mean = jnp.sum(jnp.where(replies, m, 0.0), axis=1) / jnp.sum(replies)
         tiers.append(_tiers(legal[i], safe, fit))

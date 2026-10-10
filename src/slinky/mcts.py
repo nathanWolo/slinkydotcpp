@@ -4,8 +4,10 @@ Every snake moves at once, so the search tree is a *stacked matrix game*: each
 node has one child per **joint** action (``4**N`` of them, 16 in a duel), and
 each player keeps **decoupled** statistics over its own four moves. One search
 serves every seat: :func:`search` returns each player's own recommendation.
-The design follows the implementation spec in
-``docs/research/simultaneous_move_mcts.md``.
+The design follows the survey and implementation spec in
+``docs/research/simultaneous_move_mcts.md``. The code departs from that spec
+in its value scale, defaults and option names (the spec lists the changes);
+where they differ, this docstring and :class:`MCTSConfig` are authoritative.
 
 **Tree layout.** One fixed-capacity tree per game, ``M = num_simulations + 1``
 nodes (:class:`Tree`). Node 0 is the root and simulation ``i`` owns slot
@@ -62,7 +64,7 @@ usual UCB1 meaning.
   is the mean value of ``a`` mapped to ``[0, 1]``, ``n_a`` its visit count and
   ``n`` the node's visit count. ``ucb1_tuned`` replaces ``C`` with the
   variance bound ``sqrt(min(1/4, var + sqrt(2 ln n / n_a)))``. Unvisited legal
-  moves come first (priority ``1e6 + U(0, 1)``), and ``tie_noise * U(0, 1)``
+  moves come first, in uniformly random order, and ``tie_noise * U(0, 1)``
   is added to every score so near-ties break at random. Deterministic
   tie-breaking makes DUCT cycle in lock-step (Bosansky et al. 2016). DUCT was
   the most robust variant across nine games (Tak et al. 2014) and strong in
@@ -96,7 +98,9 @@ positions, against the final default's 0.594 +- 0.043:
   pure random rollouts (``leaf="none"``, 30 steps) 0.029 +- 0.018, although
   both still beat ``random_legal`` 0.99.
 * DUCT. Regret matching (``rm_gamma=0.2``) scored 0.551 +- 0.037 at 1.8x the
-  cost per simulation, and UCB1-Tuned 0.533 +- 0.044.
+  cost per simulation, and UCB1-Tuned 0.533 +- 0.044. (RM was measured while
+  its samples below the root still depended on the parent's sample; every
+  depth of a descent now draws its own noise.)
 * ``exploration=0.25`` rather than UCB1's ``sqrt(2)``. The heuristic's values
   are compressed (the median ``|value|`` over states of heuristic play is
   0.25, so 0.12 from the middle of UCB's ``[0, 1]`` scale), and a large ``C``
@@ -141,6 +145,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import math
 from typing import NamedTuple
 
 import jax
@@ -153,8 +158,6 @@ from slinky.evaluate import Policy
 from slinky.types import NUM_ACTIONS, GameConfig, State, TimeStep
 
 MAX_SNAKES = 4  # the joint-action children table has 4**N entries per node
-_UNVISITED = 1e6  # selection priority of unvisited moves (finite, so noise breaks ties)
-_PHI = 0.6180339887498949  # golden-ratio offset: fresh-looking noise at every depth
 _SELECTIONS = ("duct", "rm")
 _LEAVES = ("heuristic", "none")
 _ROLLOUT_POLICIES = ("random", "heuristic")
@@ -214,6 +217,13 @@ class MCTSConfig:
             raise ValueError("max_depth must be >= 1")
         if self.rollout_steps < 0:
             raise ValueError("rollout_steps must be >= 0")
+        for name in ("exploration", "tie_noise"):
+            if not 0.0 <= getattr(self, name) < math.inf:  # also rejects NaN
+                raise ValueError(f"{name} must be finite and >= 0, got {getattr(self, name)!r}")
+        if not 0.0 <= self.rm_gamma <= 1.0:
+            raise ValueError(f"rm_gamma must be in [0, 1], got {self.rm_gamma!r}")
+        if not -1.0 <= self.draw_value <= 1.0:
+            raise ValueError(f"draw_value must be in [-1, 1], got {self.draw_value!r}")
         for name, allowed in (
             ("selection", _SELECTIONS),
             ("leaf", _LEAVES),
@@ -285,6 +295,11 @@ class _Descent(NamedTuple):
 def _search_env(config: GameConfig) -> BattlesnakeEnv:
     """An observation-free env for ``config`` (observations would dominate the cost)."""
     return BattlesnakeEnv(config, obs=None)
+
+
+def _check_game(config: GameConfig) -> None:
+    if config.num_snakes > MAX_SNAKES:
+        raise ValueError(f"MCTS supports at most {MAX_SNAKES} snakes (4**N joint actions)")
 
 
 def _digits(n: int) -> np.ndarray:
@@ -359,6 +374,21 @@ def _rollout(
     return state
 
 
+def _depth_noise(bits: jax.Array, depth: jax.Array) -> jax.Array:
+    """float32 U(0, 1) noise for one depth of a descent, from the simulation's uint32 ``bits``.
+
+    A SplitMix-style stream: ``bits + depth * 0x9E3779B9`` (the golden-ratio
+    step) through a full-avalanche integer hash (Wellons' lowbias32), so each
+    depth gets independent-looking noise. A ``jax.random`` draw per depth made
+    the whole search about 10% slower.
+    """
+    x = bits + depth.astype(jnp.uint32) * jnp.uint32(0x9E3779B9)
+    x = (x ^ (x >> 16)) * jnp.uint32(0x7FEB352D)
+    x = (x ^ (x >> 15)) * jnp.uint32(0x846CA68B)
+    x = x ^ (x >> 16)
+    return (x >> 8).astype(jnp.float32) * (1.0 / (1 << 24))
+
+
 def _rm_sigma(regret: jax.Array, legal: jax.Array) -> jax.Array:
     """float32[..., 4] regret matching: positive regrets normalized; uniform if none."""
     pos = jnp.where(legal, jnp.maximum(regret, 0.0), 0.0)
@@ -373,6 +403,7 @@ def _rm_sigma(regret: jax.Array, legal: jax.Array) -> jax.Array:
 def _duct_moves(tree: Tree, node: jax.Array, u: jax.Array, config: MCTSConfig) -> jax.Array:
     """int32[N] each player's UCB1 (or UCB1-Tuned) move at ``node``; ``u`` is U(0,1)[N, 4]."""
     n = tree.visits[node]
+    legal = tree.legal[node]
     nf = n.astype(jnp.float32)
     n1 = jnp.maximum(nf, 1.0)
     log_n = jnp.log(jnp.maximum(jnp.sum(nf, axis=-1, keepdims=True), 1.0))
@@ -382,8 +413,12 @@ def _duct_moves(tree: Tree, node: jax.Array, u: jax.Array, config: MCTSConfig) -
         bonus = jnp.sqrt(log_n / n1 * jnp.minimum(0.25, var + jnp.sqrt(2.0 * log_n / n1)))
     else:
         bonus = config.exploration * jnp.sqrt(log_n / n1)
-    score = jnp.where(n == 0, _UNVISITED + u, 0.5 * (q + 1.0) + bonus + config.tie_noise * u)
-    return jnp.argmax(jnp.where(tree.legal[node], score, -jnp.inf), axis=-1).astype(jnp.int32)
+    score = jnp.where(legal, 0.5 * (q + 1.0) + bonus + config.tie_noise * u, -jnp.inf)
+    # Unvisited legal moves come first, ranked by ``u`` alone (a uniformly random order;
+    # a large constant plus ``u`` would round to index order in float32).
+    fresh = legal & (n == 0)
+    score = jnp.where(jnp.any(fresh, axis=-1, keepdims=True), jnp.where(fresh, u, -jnp.inf), score)
+    return jnp.argmax(score, axis=-1).astype(jnp.int32)
 
 
 def _rm_joint(
@@ -453,16 +488,21 @@ def _init_tree(state: State, env: BattlesnakeEnv, config: MCTSConfig, num_nodes:
 
 
 def _descend(
-    tree: Tree, u: jax.Array, config: MCTSConfig, digits: jax.Array, max_depth: int
+    tree: Tree, bits: jax.Array, config: MCTSConfig, digits: jax.Array, max_depth: int
 ) -> _Descent:
-    """Selection: walk down from the root, recording the path (see the module docstring)."""
+    """Selection: walk down from the root, recording the path (see the module docstring).
+
+    ``bits`` (uint32[N, 4]) is this simulation's randomness. Every depth derives
+    its own noise from it (:func:`_depth_noise`), so the moves sampled at a node
+    do not depend on those sampled at its parent.
+    """
     n = digits.shape[1]
     powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
 
     rm = config.selection == "rm"
 
     def body(c: _Descent) -> _Descent:
-        u_d = jnp.mod(u + c.depth.astype(jnp.float32) * _PHI, 1.0)
+        u_d = _depth_noise(bits, c.depth)
         rm_fields = {}
         if rm:
             joint, *per_node = _rm_joint(tree, c.node, u_d, config, digits)
@@ -552,14 +592,13 @@ def search(
     """
     game = env.config
     n = game.num_snakes
-    if n > MAX_SNAKES:
-        raise ValueError(f"MCTS supports at most {MAX_SNAKES} snakes (4**N joint actions)")
+    _check_game(game)
     env = env if env.obs_fn is None else _search_env(game)
     num_sims = config.num_simulations
     max_depth = min(config.max_depth, num_sims)
     digits = jnp.asarray(_digits(n))
     k_noise, k_spawn, k_roll, k_final = jax.random.split(key, 4)
-    noise = jax.random.uniform(k_noise, (num_sims, n, NUM_ACTIONS))
+    noise = jax.random.bits(k_noise, (num_sims, n, NUM_ACTIONS), jnp.uint32)
 
     def simulate(sim, carry):
         tree, deepest, expanded = carry
@@ -640,8 +679,11 @@ def mcts(env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG) -> Policy:
     """SM-MCTS as an ``evaluate.Policy``: ``(key, state, timestep) -> int32[N]``.
 
     Cached on ``(env, config)``, so repeated calls return the same object and
-    hit ``play_match``'s jit cache. Observations are ignored.
+    hit ``play_match``'s jit cache. Observations are ignored. Raises
+    ``ValueError`` here, not at trace time, for games with more than
+    :data:`MAX_SNAKES` snakes.
     """
+    _check_game(env.config)
     return _mcts(env, config)
 
 

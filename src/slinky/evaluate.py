@@ -9,13 +9,17 @@ without knowing which seat it plays::
     result = play_match(env, greedy_from_q(q_fn), random_legal(env), key, num_games=2048)
     print(result.score, "+/-", result.score_ci95)
 
-:func:`play_match` runs ``batch_size`` games at a time under ``jit(vmap)``, with
-a ``lax.while_loop`` that stops as soon as every game in the batch is over (or
-``max_turns`` turns have been played). The jitted function is cached per
-``(env, policy_a, policy_b, batch_size)``, so evaluating the same policy objects
-repeatedly (e.g. during training) compiles once. Policies are traced, so any
-parameters they close over are baked in as constants: a *new* closure (e.g. one
-holding fresh network parameters) compiles again.
+:func:`play_match` simulates ``batch_size`` game *slots* at once under
+``jit(vmap)``, in one ``lax.while_loop``: when a slot's game ends, the slot
+starts the next game, and the loop stops when every game has been played. Game
+lengths are heavy-tailed, so refilling slots saves most of the work that a
+fixed batch spends on finished games waiting for the longest one. Game ``g``
+depends only on ``(key, g)``, so the result is the same for every
+``batch_size``. The jitted function is cached per ``(env, policy_a, policy_b,
+slots)``, so evaluating the same policy objects repeatedly (e.g. during
+training) compiles once. Policies are traced, so any parameters they close over
+are baked in as constants: a *new* closure (e.g. one holding fresh network
+parameters) compiles again.
 """
 
 from __future__ import annotations
@@ -93,57 +97,98 @@ def _greedy_from_q(q_fn: Callable[[Any], jax.Array]) -> Policy:
     return policy
 
 
-@functools.lru_cache(maxsize=16)
-def _compiled_batch(
-    env: BattlesnakeEnv, policy_a: Policy, policy_b: Policy, batch_size: int
-) -> Callable[..., tuple[jax.Array, jax.Array, jax.Array]]:
-    """Jitted ``(key, offset, num_games, max_turns) -> (outcome, truncated, turns)`` for one batch.
+class MatchRun(NamedTuple):
+    """What :func:`run_match` returns: the result and how the slots were used."""
 
-    Game ``offset + i`` puts policy A in seat ``(offset + i) % N``. Games with
-    index ``>= num_games`` are padding: they start finished and are ignored.
+    result: MatchResult
+    slots: int  # games simulated at once: ``min(batch_size, num_games)``
+    iterations: int  # turns of the slot loop; each advances every slot by one turn
+
+    @property
+    def utilization(self) -> float:
+        """Fraction of slot-turns spent on games that count (1.0 = no slot ever idled)."""
+        return self.result.mean_turns * self.result.num_games / (self.slots * self.iterations)
+
+
+@functools.lru_cache(maxsize=16)
+def _compiled_match(
+    env: BattlesnakeEnv, policy_a: Policy, policy_b: Policy, slots: int
+) -> Callable[..., tuple[jax.Array, jax.Array, jax.Array]]:
+    """Jitted ``(key, first_game, num_games, max_turns) -> (counts, turns, iterations)``.
+
+    Plays games ``first_game ... first_game + num_games - 1`` in ``slots`` slots.
+    ``counts[s]`` holds the wins, draws, losses and truncations (from A's point
+    of view) of the games that slot ``s`` finished and ``turns[s]`` their total
+    length; ``iterations`` is the number of loop turns.
     """
     n = env.num_agents
+    seats = jnp.arange(n)
 
-    def run(key, offset, num_games, max_turns):
-        idx = offset + jnp.arange(batch_size, dtype=jnp.int32)
-        seat = idx % n  # A's seat in each game
-        mine = seat[:, None] == jnp.arange(n)  # [B, N] seats controlled by A
+    def start(key, game):
+        # Everything random in a game derives from (key, game id) and its own turn number.
+        k_reset, k_loop = jax.random.split(jax.random.fold_in(key, game))
+        state, ts = env.reset(k_reset)
+        return state, ts, k_loop
 
-        # Independent keys per game; each game splits its own into a reset key
-        # and a loop key that is folded with the turn number below.
-        game_keys = jax.vmap(jax.random.split)(jax.random.split(key, batch_size))
-        k_reset, k_loop = game_keys[:, 0], game_keys[:, 1]
-
-        states, ts = jax.vmap(env.reset)(k_reset)
-        states = states._replace(done=states.done | (idx >= num_games))
-
-        def cond(carry):
-            t, states, _ = carry
-            return (t < max_turns) & ~jnp.all(states.done)
-
-        def body(carry):
-            t, states, ts = carry
-            # Distinct keys for policy A, policy B and the env, per game and turn.
-            ks = jax.vmap(lambda k: jax.random.split(jax.random.fold_in(k, t), 3))(k_loop)
-            act_a = jax.vmap(policy_a)(ks[:, 0], states, ts)
-            act_b = jax.vmap(policy_b)(ks[:, 1], states, ts)
-            actions = jnp.where(mine, act_a, act_b).astype(jnp.int32)
-            states, ts = jax.vmap(env.step)(ks[:, 2], states, actions)
-            return t + 1, states, ts
-
-        _, states, _ = jax.lax.while_loop(cond, body, (jnp.zeros((), jnp.int32), states, ts))
-
-        remaining = jnp.sum(states.alive, axis=-1)  # [B]
+    def outcome(states, seat):
+        remaining = jnp.sum(states.alive, axis=-1)  # [S]
         a_alive = jnp.take_along_axis(states.alive, seat[:, None], axis=1)[:, 0]
         a_elim = jnp.take_along_axis(states.elim_turn, seat[:, None], axis=1)[:, 0]
         # Two or more alive means the game was cut off (max_turns), not decided.
         cut_off = a_alive & (remaining >= 2)
         # A died on the final turn together with everyone else (as win_loss_reward).
         all_died = ~a_alive & (remaining == 0) & (a_elim == states.elim_turn.max(axis=-1))
-        outcome = jnp.where(
+        code = jnp.where(
             a_alive & (remaining == 1), _WIN, jnp.where(cut_off | all_died, _DRAW, _LOSS)
         )
-        return outcome.astype(jnp.int32), cut_off, states.turn
+        return code, cut_off
+
+    def run(key, first_game, num_games, max_turns):
+        game = jnp.arange(slots, dtype=jnp.int32)  # game held by each slot, from first_game
+        states, ts, k_loop = jax.vmap(start, in_axes=(None, 0))(key, first_game + game)
+        counts = jnp.zeros((slots, 4), jnp.int32)  # wins, draws, losses, truncated
+        turns = jnp.zeros((slots,), jnp.int32)
+
+        def cond(carry):
+            return jnp.any(carry[0] < num_games)
+
+        def body(carry):
+            game, next_game, states, ts, k_loop, counts, turns, it = carry
+            seat = (first_game + game) % n  # A's seat
+            # Distinct keys for policy A, policy B and the env, per game and turn.
+            ks = jax.vmap(lambda k, t: jax.random.split(jax.random.fold_in(k, t), 3))(
+                k_loop, states.turn
+            )
+            act_a = jax.vmap(policy_a)(ks[:, 0], states, ts)
+            act_b = jax.vmap(policy_b)(ks[:, 1], states, ts)
+            actions = jnp.where(seat[:, None] == seats, act_a, act_b).astype(jnp.int32)
+            states, ts = jax.vmap(env.step)(ks[:, 2], states, actions)
+
+            ended = (game < num_games) & (states.done | (states.turn >= max_turns))
+            code, cut_off = outcome(states, seat)
+            won = jnp.stack([code == _WIN, code == _DRAW, code == _LOSS, cut_off], axis=-1)
+            counts = counts + (ended[:, None] & won)
+            turns = turns + jnp.where(ended, states.turn, 0)
+
+            # Each slot whose game ended takes the next game id (ids >= num_games idle).
+            game = jnp.where(ended, next_game + jnp.cumsum(ended) - 1, game).astype(jnp.int32)
+            next_game = next_game + jnp.sum(ended, dtype=jnp.int32)
+
+            def pick(fresh, old):
+                return jnp.where(ended.reshape((-1,) + (1,) * (old.ndim - 1)), fresh, old)
+
+            def refill(old):
+                fresh = jax.vmap(start, in_axes=(None, 0))(key, first_game + game)
+                return jax.tree.map(pick, fresh, old)
+
+            states, ts, k_loop = jax.lax.cond(
+                jnp.any(ended), refill, lambda old: old, (states, ts, k_loop)
+            )
+            return game, next_game, states, ts, k_loop, counts, turns, it + 1
+
+        init = (game, jnp.int32(slots), states, ts, k_loop, counts, turns, jnp.int32(0))
+        out = jax.lax.while_loop(cond, body, init)
+        return out[5], out[6], out[7]
 
     return jax.jit(run)
 
@@ -168,33 +213,60 @@ def play_match(
     alive); a loss is any other elimination. With more than two snakes, A can
     lose even if the game is later truncated or ends with nobody alive.
 
-    ``batch_size`` games run at once (the last batch is padded). If
-    ``num_games < batch_size`` the batch shrinks to ``num_games`` to avoid
-    simulating padding.
+    ``batch_size`` is the number of game slots simulated at once (at most
+    ``num_games``). When a slot's game ends, the slot starts the next game, so
+    no slot waits for the longest game of a batch. Every random number of game
+    ``g`` derives from ``(key, g)`` and the game's own turn number, so the
+    result does not depend on ``batch_size`` (see :func:`run_match`).
+    """
+    return run_match(env, policy_a, policy_b, key, num_games, max_turns, batch_size).result
+
+
+def run_match(
+    env: BattlesnakeEnv,
+    policy_a: Policy,
+    policy_b: Policy,
+    key: jax.Array,
+    num_games: int,
+    max_turns: int = 1000,
+    batch_size: int = 1024,
+    first_game: int = 0,
+) -> MatchRun:
+    """:func:`play_match` that also reports how the slots were used.
+
+    Plays games ``first_game, ..., first_game + num_games - 1``. Game ``g`` is
+    the same game whatever ``batch_size``, ``num_games`` and ``first_game``
+    are, so splitting a match into ranges of game ids gives the same games as
+    playing it at once. The result is identical for every ``batch_size`` as
+    long as the policies compute each game independently of the others in the
+    batch (vmapped, as here) and XLA's arithmetic does not depend on the batch
+    shape (true of the policies in this package on CPU; tested).
+
+    The compiled loop is cached per ``(env, policy_a, policy_b, slots)``:
+    ``num_games``, ``max_turns`` and ``first_game`` are traced, so changing them
+    does not recompile, except that fewer games than ``batch_size`` shrink the
+    slots to ``num_games``.
     """
     if env.config.solo:
         raise ValueError("play_match needs a game with at least two snakes (not solo)")
     if num_games < 1 or max_turns < 1 or batch_size < 1:
         raise ValueError("num_games, max_turns and batch_size must be >= 1")
-    batch_size = min(batch_size, num_games)
-    run = _compiled_batch(env, policy_a, policy_b, batch_size)
-
-    num_batches = -(-num_games // batch_size)
-    batch_keys = jax.random.split(key, num_batches)
-    results = [
-        run(batch_keys[b], jnp.int32(b * batch_size), jnp.int32(num_games), jnp.int32(max_turns))
-        for b in range(num_batches)  # dispatched asynchronously; synced once below
-    ]
-    outcome, truncated, turns = (
-        np.concatenate(x)[:num_games] for x in zip(*jax.device_get(results), strict=True)
+    if first_game < 0 or first_game + num_games >= 2**31:
+        raise ValueError("game ids must lie in [0, 2**31)")
+    slots = min(batch_size, num_games)
+    run = _compiled_match(env, policy_a, policy_b, slots)
+    counts, turns, iterations = jax.device_get(
+        run(key, jnp.int32(first_game), jnp.int32(num_games), jnp.int32(max_turns))
     )
-    return _summarize(
-        wins=int(np.sum(outcome == _WIN)),
-        draws=int(np.sum(outcome == _DRAW)),
-        losses=int(np.sum(outcome == _LOSS)),
-        truncated=int(np.sum(truncated)),
-        total_turns=int(np.sum(turns, dtype=np.int64)),
+    wins, draws, losses, truncated = (int(x) for x in counts.sum(axis=0, dtype=np.int64))
+    result = _summarize(
+        wins=wins,
+        draws=draws,
+        losses=losses,
+        truncated=truncated,
+        total_turns=int(turns.sum(dtype=np.int64)),
     )
+    return MatchRun(result, slots, int(iterations))
 
 
 def _summarize(wins: int, draws: int, losses: int, truncated: int, total_turns: int) -> MatchResult:
