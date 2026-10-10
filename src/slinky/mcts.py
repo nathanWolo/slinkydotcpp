@@ -161,7 +161,7 @@ class MCTSConfig:
       rollout_steps: turns played from each new node before the leaf
         evaluation (0 = none); a rollout stops early if the game ends.
       rollout_policy: ``"random"`` (uniform over ``env.action_mask``) or
-        ``"heuristic"`` (:func:`slinky.heuristic.heuristic_policy`, about 25x
+        ``"heuristic"`` (:func:`slinky.heuristic.heuristic_policy`, about 30x
         the cost of a random step).
       weights: the heuristic's weights (leaf evaluator and rollout policy).
       max_depth: the deepest a simulation descends (edges from the root). A
@@ -170,10 +170,10 @@ class MCTSConfig:
       draw_value: value of a mutual elimination inside the search. 0 matches
         ``env.win_loss_reward``; the default -0.5 is "contempt" for draws (see
         the module docstring).
-      spawn_food: transitions inside the tree (and rollouts) sample the map's
-        food spawn with ``env.step``. If False they run ``rules.rules_step``
-        with no spawn, a deterministic model of the game (Schier &
-        Wustenbecker 2019) that skips the spawn's random draw.
+      spawn_food: if True, transitions inside the tree (and rollouts) use
+        ``env.step`` and sample the map's food spawn. If False (the default),
+        they run ``rules.rules_step`` without a spawn: a deterministic model of
+        the game (Schier & Wustenbecker 2019) that skips the costly random draw.
     """
 
     num_simulations: int = 128
@@ -206,6 +206,9 @@ class MCTSConfig:
         ):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}, got {getattr(self, name)!r}")
+
+
+DEFAULT_CONFIG = MCTSConfig()
 
 
 class SearchOutput(NamedTuple):
@@ -251,6 +254,12 @@ class _Descent(NamedTuple):
     expand: jax.Array  # bool: stopped at an unexpanded joint action of ``node``
     stored: jax.Array  # float32[N]: ``tree.value[node]`` (backed up when not expanding)
     active: jax.Array  # bool
+    # RM only (else None): what the backup needs from each node on the path,
+    # gathered here because gathering it in the backup makes XLA copy the tables.
+    rm_legal: jax.Array | None  # bool[D, N, 4]
+    rm_sigma: jax.Array | None  # float32[D, N, 4]: regret-matching strategy
+    rm_q: jax.Array | None  # float32[D, N, 4]: joint-table mean of each alternative move
+    rm_seen: jax.Array | None  # bool[D, N, 4]: that joint cell has been visited
 
 
 # --- Helpers -------------------------------------------------------------------------
@@ -291,12 +300,8 @@ def _transition(
     return nxt, env.action_mask(nxt)
 
 
-def _leaf_value(
-    key: jax.Array, state: State, mask: jax.Array, env: BattlesnakeEnv, config: MCTSConfig
-) -> jax.Array:
-    """float32[N] value of a newly expanded node (``mask`` is its ``env.action_mask``)."""
-    if config.rollout_steps > 0:
-        state = _rollout(key, state, mask, env, config)
+def _static_value(state: State, env: BattlesnakeEnv, config: MCTSConfig) -> jax.Array:
+    """float32[N]: the exact outcome if the game is over, else the leaf estimate."""
     exact = heuristic.terminal_values(state, env.config, config.draw_value)
     if config.leaf == "heuristic":
         estimate = heuristic.evaluate(state, env.config, config.weights)
@@ -304,6 +309,15 @@ def _leaf_value(
         estimate = jnp.where(state.alive, 0.0, -1.0)
     # ``done`` covers truncation too (living snakes get 0 there, as a draw).
     return jnp.where(state.done, exact, estimate).astype(jnp.float32)
+
+
+def _leaf_value(
+    key: jax.Array, state: State, mask: jax.Array, env: BattlesnakeEnv, config: MCTSConfig
+) -> jax.Array:
+    """float32[N] value of a newly expanded node (``mask`` is its ``env.action_mask``)."""
+    if config.rollout_steps > 0:
+        state = _rollout(key, state, mask, env, config)
+    return _static_value(state, env, config)
 
 
 def _rollout(
@@ -358,8 +372,13 @@ def _duct_moves(tree: Tree, node: jax.Array, u: jax.Array, config: MCTSConfig) -
 
 def _rm_joint(
     tree: Tree, node: jax.Array, u: jax.Array, config: MCTSConfig, digits: jax.Array
-) -> jax.Array:
-    """int32[] the regret-matching joint action at ``node``; ``u`` is U(0,1)[N, 4]."""
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Regret matching at ``node``; ``u`` is U(0,1)[N, 4].
+
+    Returns the joint action and, for the backup, ``legal``, ``sigma``, and the
+    joint table's mean (and whether it exists) for each player's alternative
+    moves against the other players' chosen moves (all ``[N, 4]``).
+    """
     n = digits.shape[1]
     legal = tree.legal[node]  # [N, 4]
     powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
@@ -370,30 +389,28 @@ def _rm_joint(
     k = jnp.minimum((u[0, 1] * n_fresh).astype(jnp.int32), n_fresh - 1)
     pick_fresh = jnp.argmax(fresh & (jnp.cumsum(fresh) == k + 1)).astype(jnp.int32)
     # Otherwise each player samples from (1 - gamma) * sigma + gamma * uniform.
+    sigma = _rm_sigma(tree.regret[node], legal)
     uniform = legal / jnp.sum(legal, axis=-1, keepdims=True)
-    probs = (1.0 - config.rm_gamma) * _rm_sigma(tree.regret[node], legal)
-    probs = probs + config.rm_gamma * uniform
+    probs = (1.0 - config.rm_gamma) * sigma + config.rm_gamma * uniform
     cdf = jnp.cumsum(probs, axis=-1)
     r = jnp.clip(u[:, 0], 1e-6, 1.0 - 1e-6)[:, None] * cdf[:, -1:]
     moves = jnp.minimum(jnp.sum(cdf < r, axis=-1), NUM_ACTIONS - 1).astype(jnp.int32)
-    return jnp.where(n_fresh > 0, pick_fresh, jnp.sum(moves * powers))
+    joint = jnp.where(n_fresh > 0, pick_fresh, jnp.sum(moves * powers))
+    # Joint cell with player p's move replaced by b, for every (p, b).
+    own = digits[joint]  # [N]
+    cells = joint + (jnp.arange(NUM_ACTIONS)[None, :] - own[:, None]) * powers[:, None]
+    nj = tree.joint_visits[node, cells]
+    xj = tree.joint_value[node, cells, jnp.arange(n)[:, None]]
+    return joint, legal, sigma, xj / jnp.maximum(nj, 1), nj > 0
 
 
 # --- Search ------------------------------------------------------------------------------
 
 
-def _init_tree(
-    state: State, env: BattlesnakeEnv, config: MCTSConfig, num_nodes: int
-) -> Tree:
+def _init_tree(state: State, env: BattlesnakeEnv, config: MCTSConfig, num_nodes: int) -> Tree:
     n = env.config.num_snakes
     j = NUM_ACTIONS**n
     mask = env.action_mask(state)
-    if config.leaf == "heuristic":
-        estimate = heuristic.evaluate(state, env.config, config.weights)
-    else:
-        estimate = jnp.where(state.alive, 0.0, -1.0)
-    exact = heuristic.terminal_values(state, env.config, config.draw_value)
-    value = jnp.where(state.done, exact, estimate)
 
     def stack(x: jax.Array) -> jax.Array:
         x = jnp.asarray(x)
@@ -408,7 +425,7 @@ def _init_tree(
         children=jnp.full((num_nodes, j), -1, jnp.int32),
         legal=stack(_legal(state, mask, env.config)),
         terminal=stack(state.done),
-        value=stack(value.astype(jnp.float32)),
+        value=stack(_static_value(state, env, config)),
         visits=zeros(n, NUM_ACTIONS, dtype=jnp.int32),
         value_sum=zeros(n, NUM_ACTIONS),
         value_sq=zeros(n, NUM_ACTIONS) if config.ucb1_tuned else None,
@@ -426,18 +443,24 @@ def _descend(
     n = digits.shape[1]
     powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
 
+    rm = config.selection == "rm"
+
     def body(c: _Descent) -> _Descent:
         u_d = jnp.mod(u + c.depth.astype(jnp.float32) * _PHI, 1.0)
-        if config.selection == "duct":
-            joint = jnp.sum(_duct_moves(tree, c.node, u_d, config) * powers)
+        rm_fields = {}
+        if rm:
+            joint, *per_node = _rm_joint(tree, c.node, u_d, config, digits)
+            names = ("rm_legal", "rm_sigma", "rm_q", "rm_seen")
+            for name, x in zip(names, per_node, strict=True):
+                rm_fields[name] = getattr(c, name).at[c.depth].set(x)
         else:
-            joint = _rm_joint(tree, c.node, u_d, config, digits)
+            joint = jnp.sum(_duct_moves(tree, c.node, u_d, config) * powers)
         child = tree.children[c.node, joint]
         depth = c.depth + 1
         expand = child < 0
         node = jnp.where(expand, c.node, child)
         stop = expand | tree.terminal[node] | (depth >= max_depth)
-        return _Descent(
+        return c._replace(
             node=node,
             depth=depth,
             path_node=c.path_node.at[c.depth].set(c.node),
@@ -445,9 +468,11 @@ def _descend(
             expand=expand,
             stored=tree.value[node],
             active=~stop,
+            **rm_fields,
         )
 
     zero = jnp.zeros((), jnp.int32)
+    per_move = (max_depth, n, NUM_ACTIONS)
     init = _Descent(
         node=zero,
         depth=zero,
@@ -456,6 +481,10 @@ def _descend(
         expand=jnp.zeros((), bool),
         stored=tree.value[0],
         active=~tree.terminal[0],
+        rm_legal=jnp.zeros(per_move, bool) if rm else None,
+        rm_sigma=jnp.zeros(per_move, jnp.float32) if rm else None,
+        rm_q=jnp.zeros(per_move, jnp.float32) if rm else None,
+        rm_seen=jnp.zeros(per_move, bool) if rm else None,
     )
     return jax.lax.while_loop(lambda c: c.active, body, init)
 
@@ -479,21 +508,15 @@ def _backup(
     if config.ucb1_tuned:
         tree = tree._replace(value_sq=tree.value_sq.at[at].add(v * v, mode="drop"))
     if config.selection == "rm":
-        safe = jnp.where(on_path, path.path_node, 0)  # gathers only; their updates are dropped
-        legal = tree.legal[safe]  # [D, N, 4]
-        sigma = _rm_sigma(tree.regret[safe], legal)
-        # Q_p(b): the joint table's mean for move b against the others' sampled moves.
-        powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
-        b = jnp.arange(NUM_ACTIONS)[None, None, :]
-        cells = path.path_joint[:, None, None] + (b - moves[:, :, None]) * powers[None, :, None]
-        nj = tree.joint_visits[safe[:, None, None], cells]  # [D, N, 4]
-        xj = tree.joint_value[safe[:, None, None], cells, players[:, :, None]]
+        # Q_p(b): the joint table's mean for move b against the others' sampled
+        # moves (the sample itself for the move played, and if b is unvisited).
         vb = v[:, :, None]
-        q = jnp.where(nj > 0, xj / jnp.maximum(nj, 1), vb)
-        q = jnp.where(b == moves[:, :, None], vb, q)
+        b = jnp.arange(NUM_ACTIONS)[None, None, :]
+        q = jnp.where(path.rm_seen & (b != moves[:, :, None]), path.rm_q, vb)
+        regret = jnp.where(path.rm_legal, q - vb, 0.0)
         tree = tree._replace(
-            regret=tree.regret.at[nodes].add(jnp.where(legal, q - vb, 0.0), mode="drop"),
-            strategy_sum=tree.strategy_sum.at[nodes].add(sigma, mode="drop"),
+            regret=tree.regret.at[nodes].add(regret, mode="drop"),
+            strategy_sum=tree.strategy_sum.at[nodes].add(path.rm_sigma, mode="drop"),
             joint_visits=tree.joint_visits.at[nodes, path.path_joint].add(1, mode="drop"),
             joint_value=tree.joint_value.at[nodes, path.path_joint].add(v, mode="drop"),
         )
@@ -501,7 +524,7 @@ def _backup(
 
 
 def search(
-    key: jax.Array, state: State, env: BattlesnakeEnv, config: MCTSConfig = MCTSConfig()
+    key: jax.Array, state: State, env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG
 ) -> SearchOutput:
     """Run SM-MCTS from ``state`` (one unbatched game) for every player at once.
 
@@ -590,13 +613,13 @@ def _output(
 
 
 def mcts_policy(
-    key: jax.Array, state: State, env: BattlesnakeEnv, config: MCTSConfig = MCTSConfig()
+    key: jax.Array, state: State, env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG
 ) -> jax.Array:
     """int32[N] every player's own search recommendation (one search serves all seats)."""
     return search(key, state, env, config).action
 
 
-def mcts(env: BattlesnakeEnv, config: MCTSConfig = MCTSConfig()) -> Policy:
+def mcts(env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG) -> Policy:
     """SM-MCTS as an ``evaluate.Policy``: ``(key, state, timestep) -> int32[N]``.
 
     Cached on ``(env, config)``, so repeated calls return the same object and

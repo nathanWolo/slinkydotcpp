@@ -1,0 +1,1142 @@
+<title>Slinky Replays</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an asymmetric two-column playback desk. The arena (board, health strip,
+   transport) leads on the left; snakes, the match score and the game list sit in a
+   narrower column on the right and stack under the board on phones. Colour is
+   reserved for the snakes; the chrome is a cool slate neutral. */
+:root {
+  --bg: #f1f3f6;
+  --raised: #fbfcfd;
+  --surface: #e4e8ee;
+  --plate: #cfd6df;
+  --cell: #e9edf2;
+  --ink: #121a24;
+  --ink-2: #455263;
+  --ink-3: #66727f;
+  --rule: #d3d9e1;
+  --rule-strong: #b5bfcb;
+  --danger: #b3261e;
+  --food: #d6336c;
+  --food-shine: #ffd6e4;
+  --hazard: #6e5a33;
+  --eye: #ffffff;
+  --pupil: #121a24;
+  --on-snake: #ffffff;
+  --s0: #d9560f;
+  --s1: #1f6fd1;
+  --s2: #0f9468;
+  --s3: #c23f94;
+  --s4: #b88a00;
+  --s5: #5f8f12;
+  --s6: #6c4fd6;
+  --s7: #c92a2a;
+  --font-display: "Big Shoulders Display", "Arial Narrow", "Roboto Condensed", "Helvetica Neue", sans-serif;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e131a;
+    --raised: #18202a;
+    --surface: #151c25;
+    --plate: #070a0e;
+    --cell: #1b232d;
+    --ink: #e3e8ee;
+    --ink-2: #a5b0bd;
+    --ink-3: #8592a1;
+    --rule: #252f3b;
+    --rule-strong: #3a4656;
+    --danger: #ff7b72;
+    --food: #f06595;
+    --food-shine: #ffd6e4;
+    --hazard: #d2b277;
+    --eye: #ffffff;
+    --pupil: #0e131a;
+    --on-snake: #ffffff;
+    --s0: #e4672a;
+    --s1: #3d8ae8;
+    --s2: #1aa575;
+    --s3: #d457a8;
+    --s4: #c99a12;
+    --s5: #6f9f22;
+    --s6: #8f78ec;
+    --s7: #e05050;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e131a;
+  --raised: #18202a;
+  --surface: #151c25;
+  --plate: #070a0e;
+  --cell: #1b232d;
+  --ink: #e3e8ee;
+  --ink-2: #a5b0bd;
+  --ink-3: #8592a1;
+  --rule: #252f3b;
+  --rule-strong: #3a4656;
+  --danger: #ff7b72;
+  --food: #f06595;
+  --food-shine: #ffd6e4;
+  --hazard: #d2b277;
+  --eye: #ffffff;
+  --pupil: #0e131a;
+  --on-snake: #ffffff;
+  --s0: #e4672a;
+  --s1: #3d8ae8;
+  --s2: #1aa575;
+  --s3: #d457a8;
+  --s4: #c99a12;
+  --s5: #6f9f22;
+  --s6: #8f78ec;
+  --s7: #e05050;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 14px/1.45 var(--font-ui);
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.app {
+  max-width: 1160px;
+  margin-inline: auto;
+  padding-inline: 16px;
+  padding-block: 14px 40px;
+}
+@media (min-width: 720px) { .app { padding-inline: 28px; padding-block: 22px 48px; } }
+
+.vh {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+.label {
+  margin: 0;
+  font: 600 11px/1.2 var(--font-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* --- Header ------------------------------------------------------------------ */
+.masthead {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+  gap: 12px 24px;
+  padding-block-end: 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.brand { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; min-width: 0; }
+.brand h1 {
+  margin: 0;
+  font: 800 34px/0.9 var(--font-display);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+.meta { margin: 0; color: var(--ink-2); font-size: 13px; }
+.loader { display: flex; align-items: center; gap: 10px; }
+.loader-hint { color: var(--ink-3); font-size: 12px; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 36px; padding: 0 14px;
+  border: 1px solid var(--rule-strong); border-radius: 6px;
+  background: var(--raised); color: var(--ink);
+  font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn svg { width: 16px; height: 16px; fill: currentColor; flex: none; }
+.loader:has(input:focus-visible) .btn { outline: 2px solid var(--ink); outline-offset: 2px; }
+.status {
+  margin: 12px 0 0; padding: 10px 12px;
+  border-left: 3px solid var(--danger);
+  background: var(--surface); color: var(--ink);
+}
+.status.ok { border-left-color: var(--ink-3); }
+
+/* --- Layout ------------------------------------------------------------------ */
+.layout { display: flex; align-items: flex-start; gap: 24px 44px; padding-block-start: 18px; }
+.stage { flex: 1 1 auto; min-width: 0; max-width: max(340px, calc(100svh - 350px)); }
+.side { flex: 0 1 340px; min-width: 280px; display: grid; gap: 28px; }
+@media (max-width: 860px) {
+  .layout { flex-direction: column; align-items: stretch; }
+  .stage { max-width: 640px; width: 100%; }
+  .side { flex: none; min-width: 0; width: 100%; max-width: 640px; }
+}
+
+/* --- Stage -------------------------------------------------------------------- */
+.game-head {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+  gap: 6px 16px; margin-block-end: 10px;
+}
+.game-title { min-width: 0; }
+.game-title h2 { margin: 2px 0 0; font: 600 16px/1.3 var(--font-ui); overflow-wrap: anywhere; }
+.game-title .vs { color: var(--ink-3); font-weight: 400; }
+.turn { display: flex; align-items: baseline; gap: 6px; color: var(--ink-2); }
+.turn b {
+  font: 800 40px/0.85 var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  min-width: 2.2ch; text-align: right;
+}
+.turn .of { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+.board-wrap { width: 100%; }
+#board { display: block; width: 100%; touch-action: manipulation; }
+.outcome { margin: 8px 0 0; min-height: 1.45em; color: var(--ink-2); font-size: 13px; }
+.outcome strong { color: var(--ink); font-weight: 600; }
+
+.strip-head { display: flex; justify-content: space-between; gap: 12px; margin-block: 14px 6px; }
+.strip-head .num { font-size: 11px; color: var(--ink-3); }
+.strip { position: relative; height: 56px; background: var(--surface); border-radius: 4px; }
+.strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.strip input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  opacity: 0; cursor: pointer; -webkit-appearance: none; appearance: none;
+}
+.strip input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 2px; height: 56px; }
+.strip input::-moz-range-thumb { width: 2px; height: 56px; border: 0; }
+.strip:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-block-start: 12px; }
+.buttons { display: flex; gap: 6px; }
+.ibtn {
+  display: inline-grid; place-items: center;
+  width: 38px; height: 38px; padding: 0;
+  border: 1px solid var(--rule-strong); border-radius: 6px;
+  background: var(--raised); color: var(--ink); cursor: pointer;
+}
+.ibtn:hover { border-color: var(--ink-3); }
+.ibtn svg { width: 16px; height: 16px; fill: currentColor; }
+.ibtn.play { width: auto; padding: 0 14px 0 12px; grid-auto-flow: column; gap: 8px; background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 600; }
+.ibtn.play span { min-width: 3.2em; text-align: left; }
+.speed { display: flex; align-items: center; gap: 10px; flex: 1 1 200px; min-width: 0; }
+.speed input { flex: 1 1 auto; min-width: 80px; max-width: 220px; accent-color: var(--ink); }
+.speed output { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink-2); min-width: 7.5ch; }
+.keys { margin: 12px 0 0; font-size: 12px; color: var(--ink-3); }
+.keys kbd {
+  font: 500 11px/1 var(--font-mono); padding: 2px 5px;
+  border: 1px solid var(--rule-strong); border-bottom-width: 2px; border-radius: 4px;
+  color: var(--ink-2); background: var(--raised);
+}
+
+/* --- Snakes ------------------------------------------------------------------- */
+.snakes ol, .games ol { list-style: none; margin: 0; padding: 0; }
+.snake {
+  display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 2px 10px;
+  padding-block: 10px; border-bottom: 1px solid var(--rule);
+}
+.snake:first-child { border-top: 1px solid var(--rule); margin-block-start: 8px; }
+.swatch { grid-row: 1 / span 3; width: 24px; height: 10px; margin-top: 5px; border-radius: 5px; background: var(--c); position: relative; }
+.swatch::after { content: ""; position: absolute; right: -2px; top: -2px; width: 14px; height: 14px; border-radius: 50%; background: var(--c); }
+.snake-name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.snake-name .name { font-weight: 600; overflow-wrap: anywhere; }
+.snake-name .seat { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+.tag {
+  font: 600 10px/1 var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 3px 6px; border-radius: 3px; background: var(--ink); color: var(--bg);
+}
+.snake-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; font-size: 12px; color: var(--ink-2); }
+.snake-stats .k { font-size: 10px; letter-spacing: 0.08em; color: var(--ink-3); margin-right: 5px; }
+.snake-stats .v { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 500; }
+.hp { display: flex; align-items: center; flex: 1 1 140px; min-width: 0; }
+.hp .track { flex: 1 1 auto; height: 6px; border-radius: 3px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--rule); overflow: hidden; margin-right: 8px; max-width: 160px; }
+.hp .fill { display: block; height: 100%; width: 0; background: var(--c); }
+.hp .v { min-width: 3ch; text-align: right; }
+.hp.low .v { color: var(--danger); }
+.snake-state { font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.snake-state .cause { font-family: var(--font-mono); color: var(--ink); }
+.snake.out .name { color: var(--ink-2); }
+.snake.out .swatch, .snake.out .swatch::after { opacity: 0.45; }
+
+/* --- Match & games ------------------------------------------------------------ */
+.score { margin: 6px 0 2px; font: 800 30px/1 var(--font-display); text-transform: uppercase; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.score .pts { font-variant-numeric: tabular-nums; }
+.score .unit { white-space: nowrap; }
+.score .dash { color: var(--ink-3); font-weight: 600; padding-inline: 0.15em; }
+.score-sub { margin: 0 0 10px; font-size: 12px; color: var(--ink-2); }
+.game-row {
+  display: grid; grid-template-columns: 2.6em minmax(0, 1fr) auto; gap: 2px 10px; align-items: baseline;
+  width: 100%; padding: 9px 8px; margin: 0;
+  border: 0; border-top: 1px solid var(--rule); border-radius: 0;
+  background: transparent; text-align: left; cursor: pointer;
+}
+.games li:last-child .game-row { border-bottom: 1px solid var(--rule); }
+.game-row:hover { background: var(--surface); }
+.game-row[aria-current="true"] { background: var(--surface); box-shadow: inset 2px 0 0 var(--ink); }
+.game-row .gid { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.game-row .seats { display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
+.game-row .who { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.game-row .who i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; }
+.game-row .who.won { font-weight: 600; }
+.game-row .who.lost { color: var(--ink-2); }
+.game-row .turns { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; text-align: right; }
+.game-row .res { grid-column: 2 / span 2; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+
+.drop {
+  position: fixed; inset: 12px; z-index: 10;
+  display: grid; place-items: center;
+  border: 2px dashed var(--ink-2); border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  font: 800 28px/1.1 var(--font-display); text-transform: uppercase; letter-spacing: 0.02em;
+  color: var(--ink); text-align: center; padding: 24px;
+}
+@media (pointer: coarse) { .loader-hint, .keys { display: none; } }
+.empty { padding: 40px 0; color: var(--ink-2); max-width: 60ch; }
+.empty code { font-family: var(--font-mono); font-size: 12px; background: var(--surface); padding: 1px 4px; border-radius: 3px; overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+</style>
+
+<div class="app" id="app">
+  <header class="masthead">
+    <div class="brand">
+      <h1>Slinky Replays</h1>
+      <p class="meta" id="meta">Battlesnake games between agents</p>
+    </div>
+    <div class="loader">
+      <span class="loader-hint">or drop a file on the page</span>
+      <input type="file" id="file-input" class="vh" accept=".json,application/json">
+      <label for="file-input" class="btn" id="file-label"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h4l2 2h5A1.5 1.5 0 0 1 17 6.5v9a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 15.5zm2 3V15h10V7.5z"/></svg>Open replay JSON</label>
+    </div>
+  </header>
+  <p class="status" id="load-status" role="status" aria-live="polite" hidden></p>
+
+  <div class="empty" id="empty" hidden>
+    <p>No replay is loaded. Open a <code>slinky-replay/1</code> JSON file, or record one with
+    <code>python -m slinky.replay --a heuristic --b dqn --games 8 --out replay.json</code>.</p>
+  </div>
+
+  <main class="layout" id="layout">
+    <section class="stage" aria-label="Board and playback">
+      <div class="game-head">
+        <div class="game-title">
+          <p class="label" id="game-label">Game</p>
+          <h2 id="game-title"></h2>
+        </div>
+        <div class="turn" aria-live="off"><span class="label">Turn</span><b id="turn-num">0</b><span class="of" id="turn-of">/ 0</span></div>
+      </div>
+      <div class="board-wrap" id="board-wrap"><canvas id="board" role="img" aria-label="Board"></canvas></div>
+      <p class="outcome" id="outcome"></p>
+
+      <div class="strip-head"><span class="label">Health by turn</span><span class="num" id="strip-range"></span></div>
+      <div class="strip" id="strip">
+        <canvas id="strip-canvas" aria-hidden="true"></canvas>
+        <input type="range" id="scrub" min="0" max="0" step="1" value="0" aria-label="Turn">
+      </div>
+
+      <div class="transport">
+        <div class="buttons">
+          <button type="button" class="ibtn" id="btn-start" aria-label="First turn (Home)" title="First turn (Home)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h2.2v12H4zM16 4.6v10.8L7.6 10z"/></svg></button>
+          <button type="button" class="ibtn" id="btn-back" aria-label="Previous turn (Left arrow)" title="Previous turn (Left arrow)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.5 4.6v10.8L5.6 10zM14 4.6h2v10.8h-2z"/></svg></button>
+          <button type="button" class="ibtn play" id="btn-play" aria-label="Play (Space)" title="Play or pause (Space)"><svg viewBox="0 0 20 20" aria-hidden="true" id="play-icon"><path d="M6 4l10 6-10 6z"/></svg><span id="play-text">Play</span></button>
+          <button type="button" class="ibtn" id="btn-fwd" aria-label="Next turn (Right arrow)" title="Next turn (Right arrow)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 4.6v10.8l7.9-5.4zM4 4.6h2v10.8H4z"/></svg></button>
+          <button type="button" class="ibtn" id="btn-end" aria-label="Last turn (End)" title="Last turn (End)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.8 4H16v12h-2.2zM4 4.6v10.8L12.4 10z"/></svg></button>
+        </div>
+        <div class="speed">
+          <label class="label" for="speed">Speed</label>
+          <input type="range" id="speed" min="2" max="30" step="1" value="8">
+          <output id="speed-out" for="speed">8 turns/s</output>
+        </div>
+      </div>
+      <p class="keys"><kbd>Space</kbd> play/pause &nbsp;<kbd>&larr;</kbd> <kbd>&rarr;</kbd> step &nbsp;<kbd>Home</kbd> <kbd>End</kbd> jump &nbsp;<kbd>[</kbd> <kbd>]</kbd> game</p>
+    </section>
+
+    <aside class="side">
+      <section class="snakes" aria-labelledby="snakes-label">
+        <h2 class="label" id="snakes-label">Snakes</h2>
+        <ol id="snake-list"></ol>
+      </section>
+      <section class="games" aria-labelledby="games-label">
+        <h2 class="label" id="games-label">Match</h2>
+        <p class="score" id="score"></p>
+        <p class="score-sub" id="score-sub"></p>
+        <ol id="game-list"></ol>
+      </section>
+    </aside>
+  </main>
+</div>
+<div class="drop" id="drop" hidden>Drop a replay JSON file to open it</div>
+
+<script type="application/json" id="replay-data">null</script>
+<script>
+(() => {
+  "use strict";
+  const FORMAT = "slinky-replay/1";
+  const PALETTE = 8;
+  const $ = (id) => document.getElementById(id);
+  const el = {
+    meta: $("meta"), status: $("load-status"), empty: $("empty"), layout: $("layout"),
+    gameLabel: $("game-label"), gameTitle: $("game-title"), turnNum: $("turn-num"), turnOf: $("turn-of"),
+    wrap: $("board-wrap"), board: $("board"), outcome: $("outcome"),
+    stripRange: $("strip-range"), strip: $("strip"), stripCanvas: $("strip-canvas"), scrub: $("scrub"),
+    start: $("btn-start"), back: $("btn-back"), play: $("btn-play"), playIcon: $("play-icon"), playText: $("play-text"),
+    fwd: $("btn-fwd"), end: $("btn-end"), speed: $("speed"), speedOut: $("speed-out"),
+    snakeList: $("snake-list"), score: $("score"), scoreSub: $("score-sub"), gameList: $("game-list"),
+    file: $("file-input"), drop: $("drop"),
+  };
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const PLAY_PATH = "M6 4l10 6-10 6z";
+  const PAUSE_PATH = "M5 4h3.6v12H5zM11.4 4H15v12h-3.6z";
+
+  const view = { replay: null, game: 0, turn: 0, playing: false, speed: 8 };
+  let cur = null;          // prepared current game
+  let colors = null;       // theme colours read from CSS tokens
+  let raf = 0, lastTick = 0, acc = 0;
+  let hoverTurn = null;
+  let boardGeom = null;
+
+  // --- Theme --------------------------------------------------------------------
+  function readColors() {
+    const cs = getComputedStyle(document.documentElement);
+    const g = (n) => cs.getPropertyValue(n).trim();
+    colors = {
+      bg: g("--bg"), plate: g("--plate"), cell: g("--cell"), surface: g("--surface"),
+      ink: g("--ink"), ink2: g("--ink-2"), ink3: g("--ink-3"), rule: g("--rule"),
+      food: g("--food"), foodShine: g("--food-shine"), hazard: g("--hazard"),
+      eye: g("--eye"), pupil: g("--pupil"), onSnake: g("--on-snake"),
+      snakes: Array.from({ length: PALETTE }, (_, i) => g(`--s${i}`)),
+      mono: g("--font-mono") || "monospace",
+    };
+  }
+  function seatColor(i) { return colors.snakes[i % PALETTE]; }
+  function parseHex(c) {
+    const m = /^#([0-9a-f]{6})$/i.exec(c);
+    if (!m) return null;
+    const v = parseInt(m[1], 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+  function mix(a, b, t) {   // a toward b by t, for dimmed (eliminated) snakes
+    const pa = parseHex(a), pb = parseHex(b);
+    if (!pa || !pb) return a;
+    const c = pa.map((x, i) => Math.round(x + (pb[i] - x) * t));
+    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+  }
+
+  // --- Loading and validation ---------------------------------------------------------
+  function validate(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("the file holds JSON, but not a replay object");
+    if (data.format !== FORMAT) {
+      throw new Error(`it is not a Slinky replay: expected "format": "${FORMAT}"` +
+        (data.format ? `, found "${String(data.format).slice(0, 40)}"` : ""));
+    }
+    const b = data.board;
+    if (!b || !(b.width >= 1) || !(b.height >= 1)) throw new Error("the replay has no board size (board.width, board.height)");
+    if (!Array.isArray(data.games) || data.games.length === 0) throw new Error("the replay contains no games");
+    data.games.forEach((g, i) => {
+      if (!g || !Array.isArray(g.seats) || !Array.isArray(g.frames) || g.frames.length === 0 || !g.result) {
+        throw new Error(`game ${i + 1} is missing its seats, frames or result`);
+      }
+      for (const f of g.frames) {
+        if (!f || !Array.isArray(f.snakes) || f.snakes.length !== g.seats.length) {
+          throw new Error(`game ${i + 1} has a frame whose snakes don't match its ${g.seats.length} seats`);
+        }
+      }
+    });
+    if (!Array.isArray(data.agents)) {
+      data.agents = [...new Set(data.games.flatMap((g) => g.seats))];
+    }
+    return data;
+  }
+
+  function showStatus(text, ok) {
+    el.status.textContent = text;
+    el.status.classList.toggle("ok", !!ok);
+    el.status.hidden = !text;
+  }
+
+  function openFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = () => showStatus(`Couldn't read “${file.name}”. Check that the file is readable and try again.`);
+    reader.onload = () => {
+      let data;
+      try {
+        data = JSON.parse(String(reader.result));
+      } catch (e) {
+        showStatus(`Couldn't open “${file.name}”: it is not valid JSON (${e.message}).`);
+        return;
+      }
+      try {
+        validate(data);
+      } catch (e) {
+        showStatus(`Couldn't open “${file.name}”: ${e.message}.`);
+        return;
+      }
+      showStatus(`Opened “${file.name}”: ${data.games.length} game${data.games.length === 1 ? "" : "s"}.`, true);
+      loadReplay(data, { game: 0, turn: 0, playing: !reduceMotion.matches });
+    };
+    reader.readAsText(file);
+  }
+
+  // --- Preparing a game ---------------------------------------------------------------
+  function onBoard(x, y) {
+    const b = view.replay.board;
+    return x >= 0 && y >= 0 && x < b.width && y < b.height;
+  }
+  function deathPoint(body) {
+    const [hx, hy] = body[0];
+    if (onBoard(hx, hy)) return [hx, hy];
+    const neck = body.find((p) => onBoard(p[0], p[1]));
+    if (!neck) return null;
+    return [(hx + neck[0]) / 2, (hy + neck[1]) / 2];  // on the wall it ran into
+  }
+  function prepare(gi) {
+    const game = view.replay.games[gi];
+    const frames = game.frames;
+    const n = game.seats.length;
+    const last = frames.length - 1;
+    const deaths = (game.result.elims || []).map((e) => {
+      const f = frames[Math.min(e.turn, last)];
+      const s = f && f.snakes[e.seat];
+      return { seat: e.seat, turn: e.turn, cause: e.cause, pos: s && s.body && s.body.length ? deathPoint(s.body) : null };
+    });
+    const deathOf = Array(n).fill(null);
+    for (const d of deaths) deathOf[d.seat] = d;
+    return { index: gi, game, frames, n, last, deaths, deathOf };
+  }
+
+  // --- Board geometry and drawing --------------------------------------------------------
+  function sizeCanvas(canvas, cssW, cssH) {
+    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+    const w = Math.round(cssW * dpr), h = Math.round(cssH * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    canvas.style.height = `${cssH}px`;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return ctx;
+  }
+  function layoutBoard() {
+    const b = view.replay.board;
+    const cssW = Math.max(200, el.wrap.clientWidth);
+    const gl = Math.round(Math.min(24, Math.max(16, cssW * 0.04)));   // y labels
+    const gb = gl;                                                   // x labels
+    const pad = 2;
+    const cell = (cssW - gl - pad) / b.width;
+    const cssH = Math.round(pad + cell * b.height + gb);
+    boardGeom = { cssW, cssH, gl, gb, pad, cell, W: b.width, H: b.height };
+  }
+  const cx = (x) => boardGeom.gl + (x + 0.5) * boardGeom.cell;
+  const cy = (y) => boardGeom.pad + (boardGeom.H - 1 - y + 0.5) * boardGeom.cell;
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBoard() {
+    if (!cur) return;
+    const g = boardGeom;
+    const ctx = sizeCanvas(el.board, g.cssW, g.cssH);
+    const { cell, W, H } = g;
+    const x0 = g.gl, y0 = g.pad, bw = cell * W, bh = cell * H;
+    ctx.clearRect(0, 0, g.cssW, g.cssH);
+
+    // Arena plate and cells.
+    ctx.fillStyle = colors.plate;
+    roundRect(ctx, x0, y0, bw, bh, Math.min(8, cell * 0.2));
+    ctx.fill();
+    const gap = Math.max(1, cell * 0.07);
+    ctx.fillStyle = colors.cell;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        roundRect(ctx, x0 + x * cell + gap / 2, y0 + (H - 1 - y) * cell + gap / 2, cell - gap, cell - gap, cell * 0.12);
+        ctx.fill();
+      }
+    }
+
+    // Coordinate labels (API orientation: (0, 0) is bottom-left).
+    ctx.fillStyle = colors.ink3;
+    const fs = Math.max(9, Math.min(11, cell * 0.3));
+    ctx.font = `500 ${fs}px ${colors.mono}`;
+    const every = W > 15 || H > 15 ? 2 : 1;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let x = 0; x < W; x += every) ctx.fillText(String(x), cx(x), y0 + bh + g.gb / 2 + 1);
+    ctx.textAlign = "right";
+    for (let y = 0; y < H; y += every) ctx.fillText(String(y), x0 - 5, cy(y));
+
+    const frame = cur.frames[view.turn];
+
+    // Hazards: shade deepens with each stacked layer.
+    for (const [x, y, stack] of frame.hazards || []) {
+      const px = x0 + x * cell + gap / 2, py = y0 + (H - 1 - y) * cell + gap / 2, s = cell - gap;
+      ctx.save();
+      roundRect(ctx, px, py, s, s, cell * 0.12);
+      ctx.clip();
+      ctx.globalAlpha = Math.min(0.2 + 0.15 * ((stack || 1) - 1), 0.7);
+      ctx.fillStyle = colors.hazard;
+      ctx.fillRect(px, py, s, s);
+      ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = colors.hazard;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const step = Math.max(4, s / 5);
+      for (let d = -s; d < s; d += step) { ctx.moveTo(px + d, py + s); ctx.lineTo(px + d + s, py); }
+      ctx.stroke();
+      ctx.restore();
+      if ((stack || 1) > 1) {
+        ctx.fillStyle = colors.ink2;
+        ctx.font = `600 ${Math.max(8, cell * 0.24)}px ${colors.mono}`;
+        ctx.textAlign = "right"; ctx.textBaseline = "top";
+        ctx.fillText(String(stack), px + s - 2, py + 2);
+      }
+    }
+
+    // Food.
+    for (const [x, y] of frame.food || []) {
+      const r = cell * 0.19;
+      ctx.fillStyle = colors.food;
+      ctx.beginPath(); ctx.arc(cx(x), cy(y), r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = colors.foodShine;
+      ctx.beginPath(); ctx.arc(cx(x) - r * 0.35, cy(y) - r * 0.35, r * 0.32, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Snakes: eliminated (this turn) underneath, living on top.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x0, y0, bw, bh); ctx.clip();
+    frame.snakes.forEach((s, i) => {
+      if (!s.alive && s.body && s.body.length) drawSnake(ctx, s.body, mix(seatColor(i), colors.cell, 0.55), i);
+    });
+    frame.snakes.forEach((s, i) => {
+      if (s.alive && s.body && s.body.length) drawSnake(ctx, s.body, seatColor(i), i);
+    });
+    ctx.restore();
+
+    // Elimination markers: bold with the cause on the turn it happened, faint after.
+    const labels = [];
+    for (const d of cur.deaths) {
+      if (!d.pos || d.turn > view.turn) continue;
+      const now = d.turn === view.turn;
+      drawCross(ctx, cx(d.pos[0]), cy(d.pos[1]), cell * (now ? 0.24 : 0.16), now ? 1 : 0.45);
+      if (now) labels.push(d);
+    }
+    const placed = [];
+    for (const d of labels) drawDeathLabel(ctx, d, placed);
+  }
+
+  function drawSnake(ctx, body, color, seat) {
+    const { cell, W, H } = boardGeom;
+    const pts = [];
+    for (const p of body) {
+      const q = pts[pts.length - 1];
+      if (!q || q[0] !== p[0] || q[1] !== p[1]) pts.push(p);
+    }
+    const stacked = body.length > pts.length;   // just ate (or the starting stack)
+    const base = cell * 0.56;
+    const P = (p) => [cx(p[0]), cy(p[1])];
+    // Unit step from a to b in board cells, wrap-aware (screen y points down).
+    const dirOf = (a, b) => {
+      let dx = b[0] - a[0], dy = b[1] - a[1];
+      if (Math.abs(dx) > 1) dx = -Math.sign(dx);
+      if (Math.abs(dy) > 1) dy = -Math.sign(dy);
+      return [dx, -dy];
+    };
+    const adjacent = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) === 1;
+    const segment = (a, b) => {
+      const [ax, ay] = P(a);
+      if (adjacent(a, b)) { const [bx, by] = P(b); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); return; }
+      const [dx, dy] = dirOf(a, b);      // wraps: stubs to the two edges
+      const [bx, by] = P(b);
+      ctx.moveTo(ax, ay); ctx.lineTo(ax + dx * cell * 0.5, ay + dy * cell * 0.5);
+      ctx.moveTo(bx, by); ctx.lineTo(bx - dx * cell * 0.5, by - dy * cell * 0.5);
+    };
+
+    ctx.strokeStyle = color; ctx.fillStyle = color;
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    const lastSeg = pts.length - 1;    // segments are i -> i + 1 for i < lastSeg
+    if (pts.length >= 2) {
+      ctx.lineWidth = base;
+      ctx.beginPath();
+      const full = stacked ? lastSeg : lastSeg - 1;
+      for (let i = 0; i < full; i++) segment(pts[i], pts[i + 1]);
+      ctx.stroke();
+      const tailEnd = pts[lastSeg];
+      if (!stacked) {
+        // Taper the final segment toward the tail tip.
+        const a = pts[lastSeg - 1];
+        const [ax, ay] = P(a);
+        const [dx, dy] = dirOf(a, tailEnd);
+        const len = cell;
+        const bx = ax + dx * len, by = ay + dy * len;
+        const w0 = base / 2, w1 = base * 0.26;
+        const nx = -dy, ny = dx;
+        ctx.beginPath();
+        ctx.moveTo(ax + nx * w0, ay + ny * w0);
+        ctx.lineTo(bx + nx * w1, by + ny * w1);
+        ctx.arc(bx, by, w1, Math.atan2(ny, nx), Math.atan2(-ny, -nx), false);
+        ctx.lineTo(ax - nx * w0, ay - ny * w0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath(); ctx.arc(ax, ay, w0, 0, Math.PI * 2); ctx.fill();
+        if (!adjacent(a, tailEnd)) {   // tail wrapped to the far edge
+          const [tx, ty] = P(tailEnd);
+          ctx.beginPath(); ctx.arc(tx, ty, w1 * 1.6, 0, Math.PI * 2); ctx.fill();
+        }
+      } else {
+        // Stacked tail: the snake ate, so its tail stays put next turn. Mark it with a ring.
+        const [tx, ty] = P(tailEnd);
+        ctx.save();
+        ctx.strokeStyle = colors.cell;
+        ctx.lineWidth = Math.max(1.25, cell * 0.05);
+        ctx.beginPath(); ctx.arc(tx, ty, base * 0.24, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Head, facing the way it last moved (up for a fresh, stacked snake).
+    const [hx, hy] = P(pts[0]);
+    const [fx, fy] = pts.length >= 2 ? dirOf(pts[1], pts[0]) : [0, -1];
+    const r = base * 0.62;
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(hx, hy, r, 0, Math.PI * 2); ctx.fill();
+    if (cur.n > 2) {
+      // Seat number on the head (colours alone can be confused with many snakes),
+      // and a short snout for the direction of travel.
+      ctx.beginPath();
+      ctx.moveTo(hx + fx * r * 1.4, hy + fy * r * 1.4);
+      ctx.lineTo(hx + fx * r * 0.5 - fy * r * 0.7, hy + fy * r * 0.5 + fx * r * 0.7);
+      ctx.lineTo(hx + fx * r * 0.5 + fy * r * 0.7, hy + fy * r * 0.5 - fx * r * 0.7);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = colors.onSnake;
+      ctx.font = `600 ${Math.max(9, r * 1.1)}px ${colors.mono}`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(String(seat), hx, hy + 0.5);
+    } else {
+      const er = Math.max(1.6, cell * 0.075);
+      for (const side of [-1, 1]) {
+        const ex = hx + fx * r * 0.32 - fy * side * r * 0.48;
+        const ey = hy + fy * r * 0.32 + fx * side * r * 0.48;
+        ctx.fillStyle = colors.eye;
+        ctx.beginPath(); ctx.arc(ex, ey, er, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = colors.pupil;
+        ctx.beginPath(); ctx.arc(ex + fx * er * 0.35, ey + fy * er * 0.35, er * 0.5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  function drawCross(ctx, x, y, s, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.lineCap = "round";
+    const path = () => { ctx.beginPath(); ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s); ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s); };
+    path(); ctx.strokeStyle = colors.cell; ctx.lineWidth = s * 0.95; ctx.stroke();
+    path(); ctx.strokeStyle = colors.ink; ctx.lineWidth = s * 0.42; ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawDeathLabel(ctx, d, placed) {
+    const g = boardGeom;
+    const text = d.cause || "eliminated";
+    const fs = Math.max(10, Math.min(12, g.cell * 0.32));
+    ctx.font = `500 ${fs}px ${colors.mono}`;
+    const w = ctx.measureText(text).width + 12, h = fs + 9;
+    const px = cx(d.pos[0]), py = cy(d.pos[1]);
+    const minX = g.gl + 2, maxX = g.gl + g.cell * g.W - w - 2;
+    const minY = g.pad + 2, maxY = g.pad + g.cell * g.H - h - 2;
+    let x = Math.max(minX, Math.min(maxX, px - w / 2));
+    let y = py - g.cell * 0.55 - h;
+    if (y < minY) y = py + g.cell * 0.55;
+    for (const r of placed) {
+      if (x < r.x + r.w && r.x < x + w && y < r.y + r.h && r.y < y + h) y = r.y + r.h + 3;
+    }
+    y = Math.max(minY, Math.min(maxY, y));
+    placed.push({ x, y, w, h });
+    ctx.fillStyle = colors.ink;
+    roundRect(ctx, x, y, w, h, 3);
+    ctx.fill();
+    ctx.fillStyle = colors.bg;
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText(text, x + 6, y + h / 2 + 0.5);
+  }
+
+  // --- Health strip (a scrubber with every snake's health over the game) -------------------
+  function drawStrip() {
+    if (!cur) return;
+    const cssW = Math.max(100, el.strip.clientWidth), cssH = el.strip.clientHeight || 56;
+    const ctx = sizeCanvas(el.stripCanvas, cssW, cssH);
+    el.stripCanvas.style.height = "";
+    ctx.clearRect(0, 0, cssW, cssH);
+    const T = Math.max(1, cur.last), padX = 1, top = 6, bottom = 6;
+    const X = (t) => padX + (t / T) * (cssW - 2 * padX);
+    const Y = (hp) => top + (1 - hp / 100) * (cssH - top - bottom);
+    ctx.strokeStyle = colors.rule; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const hp of [0, 50, 100]) { const y = Math.round(Y(hp)) + 0.5; ctx.moveTo(0, y); ctx.lineTo(cssW, y); }
+    ctx.stroke();
+
+    const playX = X(view.turn);
+    const series = (i) => {
+      ctx.beginPath();
+      const d = cur.deathOf[i];
+      const end = d ? Math.min(d.turn, cur.last) : cur.last;
+      for (let t = 0; t <= end; t++) {
+        const hp = cur.frames[t].snakes[i].health;
+        if (t === 0) ctx.moveTo(X(t), Y(hp)); else ctx.lineTo(X(t), Y(hp));
+      }
+      ctx.stroke();
+    };
+    ctx.lineJoin = "round"; ctx.lineWidth = 1.5;
+    for (const [from, to, alpha] of [[0, playX, 1], [playX, cssW, 0.35]]) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(from, 0, to - from, cssH); ctx.clip();
+      ctx.globalAlpha = alpha;
+      for (let i = 0; i < cur.n; i++) { ctx.strokeStyle = seatColor(i); series(i); }
+      ctx.restore();
+    }
+    for (const d of cur.deaths) {
+      const t = Math.min(d.turn, cur.last);
+      const hp = cur.frames[t].snakes[d.seat].health;
+      const x = X(t), y = Y(hp), s = 3.5;
+      ctx.strokeStyle = colors.ink; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s); ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s); ctx.stroke();
+    }
+    if (hoverTurn !== null && hoverTurn !== view.turn) {
+      ctx.strokeStyle = colors.ink3; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      const hx = Math.round(X(hoverTurn)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(hx, 0); ctx.lineTo(hx, cssH); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = `500 10px ${colors.mono}`;
+      ctx.fillStyle = colors.ink2; ctx.textBaseline = "top";
+      const label = `t${hoverTurn}`;
+      const lw = ctx.measureText(label).width;
+      ctx.textAlign = hx + lw + 6 > cssW ? "right" : "left";
+      ctx.fillText(label, ctx.textAlign === "right" ? hx - 4 : hx + 4, 3);
+    }
+    ctx.fillStyle = colors.ink;
+    ctx.fillRect(Math.round(playX) - 1, 0, 2, cssH);
+    ctx.beginPath(); ctx.arc(playX, 3, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // --- DOM panels ------------------------------------------------------------------------
+  function resultText(game) {
+    const r = game.result;
+    if (r.winner !== null && r.winner !== undefined) return `${game.seats[r.winner]} won`;
+    if (r.truncated) return "cut off at the turn limit";
+    if (r.draw) return "draw";
+    return "no winner";
+  }
+
+  function buildMatch() {
+    const r = view.replay;
+    const wins = new Map(r.agents.map((a) => [a, 0]));
+    let draws = 0, cut = 0, turns = 0;
+    for (const g of r.games) {
+      const w = g.result.winner;
+      if (w !== null && w !== undefined) wins.set(g.seats[w], (wins.get(g.seats[w]) || 0) + 1);
+      if (g.result.draw) draws++;
+      if (g.result.truncated) cut++;
+      turns += g.result.turns;
+    }
+    el.score.textContent = "";
+    const entries = [...wins.entries()];
+    if (entries.length === 2) {
+      const [[a, wa], [b, wb]] = entries;
+      el.score.append(a + " ", span("pts", String(wa)), span("dash", "–"), span("pts", String(wb)), " " + b);
+    } else {
+      entries.forEach(([a, w], i) => {
+        const unit = span("unit", a + " ");
+        unit.append(span("pts", String(w)));
+        if (i) el.score.append(span("dash", " · "));
+        el.score.append(unit);
+      });
+    }
+    const n = r.games.length;
+    el.scoreSub.textContent = `wins over ${n} game${n === 1 ? "" : "s"} · ${draws} draw${draws === 1 ? "" : "s"} · ${cut} cut off · ${Math.round(turns / n)} turns on average`;
+    el.meta.textContent = `${r.board.width} × ${r.board.height} · ${r.ruleset || "standard"} rules · ${r.map || "standard"} map` +
+      (r.max_turns ? ` · turn limit ${r.max_turns}` : "");
+
+    el.gameList.textContent = "";
+    r.games.forEach((g, gi) => {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "game-row"; btn.dataset.game = String(gi);
+      btn.id = `game-row-${gi}`;
+      const seats = span("seats", "");
+      g.seats.forEach((name, s) => {
+        const who = span("who", "");
+        who.style.setProperty("--c", `var(--s${s % PALETTE})`);
+        const w = g.result.winner;
+        if (w !== null && w !== undefined) who.classList.add(w === s ? "won" : "lost");
+        who.append(document.createElement("i"), name);
+        seats.append(who);
+      });
+      const elims = (g.result.elims || []).map((e) => `${g.seats[e.seat]}: ${e.cause}, turn ${e.turn}`).join("; ");
+      btn.append(span("gid", `#${gi + 1}`), seats, span("turns", `${g.result.turns} t`), span("res", resultText(g) + (elims ? ` · ${elims}` : "")));
+      btn.setAttribute("aria-label", `Game ${gi + 1}: ${g.seats.join(" vs ")}, ${resultText(g)} after ${g.result.turns} turns`);
+      btn.addEventListener("click", () => selectGame(gi, true));
+      li.append(btn);
+      el.gameList.append(li);
+    });
+  }
+
+  function span(cls, text) {
+    const s = document.createElement("span");
+    s.className = cls;
+    if (text) s.textContent = text;
+    return s;
+  }
+
+  function buildSnakes() {
+    el.snakeList.textContent = "";
+    cur.rows = cur.game.seats.map((name, i) => {
+      const li = document.createElement("li");
+      li.className = "snake";
+      li.style.setProperty("--c", `var(--s${i % PALETTE})`);
+      const nameRow = span("snake-name", "");
+      const tag = span("tag", "winner"); tag.hidden = true;
+      nameRow.append(span("name", name), span("seat", `seat ${i}`), tag);
+      const stats = span("snake-stats", "");
+      const lenStat = span("stat", ""); const lenV = span("v", "");
+      lenStat.append(span("k", "LENGTH"), lenV);
+      const hp = span("hp", ""); const bar = span("track", ""); const fill = span("fill", ""); const hpV = span("v", "");
+      bar.append(fill);
+      hp.append(span("k", "HEALTH"), bar, hpV);
+      stats.append(lenStat, hp);
+      const st = span("snake-state", "");
+      const main = document.createElement("div");
+      main.append(nameRow, stats, st);
+      li.append(span("swatch", ""), main);
+      el.snakeList.append(li);
+      return { li, tag, lenV, fill, hpV, hp, st };
+    });
+  }
+
+  function updatePanels() {
+    const f = cur.frames[view.turn];
+    const atEnd = view.turn === cur.last;
+    const winner = cur.game.result.winner;
+    const desc = [];
+    f.snakes.forEach((s, i) => {
+      const row = cur.rows[i];
+      row.lenV.textContent = String(s.length ?? s.body.length);
+      row.hpV.textContent = String(s.health);
+      row.fill.style.width = `${Math.max(0, Math.min(100, s.health))}%`;
+      row.hp.classList.toggle("low", s.alive && s.health <= 20);
+      row.li.classList.toggle("out", !s.alive);
+      row.tag.hidden = !(atEnd && winner === i);
+      const d = cur.deathOf[i];
+      row.st.textContent = "";
+      if (s.alive) {
+        row.st.textContent = atEnd && cur.game.result.truncated ? "alive at the turn limit" : "alive";
+        const h = s.body[0];
+        desc.push(`${cur.game.seats[i]} (seat ${i}) at ${h[0]},${h[1]}, length ${s.length}, health ${s.health}`);
+      } else {
+        const t = d ? d.turn : "?";
+        row.st.append(`eliminated on turn ${t} by `, span("cause", s.cause || (d && d.cause) || "unknown"));
+        desc.push(`${cur.game.seats[i]} (seat ${i}) eliminated on turn ${t} by ${s.cause || (d && d.cause)}`);
+      }
+    });
+    el.turnNum.textContent = String(view.turn);
+    el.turnOf.textContent = `/ ${cur.last}`;
+    el.scrub.value = String(view.turn);
+    el.scrub.setAttribute("aria-valuetext", `Turn ${view.turn} of ${cur.last}`);
+    el.board.setAttribute("aria-label", `Turn ${view.turn}. ${desc.join("; ")}. ${f.food.length} food.`);
+
+    const r = cur.game.result;
+    el.outcome.textContent = "";
+    if (atEnd) {
+      const strong = document.createElement("strong");
+      strong.textContent = resultText(cur.game).replace(/^./, (c) => c.toUpperCase());
+      el.outcome.append(strong, ` after ${r.turns} turns.`);
+    } else {
+      const ate = f.snakes.filter((s, i) => view.turn > 0 && s.alive && s.length > cur.frames[view.turn - 1].snakes[i].length)
+        .map((s) => cur.game.seats[f.snakes.indexOf(s)]);
+      el.outcome.textContent = ate.length ? `${ate.join(" and ")} ate on this turn.` : `${f.food.length} food on the board.`;
+    }
+  }
+
+  function render() {
+    if (!cur) return;
+    drawBoard();
+    drawStrip();
+    updatePanels();
+  }
+
+  // --- Playback ----------------------------------------------------------------------------
+  function setTurn(t) {
+    if (!cur) return;
+    const nt = Math.max(0, Math.min(cur.last, t));
+    if (nt === view.turn && cur.drawn) return;
+    view.turn = nt;
+    cur.drawn = true;
+    render();
+  }
+  function setPlaying(on) {
+    if (!cur) return;
+    if (on && view.turn >= cur.last) setTurn(0);
+    view.playing = on;
+    el.playIcon.firstElementChild.setAttribute("d", on ? PAUSE_PATH : PLAY_PATH);
+    el.playText.textContent = on ? "Pause" : "Play";
+    el.play.setAttribute("aria-label", on ? "Pause (Space)" : "Play (Space)");
+    cancelAnimationFrame(raf);
+    if (on) { lastTick = 0; acc = 0; raf = requestAnimationFrame(tick); }
+  }
+  function tick(now) {
+    if (!view.playing) return;
+    if (!lastTick) lastTick = now;
+    acc += Math.min(now - lastTick, 250);
+    lastTick = now;
+    const stepMs = 1000 / view.speed;
+    if (acc >= stepMs) {
+      const steps = Math.floor(acc / stepMs);
+      acc -= steps * stepMs;
+      setTurn(view.turn + steps);
+      if (view.turn >= cur.last) { setPlaying(false); return; }
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  function setSpeed(v) {
+    view.speed = Math.max(2, Math.min(30, Math.round(v) || 8));
+    el.speed.value = String(view.speed);
+    el.speedOut.textContent = `${view.speed} turns/s`;
+    try { localStorage.setItem("slinky-replay-speed", String(view.speed)); } catch (e) { /* storage unavailable */ }
+  }
+
+  function selectGame(gi, keepPlaying, turn) {
+    const r = view.replay;
+    gi = ((gi % r.games.length) + r.games.length) % r.games.length;
+    view.game = gi;
+    cur = prepare(gi);
+    const g = cur.game;
+    el.gameLabel.textContent = `Game ${gi + 1} of ${r.games.length}`;
+    el.gameTitle.textContent = "";
+    g.seats.forEach((name, i) => {
+      if (i) el.gameTitle.append(span("vs", " vs "));
+      el.gameTitle.append(name);
+    });
+    el.stripRange.textContent = `turns 0–${cur.last}`;
+    el.scrub.max = String(cur.last);
+    for (const btn of el.gameList.querySelectorAll(".game-row")) {
+      btn.setAttribute("aria-current", btn.dataset.game === String(gi) ? "true" : "false");
+    }
+    buildSnakes();
+    layoutBoard();
+    view.turn = Math.max(0, Math.min(cur.last, turn ?? 0));
+    cur.drawn = true;
+    render();
+    if (!keepPlaying) setPlaying(false);
+    else if (view.playing) setPlaying(true);
+  }
+
+  function loadReplay(data, opts) {
+    setPlaying(false);
+    view.replay = data;
+    el.empty.hidden = true;
+    el.layout.hidden = false;
+    buildMatch();
+    selectGame(opts.game || 0, false, opts.turn);
+    if (opts.playing) setPlaying(true);
+  }
+
+  // --- Events -------------------------------------------------------------------------------
+  el.start.addEventListener("click", () => { setPlaying(false); setTurn(0); });
+  el.end.addEventListener("click", () => { setPlaying(false); setTurn(cur ? cur.last : 0); });
+  el.back.addEventListener("click", () => { setPlaying(false); setTurn(view.turn - 1); });
+  el.fwd.addEventListener("click", () => { setPlaying(false); setTurn(view.turn + 1); });
+  el.play.addEventListener("click", () => setPlaying(!view.playing));
+  el.speed.addEventListener("input", () => setSpeed(Number(el.speed.value)));
+  el.scrub.addEventListener("input", () => { setPlaying(false); setTurn(Number(el.scrub.value)); });
+  el.scrub.addEventListener("pointermove", (e) => {
+    if (!cur) return;
+    const rect = el.strip.getBoundingClientRect();
+    hoverTurn = Math.round(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * cur.last);
+    drawStrip();
+  });
+  el.scrub.addEventListener("pointerleave", () => { hoverTurn = null; drawStrip(); });
+  el.file.addEventListener("change", () => { openFile(el.file.files && el.file.files[0]); el.file.value = ""; });
+
+  document.addEventListener("keydown", (e) => {
+    if (!cur || e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    const tag = t && t.tagName;
+    const isRange = tag === "INPUT" && t.type === "range";
+    if (tag === "TEXTAREA" || tag === "SELECT" || (tag === "INPUT" && !isRange)) return;
+    switch (e.key) {
+      case " ":
+      case "k":
+        e.preventDefault(); setPlaying(!view.playing); break;
+      case "ArrowLeft":
+      case "ArrowRight":
+      case "Home":
+      case "End":
+        if (isRange) return;   // ranges handle their own keys
+        e.preventDefault(); setPlaying(false);
+        if (e.key === "ArrowLeft") setTurn(view.turn - 1);
+        else if (e.key === "ArrowRight") setTurn(view.turn + 1);
+        else setTurn(e.key === "Home" ? 0 : cur.last);
+        break;
+      case "[":
+        e.preventDefault(); selectGame(view.game - 1, true); break;
+      case "]":
+        e.preventDefault(); selectGame(view.game + 1, true); break;
+      default:
+    }
+  });
+
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  window.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; el.drop.hidden = false; });
+  window.addEventListener("dragover", (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
+  window.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) el.drop.hidden = true; });
+  window.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth = 0; el.drop.hidden = true;
+    openFile(e.dataTransfer.files[0]);
+  });
+
+  function onThemeChange() { readColors(); render(); }
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", onThemeChange);
+  new MutationObserver(onThemeChange).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
+  let resizePending = false;
+  new ResizeObserver(() => {
+    if (resizePending) return;
+    resizePending = true;
+    requestAnimationFrame(() => { resizePending = false; if (cur) { layoutBoard(); render(); } });
+  }).observe(el.wrap);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (cur) render(); });
+
+  // --- Boot -------------------------------------------------------------------------------
+  function start(saved) {
+    saved = saved || {};
+    readColors();
+    let speed = 8;
+    try { speed = Number(localStorage.getItem("slinky-replay-speed")) || 8; } catch (e) { /* storage unavailable */ }
+    setSpeed(speed);
+    let data = null;
+    try {
+      data = JSON.parse($("replay-data").textContent || "null");
+      if (data) validate(data);
+    } catch (e) {
+      data = null;
+      showStatus(`The embedded replay couldn't be read: ${e.message}. Open a replay file instead.`);
+    }
+    if (!data) {
+      el.layout.hidden = true;
+      el.empty.hidden = false;
+      return;
+    }
+    const restoring = saved && typeof saved.game === "number";
+    const g = restoring ? Math.min(saved.game, data.games.length - 1) : 0;
+    let turn = restoring ? saved.turn : 0;
+    let playing = restoring ? !!saved.playing : !reduceMotion.matches;
+    if (!restoring && reduceMotion.matches) turn = data.games[0].frames.length - 1;  // show the outcome at rest
+    loadReplay(data, { game: g, turn, playing });
+  }
+  window.claude?.hot?.snapshot?.(() => ({ game: view.game, turn: view.turn, playing: view.playing }));
+  if (window.claude?.hot?.ready) window.claude.hot.ready(start);
+  else start(window.claude?.hot?.data ?? {});
+})();
+</script>
