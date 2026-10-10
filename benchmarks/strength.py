@@ -516,6 +516,8 @@ def peak_rss_mb() -> float:
 
 def fmt_duration(seconds: float) -> str:
     seconds = max(seconds, 0.0)
+    if seconds < 1:
+        return f"{1e3 * seconds:.0f}ms"
     if seconds < 90:
         return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s"
     if seconds < 5400:
