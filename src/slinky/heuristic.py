@@ -22,7 +22,7 @@ pure, fixed-shape functions of one (unbatched) game that ``jit`` and ``vmap``.
    trap term. In a duel the value is exactly antisymmetric. All snakes' fills
    run together as a race on bit-packed rows (one ``uint32`` per board row),
    which gives the same numbers as :func:`arrival_times` plus :func:`voronoi`
-   about 4x faster. One evaluation costs about as much as 1.6 calls to
+   about 4x faster. One evaluation costs about as much as 1.5 calls to
    ``env.step``, so it is cheap enough for every MCTS leaf.
 
 3. **A policy**, :func:`heuristic_policy` (and :func:`heuristic`, the cached
@@ -401,7 +401,9 @@ class Weights(NamedTuple):
     opponents. Lower contempt and a larger length weight both make the snake
     more willing to contest cells, and passive settings lost to aggressive
     opponents. The other coefficients, and both safety tiers, were flat within
-    noise.
+    noise. The cost: two copies of the default snake trade heads early, so
+    about 90% of mirror games are draws. With ``contempt=0.4`` mirror games
+    last longer and about 70% are draws, at a small cost in strength.
     """
 
     territory: float = 0.40
