@@ -28,10 +28,10 @@
   --s0: #d9560f;
   --s1: #1f6fd1;
   --s2: #0f9468;
-  --s3: #c23f94;
+  --s3: #6c4fd6;
   --s4: #b88a00;
   --s5: #5f8f12;
-  --s6: #6c4fd6;
+  --s6: #c23f94;
   --s7: #c92a2a;
   --font-display: "Big Shoulders Display", "Arial Narrow", "Roboto Condensed", "Helvetica Neue", sans-serif;
   --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -59,10 +59,10 @@
     --s0: #e4672a;
     --s1: #3d8ae8;
     --s2: #1aa575;
-    --s3: #d457a8;
+    --s3: #8f78ec;
     --s4: #c99a12;
     --s5: #6f9f22;
-    --s6: #8f78ec;
+    --s6: #d457a8;
     --s7: #e05050;
     color-scheme: dark;
   }
@@ -88,10 +88,10 @@
   --s0: #e4672a;
   --s1: #3d8ae8;
   --s2: #1aa575;
-  --s3: #d457a8;
+  --s3: #8f78ec;
   --s4: #c99a12;
   --s5: #6f9f22;
-  --s6: #8f78ec;
+  --s6: #d457a8;
   --s7: #e05050;
   color-scheme: dark;
 }
@@ -279,6 +279,7 @@ button, input, select { font: inherit; color: inherit; }
 }
 .score.multi .nm { overflow-wrap: break-word; padding-block-end: 4px; padding-inline-end: 16px; border-bottom: 1px solid var(--rule); }
 .score.multi .pts { font: 800 24px/1 var(--font-display); text-align: right; padding-block-end: 4px; border-bottom: 1px solid var(--rule); }
+.score .who { display: inline-block; } /* keeps a swatch with its name when a line wraps */
 .score .dash { color: var(--ink-3); font-weight: 600; padding-inline: 0.15em; }
 .score-sub { margin: 0 0 10px; font-size: 12px; color: var(--ink-2); }
 .game-row {
@@ -999,7 +1000,7 @@ button, input, select { font: inherit; color: inherit; }
     // scoreline carries the same swatches.
     const byAgent = r.games.every((g) => new Set(g.seats).size === g.seats.length);
     const who = (a) => {
-      const frag = document.createDocumentFragment();
+      const frag = span("who", "");
       if (byAgent) {
         const sw = span("sw", "");
         sw.style.setProperty("--c", `var(--s${r.agents.indexOf(a) % PALETTE})`);
