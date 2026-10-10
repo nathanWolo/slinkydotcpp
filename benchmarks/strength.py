@@ -137,7 +137,8 @@ MIN_GAMES_TO_STOP = 64  # --target-ci never stops before this many games
 TREE_SAFETY = 2.0  # memory model: XLA temporaries and double buffering
 SIMPLE_AGENTS = ("random_legal", "heuristic")
 REQUIRED = frozenset(
-    "a b matchup_id config_id seed games wins draws losses mean_turns date".split()
+    ("a", "b", "matchup_id", "config_id", "seed", "games", "wins", "draws", "losses")
+    + ("mean_turns", "date")
 )
 
 
@@ -160,107 +161,64 @@ class Suffix:
 
     ``number`` is None for a flag and ``int`` or ``float`` for ``name<value>``;
     ``default`` is the value when the number is omitted (None: required).
+    ``fields(value)`` are the config fields it sets; ``value(config)`` is what
+    the canonical name shows (None or False when the config has the default).
     """
 
     name: str
     doc: str
-    apply: Callable[[Any], dict[str, Any]]  # parsed number (or None) -> config fields
-    render: Callable[[Any], str | None]  # MCTSConfig -> canonical token, None if default
+    fields: Callable[[Any], dict[str, Any]]
+    value: Callable[[mcts_lib.MCTSConfig], Any]
     number: type | None = None
     default: float | None = None
 
+    def token(self, config: mcts_lib.MCTSConfig) -> str | None:
+        v = self.value(config)
+        if v is None or v is False:
+            return None
+        return self.name if self.number is None else f"{self.name}{v:g}"
 
+
+def _differs(field: str, config: mcts_lib.MCTSConfig) -> Any:
+    v = getattr(config, field)
+    return v if v != getattr(_D, field) else None
+
+
+def _rollout(policy: str) -> Callable[[mcts_lib.MCTSConfig], Any]:
+    return lambda c: c.rollout_steps or None if c.rollout_policy == policy else None
+
+
+# fmt: off
 SUFFIXES: tuple[Suffix, ...] = (
-    Suffix(
-        "rm",
-        "regret-matching selection (selection='rm') instead of DUCT",
-        lambda v: {"selection": "rm"},
-        lambda c: "rm" if c.selection == "rm" else None,
-    ),
-    Suffix(
-        "tuned",
-        "UCB1-Tuned variance bound in DUCT (ucb1_tuned=True)",
-        lambda v: {"ucb1_tuned": True},
-        lambda c: "tuned" if c.ucb1_tuned else None,
-    ),
-    Suffix(
-        "c",
-        "c<x>: exploration constant, e.g. c1.4 (exploration=x)",
-        lambda v: {"exploration": v},
-        lambda c: f"c{c.exploration:g}" if c.exploration != _D.exploration else None,
-        float,
-    ),
-    Suffix(
-        "noheur",
-        "no heuristic leaf evaluation, living snakes are worth 0 (leaf='none')",
-        lambda v: {"leaf": "none"},
-        lambda c: "noheur" if c.leaf == "none" else None,
-    ),
-    Suffix(
-        "rollout",
-        "rollout[<k>]: k random-policy rollout turns before the leaf evaluation (default 10)",
-        lambda v: {"rollout_steps": v, "rollout_policy": "random"},
-        lambda c: (
-            f"rollout{c.rollout_steps}"
-            if c.rollout_steps and c.rollout_policy == "random"
-            else None
-        ),
-        int,
-        10,
-    ),
-    Suffix(
-        "hrollout",
-        "hrollout[<k>]: like rollout, but the rollouts play the heuristic policy",
-        lambda v: {"rollout_steps": v, "rollout_policy": "heuristic"},
-        lambda c: (
-            f"hrollout{c.rollout_steps}"
-            if c.rollout_steps and c.rollout_policy == "heuristic"
-            else None
-        ),
-        int,
-        10,
-    ),
-    Suffix(
-        "spawn",
-        "sample food spawns inside the tree (spawn_food=True)",
-        lambda v: {"spawn_food": True},
-        lambda c: "spawn" if c.spawn_food else None,
-    ),
-    Suffix(
-        "sample",
-        "sample the final move from the visit counts (final='sample')",
-        lambda v: {"final": "sample"},
-        lambda c: "sample" if c.final == "sample" else None,
-    ),
-    Suffix(
-        "contempt",
-        "contempt<x>: a mutual elimination is worth -x in the search (draw_value=-x)",
-        lambda v: {"draw_value": 0.0 - v},
-        lambda c: f"contempt{0.0 - c.draw_value:g}" if c.draw_value != _D.draw_value else None,
-        float,
-    ),
-    Suffix(
-        "noise",
-        "noise<x>: scale of the tie-breaking noise (tie_noise=x)",
-        lambda v: {"tie_noise": v},
-        lambda c: f"noise{c.tie_noise:g}" if c.tie_noise != _D.tie_noise else None,
-        float,
-    ),
-    Suffix(
-        "gamma",
-        "gamma<x>: regret matching's exploration mix (rm_gamma=x)",
-        lambda v: {"rm_gamma": v},
-        lambda c: f"gamma{c.rm_gamma:g}" if c.rm_gamma != _D.rm_gamma else None,
-        float,
-    ),
-    Suffix(
-        "depth",
-        "depth<k>: deepest descent from the root (max_depth=k)",
-        lambda v: {"max_depth": v},
-        lambda c: f"depth{c.max_depth}" if c.max_depth != _D.max_depth else None,
-        int,
-    ),
+    Suffix("rm", "regret-matching selection instead of DUCT (selection='rm')",
+           lambda v: {"selection": "rm"}, lambda c: c.selection == "rm"),
+    Suffix("tuned", "UCB1-Tuned variance bound in DUCT (ucb1_tuned=True)",
+           lambda v: {"ucb1_tuned": True}, lambda c: c.ucb1_tuned),
+    Suffix("c", "c<x>: exploration constant, e.g. c1.4 (exploration=x)",
+           lambda v: {"exploration": v}, lambda c: _differs("exploration", c), float),
+    Suffix("noheur", "no heuristic leaf evaluation: living snakes are worth 0 (leaf='none')",
+           lambda v: {"leaf": "none"}, lambda c: c.leaf == "none"),
+    Suffix("rollout", "rollout[<k>]: k random-policy rollout turns before the leaf (default 10)",
+           lambda v: {"rollout_steps": v, "rollout_policy": "random"}, _rollout("random"),
+           int, 10),
+    Suffix("hrollout", "hrollout[<k>]: like rollout, with the heuristic policy (default 10)",
+           lambda v: {"rollout_steps": v, "rollout_policy": "heuristic"}, _rollout("heuristic"),
+           int, 10),
+    Suffix("spawn", "sample food spawns inside the tree (spawn_food=True)",
+           lambda v: {"spawn_food": True}, lambda c: c.spawn_food),
+    Suffix("sample", "sample the final move from the visit counts (final='sample')",
+           lambda v: {"final": "sample"}, lambda c: c.final == "sample"),
+    Suffix("contempt", "contempt<x>: a mutual elimination is worth -x in the search (draw_value)",
+           lambda v: {"draw_value": 0.0 - v},
+           lambda c: 0.0 - c.draw_value if c.draw_value != _D.draw_value else None, float),
+    Suffix("noise", "noise<x>: scale of the tie-breaking noise (tie_noise=x)",
+           lambda v: {"tie_noise": v}, lambda c: _differs("tie_noise", c), float),
+    Suffix("gamma", "gamma<x>: regret matching's exploration mix (rm_gamma=x)",
+           lambda v: {"rm_gamma": v}, lambda c: _differs("rm_gamma", c), float),
+    Suffix("depth", "depth<k>: deepest descent from the root (max_depth=k)",
+           lambda v: {"max_depth": v}, lambda c: _differs("max_depth", c), int),
 )
+# fmt: on
 _SUFFIX_BY_NAME = {s.name: s for s in SUFFIXES}
 
 
@@ -294,17 +252,16 @@ def parse_mcts(text: str) -> tuple[str, mcts_lib.MCTSConfig]:
             value = suffix.default
         else:
             raise SpecError(f"{text!r}: suffix {suffix.name!r} needs a number, e.g. {suffix.name}1")
-        update = suffix.apply(value)
-        if overlap := (fields.keys() & update.keys()) - {"rollout_policy"}:
-            raise SpecError(f"{text!r}: {token!r} sets {sorted(overlap)} twice")
-        if "rollout_policy" in update and "rollout_policy" in fields:
+        if suffix.number is int and value < 1:
+            raise SpecError(f"{text!r}: {token!r} must be >= 1")
+        if {"rollout", "hrollout"} <= seen:
             raise SpecError(f"{text!r}: rollout and hrollout are exclusive")
-        fields.update(update)
+        fields.update(suffix.fields(value))
     try:
         config = mcts_lib.MCTSConfig(**fields)
     except ValueError as e:
         raise SpecError(f"{text!r}: {e}") from None
-    tokens = [t for s in SUFFIXES if (t := s.render(config))]
+    tokens = [t for s in SUFFIXES if (t := s.token(config))]
     return "-".join(["mcts", str(config.num_simulations), *tokens]), config
 
 
@@ -341,7 +298,7 @@ def _rel(path: Path) -> str:
     return str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def load_dqn_module():
     """``baselines/dqn.py`` imported from its path (``baselines/`` is not a package)."""
     spec = importlib.util.spec_from_file_location("baselines_dqn", ROOT / "baselines" / "dqn.py")
@@ -391,13 +348,13 @@ def parse_agents(text: str, dqn_checkpoint: Path, describe: bool = True) -> list
     return list(agents.values())
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def make_env(game: GameConfig, egocentric: bool) -> BattlesnakeEnv:
     """One env per (rules, observations): policies and compiled matches are cached on it."""
     return BattlesnakeEnv(game, obs="egocentric" if egocentric else None)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def dqn_policy(checkpoint: Path) -> Policy:
     dqn = load_dqn_module()
     cfg = dqn.load_config(str(checkpoint))
@@ -423,8 +380,8 @@ def check_dqn_game(agent: Agent, game: GameConfig) -> None:
     """The DQN's observation shape and training rules fix the game it can play."""
     cfg = load_dqn_module().load_config(str(agent.checkpoint))
     trained = cfg.game
-    want = (trained.width, trained.height, trained.num_snakes, trained.ruleset)
-    have = (game.width, game.height, game.num_snakes, game.ruleset)
+    want = (trained.width, trained.height, trained.num_snakes, trained.ruleset.value)
+    have = (game.width, game.height, game.num_snakes, game.ruleset.value)
     if want != have:
         raise SpecError(f"{agent.name} was trained for {want} but the game is {have}")
 
@@ -529,7 +486,8 @@ def plan_batches(m: Matchup, s: Settings) -> Plan:
     mem_cap = max(int(s.mem_mb * 2**20 / (TREE_SAFETY * per_game)), 1) if per_game else 10**9
     cap = max(min(s.batch_size, mem_cap) // n * n, n)  # whole seat rotations
     rounds = -(-m.games // cap)
-    batch = -(-(-(-m.games // rounds)) // n) * n  # ceil(ceil(G / rounds) / n) * n
+    per_round = -(-m.games // rounds)
+    batch = -(-per_round // n) * n  # a whole number of seat rotations
     return Plan(rounds, batch, mem_cap, batch * per_game / 2**20)
 
 
@@ -669,7 +627,7 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
         f"{s.max_turns} turns takes at most {fmt_duration(upper)} "
         f"({plan.rounds} round(s): at most {fmt_duration(upper * plan.rounds)})"
     )
-    w = d = l = trunc = turns = 0
+    w = d = lo = trunc = turns = 0
     rounds_detail: list[list[float]] = []
     play_seconds = 0.0
     stopped_early = False
@@ -679,28 +637,28 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
         dt = time.perf_counter() - t0
         play_seconds += dt
         round_turns = round(res.mean_turns * res.num_games)
-        w, d, l = w + res.wins, d + res.draws, l + res.losses
+        w, d, lo = w + res.wins, d + res.draws, lo + res.losses
         trunc, turns = trunc + res.truncated, turns + round_turns
         rounds_detail.append(
             [res.wins, res.draws, res.losses, res.truncated, round_turns, round(dt, 3)]
         )
-        n, score, ci = outcome_stats(w, d, l)
+        n, score, ci = outcome_stats(w, d, lo)
         eta = (plan.rounds - r - 1) * play_seconds / (r + 1)
         log(
             f"{tag}   round {r + 1}/{plan.rounds}: {res.num_games} games in {fmt_duration(dt)} | "
-            f"total {n} games, W/D/L {w}/{d}/{l} ({trunc} truncated), score {score:.3f} ± {ci:.3f}"
+            f"total {n} games, W/D/L {w}/{d}/{lo} ({trunc} truncated), score {score:.3f} ± {ci:.3f}"
             f" | ETA {fmt_duration(eta)}"
         )
         if (
             s.target_ci is not None
             and r + 1 < plan.rounds
             and n >= MIN_GAMES_TO_STOP
-            and stop_ci(w, d, l) <= s.target_ci
+            and stop_ci(w, d, lo) <= s.target_ci
         ):
-            log(f"{tag}   stopping early: CI half-width {stop_ci(w, d, l):.3f} <= {s.target_ci}")
+            log(f"{tag}   stopping early: CI half-width {stop_ci(w, d, lo):.3f} <= {s.target_ci}")
             stopped_early = True
             break
-    n, score, ci = outcome_stats(w, d, l)
+    n, score, ci = outcome_stats(w, d, lo)
     commit, dirty = git_info()
     return {
         "schema": SCHEMA,
@@ -716,7 +674,7 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
         "games": n,
         "wins": w,
         "draws": d,
-        "losses": l,
+        "losses": lo,
         "truncated": trunc,
         "score": score,
         "ci95": ci,
@@ -787,7 +745,7 @@ def build_matchups(
 
 def describe_plan(m: Matchup, plan: Plan) -> str:
     shape = f"{plan.rounds} x {plan.batch}" if plan.rounds > 1 else f"{plan.batch}"
-    extra = f", tree ~{plan.tree_mb:.0f} MB per batch" if plan.tree_mb else ""
+    extra = f", search trees ~{plan.tree_mb:.3g} MB per batch" if plan.tree_mb else ""
     return f"{m.games} games requested, {shape} played{extra}"
 
 
@@ -824,16 +782,19 @@ def sweep(s: Settings, matchups: list[Matchup], out: Path) -> int:
         jax.clear_caches()  # compiled programs of finished matchups are never reused
         done_cost += m.cost
         elapsed = time.perf_counter() - t_sweep
+        r = record
         log(
-            f"{tag} done: score {record['score']:.3f} ± {record['ci95']:.3f} over "
-            f"{record['games']} games (W/D/L {record['wins']}/{record['draws']}/{record['losses']}), "
-            f"{fmt_duration(record['wall_seconds'])} (compile {fmt_duration(record['compile_seconds'])}"
-            f"), {1e3 * record['seconds_per_game_turn']:.3f} ms per game-turn, peak RSS "
-            f"{record['peak_rss_mb']:.0f} MB"
+            f"{tag} done: score {r['score']:.3f} ± {r['ci95']:.3f} over {r['games']} games "
+            f"(W/D/L {r['wins']}/{r['draws']}/{r['losses']}) in {fmt_duration(r['wall_seconds'])} "
+            f"(compile {fmt_duration(r['compile_seconds'])}), "
+            f"{1e3 * r['seconds_per_game_turn']:.3f} ms per game-turn, peak RSS "
+            f"{r['peak_rss_mb']:.0f} MB"
         )
         rough = elapsed * (total_cost - done_cost) / done_cost if done_cost else float("nan")
-        log(f"sweep: {i}/{len(todo)} matchups, elapsed {fmt_duration(elapsed)}, rough ETA "
-            f"{fmt_duration(rough)} (cost-weighted)")  # fmt: skip
+        log(
+            f"sweep: {i}/{len(todo)} matchups, elapsed {fmt_duration(elapsed)}, rough ETA "
+            f"{fmt_duration(rough)} (cost-weighted)"
+        )
     if failures:
         log(f"FAILED matchups (rerun to retry): {', '.join(failures)}")
         return 1
@@ -845,9 +806,7 @@ def estimate(s: Settings, matchups: list[Matchup], out: Path, assume_turns: int)
     """Compile and probe each pending matchup (no games) and predict its wall time."""
     done_ids = {r["matchup_id"] for r in read_records(out)[0]}
     total = 0.0
-    log(
-        f"estimate: probing {len(matchups)} matchups; a round is assumed to last {assume_turns} turns"
-    )
+    log(f"estimate: probing {len(matchups)} matchups, assuming rounds of {assume_turns} turns")
     print(
         "| matchup | games (rounds x batch) | compile | ms per game-turn | predicted play | state |"
     )
@@ -862,7 +821,8 @@ def estimate(s: Settings, matchups: list[Matchup], out: Path, assume_turns: int)
             total += play + prep.compile_seconds
         print(
             f"| {m.a.name} vs {m.b.name} | {plan.games} ({plan.rounds} x {plan.batch}) | "
-            f"{fmt_duration(prep.compile_seconds)} | {per_turn:.3f} | {fmt_duration(play)} | {state} |"
+            f"{fmt_duration(prep.compile_seconds)} | {per_turn:.3f} | "
+            f"{fmt_duration(play)} | {state} |"
         )
         sys.stdout.flush()
         jax.clear_caches()
@@ -1002,9 +962,9 @@ def table_main(
 
     print("\n## Time per move (milliseconds per game-turn)\n")
     print(
-        "One game-turn is one search of A plus B's move and the environment step, amortised over a\n"
-        "batch on this CPU and including the waiting of finished games (see the module docstring);\n"
-        "a throughput, not the latency of one search. Compare rows within a column.\n"
+        "One game-turn is one search of A plus B's move and the environment step, amortised\n"
+        "over a batch on this CPU and including the waiting of finished games (see the module\n"
+        "docstring): a throughput, not the latency of one search. Compare rows within a column.\n"
     )
     print(markdown_table("A \\ B", rows, cols, ms_per_move))
 
@@ -1042,36 +1002,51 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "matchup with that agent on either side, the smaller count wins; 'A:B=N' to one pair)",
     )
     p.add_argument(
-        "--target-ci", type=float, help="stop a matchup after a round once the 95%% CI half-width "
+        "--target-ci",
+        type=float,
+        help="stop a matchup after a round once the 95%% CI half-width "
         "is at most this (needs >= 64 games; --games stays the maximum)",
-    )  # fmt: skip
+    )
     p.add_argument(
-        "--batch-size", type=int, default=256,
+        "--batch-size",
+        type=int,
+        default=256,
         help="games per round, before the memory cap (default 256)",
-    )  # fmt: skip
+    )
     p.add_argument(
-        "--mem-mb", type=float, default=1024.0,
-        help="memory budget for the search trees of one batch; the batch shrinks to fit (default 1024)",
-    )  # fmt: skip
+        "--mem-mb",
+        type=float,
+        default=1024.0,
+        help="memory budget (MB) for the search trees of one batch; the batch shrinks to fit "
+        "(default 1024)",
+    )
     p.add_argument(
-        "--seed", type=int,
+        "--seed",
+        type=int,
         help="base seed (default 0); with --table, only lines of this seed are shown",
-    )  # fmt: skip
+    )
     p.add_argument("--max-turns", type=int, default=500, help="cut games off here (default 500)")
     p.add_argument("--size", type=int, default=11, help="board width and height (default 11)")
     p.add_argument("--snakes", type=int, default=2, help="snakes per game (default 2)")
     p.add_argument("--dqn-checkpoint", type=Path, default=DEFAULT_DQN, help="run dir of the DQN")
-    p.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"results file ({DEFAULT_OUT})")
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_OUT,
+        help="results file (default benchmarks/results/strength.jsonl)",
+    )
     p.add_argument("--table", action="store_true", help="print markdown tables from --out and exit")
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     p.add_argument(
-        "--estimate", action="store_true",
+        "--estimate",
+        action="store_true",
         help="compile and probe every pending matchup (no games) and predict the wall time",
-    )  # fmt: skip
+    )
     p.add_argument(
-        "--assume-turns", type=int,
+        "--assume-turns",
+        type=int,
         help="--estimate: turns per round (default --max-turns, the worst case)",
-    )  # fmt: skip
+    )
     return p.parse_args(argv)
 
 
