@@ -142,6 +142,10 @@ class MCTSConfig:
       final: ``"max"`` or ``"sample"`` (see the module docstring).
       draw_value: value of a mutual elimination inside the search (0 matches
         ``env.win_loss_reward``; negative values are "contempt" for draws).
+      spawn_food: transitions inside the tree (and rollouts) sample the map's
+        food spawn with ``env.step``. If False they run ``rules.rules_step``
+        with no spawn, a deterministic model of the game (Schier &
+        Wustenbecker 2019) that skips the spawn's random draw.
     """
 
     num_simulations: int = 128
@@ -154,9 +158,10 @@ class MCTSConfig:
     rollout_steps: int = 0
     rollout_policy: str = "random"
     weights: heuristic.Weights = heuristic.DEFAULT_WEIGHTS
-    max_depth: int = 64
+    max_depth: int = 32
     final: str = "max"
     draw_value: float = 0.0
+    spawn_food: bool = True
 
     def __post_init__(self) -> None:
         if self.num_simulations < 1:
@@ -241,6 +246,23 @@ def _legal(state: State, mask: jax.Array, config: GameConfig) -> jax.Array:
     return jnp.where(fixed[:, None], np.arange(NUM_ACTIONS) == 0, mask)
 
 
+def _transition(
+    key: jax.Array, state: State, actions: jax.Array, env: BattlesnakeEnv, config: MCTSConfig
+) -> tuple[State, jax.Array]:
+    """(next state, its ``env.action_mask``): ``env.step``, or the rules alone (no spawn)."""
+    if config.spawn_food:
+        nxt, ts = env.step(key, state, actions)
+        return nxt, ts.action_mask
+    game = env.config
+    nxt = rules.rules_step(state, actions, game)._replace(turn=state.turn + 1)
+    done = rules.is_game_over(nxt.alive, game)
+    if game.max_turns is not None:
+        done = done | (nxt.turn >= game.max_turns)
+    nxt = jax.tree.map(lambda old, new: jnp.where(state.done, old, new), state, nxt)
+    nxt = nxt._replace(done=state.done | done)
+    return nxt, env.action_mask(nxt)
+
+
 def _leaf_value(
     key: jax.Array, state: State, mask: jax.Array, env: BattlesnakeEnv, config: MCTSConfig
 ) -> jax.Array:
@@ -272,8 +294,8 @@ def _rollout(
             acts = jax.random.categorical(k_act, jnp.where(m, 0.0, -jnp.inf), axis=-1)
         else:
             acts = heuristic.heuristic_policy(k_act, s, env, config.weights)
-        s, ts = env.step(k_step, s, acts.astype(jnp.int32))
-        return i + 1, s, ts.action_mask
+        s, m = _transition(k_step, s, acts.astype(jnp.int32), env, config)
+        return i + 1, s, m
 
     _, state, _ = jax.lax.while_loop(cond, body, (jnp.zeros((), jnp.int32), state, mask))
     return state
@@ -479,8 +501,10 @@ def search(
         # cond would run anyway); without one, slot ``sim + 1`` stays unreferenced.
         joint = path.path_joint[jnp.maximum(path.depth - 1, 0)]
         parent = jax.tree.map(lambda x: x[leaf], tree.state)
-        child, ts = env.step(jax.random.fold_in(k_spawn, slot), parent, digits[joint])
-        new_value = _leaf_value(jax.random.fold_in(k_roll, slot), child, ts.action_mask, env, config)
+        child, mask = _transition(
+            jax.random.fold_in(k_spawn, slot), parent, digits[joint], env, config
+        )
+        new_value = _leaf_value(jax.random.fold_in(k_roll, slot), child, mask, env, config)
         # Reading ``tree.value[leaf]`` here instead would make XLA copy the array.
         value = jnp.where(path.expand, new_value, path.stored)
         tree = tree._replace(
@@ -488,7 +512,7 @@ def search(
             children=tree.children.at[jnp.where(path.expand, leaf, num_sims + 1), joint].set(
                 slot, mode="drop"
             ),
-            legal=tree.legal.at[slot].set(_legal(child, ts.action_mask, game)),
+            legal=tree.legal.at[slot].set(_legal(child, mask, game)),
             terminal=tree.terminal.at[slot].set(child.done),
             value=tree.value.at[slot].set(new_value),
         )
