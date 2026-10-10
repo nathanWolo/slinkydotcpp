@@ -52,8 +52,9 @@ def env_for(config: GameConfig) -> BattlesnakeEnv:
     return BattlesnakeEnv(config, obs=None)
 
 
+@functools.cache
 def rollout_states(config: GameConfig, batch: int = 16, turns: int = 30, seed: int = 0) -> State:
-    """A batch of mid-game states from random legal play (autoreset)."""
+    """A batch of mid-game states from random legal play (autoreset); cached, as it compiles."""
     env = env_for(config)
     k_reset, k_play = jax.random.split(jax.random.key(seed))
     states, _ = jax.vmap(env.reset)(jax.random.split(k_reset, batch))
