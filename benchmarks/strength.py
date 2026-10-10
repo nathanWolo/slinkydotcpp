@@ -3,8 +3,11 @@
 Plays every pair ``A x B`` of two agent lists with :func:`slinky.evaluate.play_match`
 and appends one JSON line per finished matchup to ``benchmarks/results/strength.jsonl``.
 ``--table`` turns that file into markdown tables. The score is A's win rate with a
-draw worth 1/2, with a 95% confidence interval; seats alternate, so neither agent
-gets the better starting seat more often.
+draw worth 1/2, with a 95% confidence interval; seats alternate (game ``g`` puts A in
+seat ``g % N``), so neither agent gets the better starting seat more often. Games are cut
+off after ``--max-turns`` turns (default 500) and then count as draws (also reported as
+``truncated``). The rules are the official ones with no turn limit; the cut is imposed by
+the harness only, and the agents do not know about it.
 
 Agents (``--a`` and ``--b`` take comma-separated lists):
 
@@ -19,6 +22,8 @@ Agents (``--a`` and ``--b`` take comma-separated lists):
                     ``mcts-64-rollout`` or ``mcts-256-rm-c0.5``. Suffixes may come in any
                     order; names are printed in a canonical form that lists only the
                     non-default settings (``mcts-64-rollout`` becomes ``mcts-64-rollout10``).
+                    The default values a draw at -0.5 *inside the search* (``contempt``);
+                    the benchmark score still counts a draw as 1/2.
 
 Usage::
 
@@ -38,7 +43,9 @@ again, and a matchup whose identity is already in it is skipped, so an interrupt
 crashed sweep resumes by running the same command. Changing an MCTS default in the code
 changes the identity, so old results are not silently reused for the new agent. A line
 is written only when its matchup is complete (one ``write`` under an exclusive file
-lock, after repairing a torn last line), so a kill never leaves half a result.
+lock). A line torn by a kill during that write is skipped when reading and terminated
+before the next append. Two sweeps may share a file: the file is re-read before each
+matchup (but both would run a matchup that neither has finished yet).
 
 **Randomness.** A matchup's key is ``fold_in(key(seed), h)``, where ``h`` is the first 31
 bits of ``sha256("<a name>\\0<b name>")``. It depends on the seed and the two canonical
@@ -64,16 +71,19 @@ below about 1000 simulations; the peak resident memory of the process is recorde
 so the model can be checked. With ``--target-ci`` the stop test runs after every round,
 so use a smaller ``--batch-size`` for finer stopping.
 
-**Timing.** Before the first round the script runs the matchup for 1 turn
-(compilation), again for 1 turn and for 9 turns (the cost of one batch-turn from the
-difference), which gives an upper bound for the time of a round: ``--max-turns``
-batch-turns, reached whenever one game in the batch stalls. Progress lines then
-use the observed time per round. ``wall_seconds`` is the whole matchup;
+**Timing.** Before the first round the script runs the matchup for 1 turn (compilation),
+again for 1 turn and for 9 turns; the difference is the cost of one *batch-turn* (every
+game of the batch advancing one turn), recorded as ``seconds_per_batch_turn_probe``.
+``seconds_per_move_probe`` is that divided by the batch size: the cost of one move of
+one game in a full batch (A's search, B's move and the environment step), with no waiting.
+A round lasts for as many batch-turns as its *longest* game, so its time divided by the
+probe is the implied length of the longest game, shown in the progress lines (up to
+``--max-turns`` whenever a game stalls). ``wall_seconds`` is the whole matchup;
 ``play_seconds`` leaves out compilation and the probes;
-``seconds_per_game_turn = play_seconds / (sum of game lengths)``. That is a throughput
-(one MCTS search per game-turn serves both seats, and the opponent and the environment
-step are included), amortised over a batch on this machine, with the waiting of finished
-games included; it is not the latency of one search.
+``seconds_per_game_turn = play_seconds / (sum of game lengths)`` is the *effective* cost
+including the waiting of finished games, typically 3 to 4 times the probe. Both are
+throughputs amortised over a batch on this machine (``load_avg_start`` shows how busy it
+was), not the latency of one search.
 
 **Results.** One JSON object per line (``SCHEMA``): ``a``, ``b``, ``a_config``, ``b_config``,
 ``game``, ``max_turns``, ``games_requested``, ``games``, ``wins``, ``draws``, ``losses``,
@@ -81,8 +91,8 @@ games included; it is not the latency of one search.
 draws, so they are inside ``draws``), ``score``, ``ci95``, ``mean_turns``, the seconds
 fields, ``batch_size``, ``rounds``, ``seed``, ``git_commit``, ``git_dirty`` (uncommitted
 changes under ``src/`` or ``baselines/``), ``jax_version``, ``date`` and the identity hashes
-(``matchup_id``, ``config_id``). ``rounds_detail`` lists W/D/L/truncated/turns/seconds per
-round.
+(``matchup_id``, ``config_id``). ``rounds_detail`` lists, per round, the columns named in
+``rounds_detail_columns``.
 
 **Tables.** ``--table`` groups lines by ``(a, b)`` and uses the group with the newest
 line when several configs exist for a pair (the others are counted in a warning).
@@ -471,7 +481,7 @@ def tree_bytes_per_game(agent: Agent, game: GameConfig) -> int:
 class Plan:
     rounds: int
     batch: int  # games per round
-    mem_cap: int  # largest batch the memory budget allows
+    memory_limited: bool  # --mem-mb made the batch smaller than --batch-size
     tree_mb: float  # estimated search-tree memory of one batch
 
     @property
@@ -488,7 +498,7 @@ def plan_batches(m: Matchup, s: Settings) -> Plan:
     rounds = -(-m.games // cap)
     per_round = -(-m.games // rounds)
     batch = -(-per_round // n) * n  # a whole number of seat rotations
-    return Plan(rounds, batch, mem_cap, batch * per_game / 2**20)
+    return Plan(rounds, batch, mem_cap < s.batch_size, batch * per_game / 2**20)
 
 
 # --- Statistics ----------------------------------------------------------------------
@@ -621,6 +631,7 @@ def prepare(m: Matchup, s: Settings, plan: Plan) -> Prepared:
 def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]:
     """Play all rounds of a matchup and return its result record."""
     t_start = time.perf_counter()
+    load_avg = round(os.getloadavg()[0], 2) if hasattr(os, "getloadavg") else None
     prep = prepare(m, s, plan)
     upper = prep.seconds_per_batch_turn * s.max_turns
     log(
@@ -641,15 +652,24 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
         round_turns = round(res.mean_turns * res.num_games)
         w, d, lo = w + res.wins, d + res.draws, lo + res.losses
         trunc, turns = trunc + res.truncated, turns + round_turns
+        longest = dt / prep.seconds_per_batch_turn  # batch-turns = length of the longest game
         rounds_detail.append(
-            [res.wins, res.draws, res.losses, res.truncated, round_turns, round(dt, 3)]
+            [
+                res.wins,
+                res.draws,
+                res.losses,
+                res.truncated,
+                round_turns,
+                round(dt, 3),
+                round(longest),
+            ]
         )
         n, score, ci = outcome_stats(w, d, lo)
         eta = (plan.rounds - r - 1) * play_seconds / (r + 1)
         log(
-            f"{tag}   round {r + 1}/{plan.rounds}: {res.num_games} games in {fmt_duration(dt)} | "
-            f"total {n} games, W/D/L {w}/{d}/{lo} ({trunc} truncated), score {score:.3f} ± {ci:.3f}"
-            f" | ETA {fmt_duration(eta)}"
+            f"{tag}   round {r + 1}/{plan.rounds}: {res.num_games} games in {fmt_duration(dt)} "
+            f"(longest ~{longest:.0f} turns) | total {n} games, W/D/L {w}/{d}/{lo} "
+            f"({trunc} truncated), score {score:.3f} ± {ci:.3f} | ETA {fmt_duration(eta)}"
         )
         if (
             s.target_ci is not None
@@ -686,12 +706,15 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
         "play_seconds": play_seconds,
         "seconds_per_game_turn": play_seconds / max(turns, 1),
         "seconds_per_batch_turn_probe": prep.seconds_per_batch_turn,
+        "seconds_per_move_probe": prep.seconds_per_batch_turn / plan.batch,
         "batch_size": plan.batch,
         "rounds": plan.rounds,
         "rounds_played": len(rounds_detail),
         "target_ci": s.target_ci,
         "stopped_early": stopped_early,
+        "batch_memory_limited": plan.memory_limited,
         "est_tree_mb": plan.tree_mb,
+        "load_avg_start": load_avg,
         "peak_rss_mb": peak_rss_mb(),
         "seed": s.seed,
         "git_commit": commit,
@@ -702,7 +725,15 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
         "python": platform.python_version(),
         "date": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "rounds_detail": rounds_detail,
-        "rounds_detail_columns": ["wins", "draws", "losses", "truncated", "turns", "seconds"],
+        "rounds_detail_columns": [
+            "wins",
+            "draws",
+            "losses",
+            "truncated",
+            "turns",
+            "seconds",
+            "longest_game_turns_est",
+        ],  # fmt: skip
     }
 
 
@@ -748,7 +779,8 @@ def build_matchups(
 def describe_plan(m: Matchup, plan: Plan) -> str:
     shape = f"{plan.rounds} x {plan.batch}" if plan.rounds > 1 else f"{plan.batch}"
     extra = f", search trees ~{plan.tree_mb:.3g} MB per batch" if plan.tree_mb else ""
-    return f"{m.games} games requested, {shape} played{extra}"
+    limit = " (batch cut by --mem-mb)" if plan.memory_limited else ""
+    return f"{m.games} games requested, {shape} played{extra}{limit}"
 
 
 def sweep(s: Settings, matchups: list[Matchup], out: Path) -> int:
@@ -855,6 +887,8 @@ class Cell:
     truncated: int = 0
     turns: float = 0.0
     play_seconds: float = 0.0
+    probe_seconds: float = 0.0  # sum over lines of seconds_per_move_probe * games
+    probe_games: int = 0  # games of the lines that have a probe
     seeds: list[int] = dataclasses.field(default_factory=list)
     commits: set[str] = dataclasses.field(default_factory=set)
     dirty: bool = False
@@ -888,6 +922,9 @@ def pool_records(
             cell.truncated += rec.get("truncated", 0)
             cell.turns += rec["mean_turns"] * rec["games"]
             cell.play_seconds += rec.get("play_seconds", rec.get("wall_seconds", 0.0))
+            if probe := rec.get("seconds_per_move_probe"):
+                cell.probe_seconds += probe * rec["games"]
+                cell.probe_games += rec["games"]
             cell.seeds.append(rec["seed"])
             cell.commits.add(str(rec.get("git_commit", "unknown"))[:8])
             cell.dirty |= bool(rec.get("git_dirty", False))
@@ -960,13 +997,17 @@ def table_main(
         cell = at(r, c)
         if cell is None or cell.turns <= 0 or cell.play_seconds <= 0:
             return "-"
-        return f"{1e3 * cell.play_seconds / cell.turns:.3f}"
+        effective = 1e3 * cell.play_seconds / cell.turns
+        if cell.probe_games == 0:
+            return f"- ({effective:.3f})"
+        return f"{1e3 * cell.probe_seconds / cell.probe_games:.3f} ({effective:.3f})"
 
-    print("\n## Time per move (milliseconds per game-turn)\n")
+    print("\n## Time per move (milliseconds): probe (effective)\n")
     print(
-        "One game-turn is one search of A plus B's move and the environment step, amortised\n"
-        "over a batch on this CPU and including the waiting of finished games (see the module\n"
-        "docstring): a throughput, not the latency of one search. Compare rows within a column.\n"
+        "One move is one search of A plus B's move and the environment step for one game, in a\n"
+        "full batch on this CPU (4 cores, shared). *Probe*: measured on the first turns, with no\n"
+        "waiting. *Effective*: play time / total game turns, which also pays for finished games\n"
+        "waiting for the longest game of their batch. Throughputs, not the latency of one search.\n"
     )
     print(markdown_table("A \\ B", rows, cols, ms_per_move))
 

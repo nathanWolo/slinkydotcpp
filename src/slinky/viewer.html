@@ -165,33 +165,40 @@ button, input, select { font: inherit; color: inherit; }
 
 /* --- Layout ------------------------------------------------------------------ */
 .layout { display: flex; align-items: flex-start; gap: 24px 44px; padding-block-start: 18px; }
-.stage { flex: 1 1 auto; min-width: 0; max-width: max(340px, calc(100svh - 350px)); }
+/* The board is capped so board and transport fit the window height. 350px is everything
+   else with a one-line game title; JS adds --title-extra when the title takes two. */
+.stage { flex: 1 1 auto; min-width: 0; max-width: max(340px, calc(100svh - 350px - var(--title-extra, 0px))); }
 .side { flex: 0 1 340px; min-width: 280px; display: grid; gap: 28px; }
 @media (max-width: 860px) {
   .layout { flex-direction: column; align-items: stretch; }
-  .stage { max-width: 640px; width: 100%; }
+  /* Still height-aware, so the whole board fits on screen on a landscape phone. */
+  .stage { max-width: min(640px, max(300px, calc(100svh - 230px))); width: 100%; }
   .side { flex: none; min-width: 0; width: 100%; max-width: 640px; }
 }
 
 /* --- Stage -------------------------------------------------------------------- */
 .game-head {
-  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end;
   gap: 6px 16px; margin-block-end: 10px;
 }
 .game-title { min-width: 0; }
-.game-title h2 { margin: 2px 0 0; font: 600 16px/1.3 var(--font-ui); overflow-wrap: anywhere; }
+.game-title h2 {
+  margin: 2px 0 0; font: 600 16px/1.3 var(--font-ui); overflow-wrap: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
 .game-title .vs { color: var(--ink-3); font-weight: 400; }
 .turn { display: flex; align-items: baseline; gap: 6px; color: var(--ink-2); }
+/* The display face has no tabular figures, so the number gets a fixed width instead
+   (JS sizes it to the game's digit count) and the label beside it never shifts. */
 .turn b {
   font: 800 40px/0.85 var(--font-display);
-  font-variant-numeric: tabular-nums;
   color: var(--ink);
-  min-width: 2.2ch; text-align: right;
+  min-width: 3.15ch; text-align: right;
 }
 .turn .of { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
 .board-wrap { width: 100%; }
 #board { display: block; width: 100%; touch-action: manipulation; }
-.outcome { margin: 8px 0 0; min-height: 1.45em; color: var(--ink-2); font-size: 13px; }
+.outcome { margin: 8px 0 0; min-height: 1.45em; color: var(--ink-2); font-size: 13px; overflow-wrap: break-word; }
 .outcome strong { color: var(--ink); font-weight: 600; }
 
 .strip-head { display: flex; justify-content: space-between; gap: 12px; margin-block: 14px 6px; }
@@ -238,7 +245,7 @@ button, input, select { font: inherit; color: inherit; }
 .swatch { grid-row: 1 / span 3; width: 24px; height: 10px; margin-top: 5px; border-radius: 5px; background: var(--c); position: relative; }
 .swatch::after { content: ""; position: absolute; right: -2px; top: -2px; width: 14px; height: 14px; border-radius: 50%; background: var(--c); }
 .snake-name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
-.snake-name .name { font-weight: 600; overflow-wrap: anywhere; }
+.snake-name .name { font-weight: 600; min-width: 0; overflow-wrap: break-word; }
 .snake-name .seat { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
 .tag {
   font: 600 10px/1 var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase;
@@ -252,22 +259,25 @@ button, input, select { font: inherit; color: inherit; }
 .hp .fill { display: block; height: 100%; width: 0; background: var(--c); }
 .hp .v { min-width: 3ch; text-align: right; }
 .hp.low .v { color: var(--danger); }
-.snake-state { font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.snake-state { font-size: 12px; color: var(--ink-2); overflow-wrap: break-word; }
 .snake-state .cause { font-family: var(--font-mono); color: var(--ink); }
 .snake.out .name { color: var(--ink-2); }
 .snake.out .swatch, .snake.out .swatch::after { opacity: 0.45; }
 
 /* --- Match & games ------------------------------------------------------------ */
-.score { margin: 6px 0 2px; font: 800 30px/1 var(--font-display); text-transform: uppercase; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+/* Agent names keep their case: registry names such as dqn:<run dir> are case-sensitive. */
+.score { margin: 6px 0 2px; font: 800 30px/1 var(--font-display); letter-spacing: 0.01em; overflow-wrap: break-word; }
 .score .pts { font-variant-numeric: tabular-nums; }
 .score .line { display: block; }
+.score .sw { display: inline-block; width: 0.3em; height: 0.3em; margin-inline-end: 0.22em; border-radius: 50%; background: var(--c); vertical-align: 0.2em; }
+.score.multi .sw { width: 8px; height: 8px; margin-inline-end: 7px; vertical-align: 1px; }
 .score.lines { font-size: 24px; display: grid; gap: 6px; }
 .score .n { margin-left: 10px; font: 400 12px/1 var(--font-ui); letter-spacing: 0; text-transform: none; color: var(--ink-3); white-space: nowrap; }
 .score.multi {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 0;
   margin-block: 10px 8px; font: 500 14px/1.3 var(--font-ui); text-transform: none; letter-spacing: 0;
 }
-.score.multi .nm { overflow-wrap: anywhere; padding-block-end: 4px; padding-inline-end: 16px; border-bottom: 1px solid var(--rule); }
+.score.multi .nm { overflow-wrap: break-word; padding-block-end: 4px; padding-inline-end: 16px; border-bottom: 1px solid var(--rule); }
 .score.multi .pts { font: 800 24px/1 var(--font-display); text-align: right; padding-block-end: 4px; border-bottom: 1px solid var(--rule); }
 .score .dash { color: var(--ink-3); font-weight: 600; padding-inline: 0.15em; }
 .score-sub { margin: 0 0 10px; font-size: 12px; color: var(--ink-2); }
@@ -282,12 +292,13 @@ button, input, select { font: inherit; color: inherit; }
 .game-row[aria-current="true"] { background: var(--surface); box-shadow: inset 2px 0 0 var(--ink); }
 .game-row .gid { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .game-row .seats { display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
-.game-row .who { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.game-row .who { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
+.game-row .who .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .game-row .who i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; }
 .game-row .who.won { font-weight: 600; }
 .game-row .who.lost { color: var(--ink-2); }
 .game-row .turns { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; text-align: right; }
-.game-row .res { grid-column: 2 / span 2; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.game-row .res { grid-column: 2 / span 2; font-size: 12px; color: var(--ink-2); overflow-wrap: break-word; }
 
 .drop {
   position: fixed; inset: 12px; z-index: 10;
@@ -389,11 +400,116 @@ button, input, select { font: inherit; color: inherit; }
     start: $("btn-start"), back: $("btn-back"), play: $("btn-play"), playIcon: $("play-icon"), playText: $("play-text"),
     fwd: $("btn-fwd"), end: $("btn-end"), speed: $("speed"), speedOut: $("speed-out"),
     snakeList: $("snake-list"), score: $("score"), scoreSub: $("score-sub"), gameList: $("game-list"),
-    file: $("file-input"), drop: $("drop"),
+    file: $("file-input"), drop: $("drop"), app: $("app"),
   };
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const PLAY_PATH = "M6 4l10 6-10 6z";
   const PAUSE_PATH = "M5 4h3.6v12H5zM11.4 4H15v12h-3.6z";
+
+  // --- Pure helpers ---------------------------------------------------------------------
+  // No DOM and no shared state: tests/test_replay.py runs this block under node.
+  // @pure-begin
+  // Unit step from cell a toward its neighbour b, in board cells (y up), wrap-aware.
+  function unitStep(a, b) {
+    let dx = b[0] - a[0], dy = b[1] - a[1];
+    if (Math.abs(dx) > 1) dx = -Math.sign(dx);
+    if (Math.abs(dy) > 1) dy = -Math.sign(dy);
+    return [dx, dy];
+  }
+
+  // Where to put an elimination's cross, in board coordinates (may fall between cells).
+  function deathPoint(body, cause, board) {
+    const on = (p) => p[0] >= 0 && p[1] >= 0 && p[0] < board.width && p[1] < board.height;
+    const head = body[0];
+    if (!on(head)) {
+      const neck = body.find(on);
+      return neck ? [(head[0] + neck[0]) / 2, (head[1] + neck[1]) / 2] : null;  // on the wall it hit
+    }
+    const neck = body.find((p) => p[0] !== head[0] || p[1] !== head[1]);
+    if (cause === "head-collision" && neck) {
+      // Another head (the survivor's, or the other loser's) is on this cell too: mark the
+      // edge this snake came in through, so the cross never sits on the survivor's head.
+      const [dx, dy] = unitStep(head, neck);
+      return [head[0] + dx / 2, head[1] + dy / 2];
+    }
+    return [head[0], head[1]];
+  }
+
+  // Seats that ate on `frame`'s turn: alive, head on a food cell of the previous frame.
+  // (Not "grew": under the constrictor rulesets every snake grows every turn.)
+  function eaters(prev, frame) {
+    if (!prev) return [];
+    const food = new Set((prev.food || []).map((p) => `${p[0]},${p[1]}`));
+    const out = [];
+    frame.snakes.forEach((s, i) => {
+      if (s.alive && s.body && s.body.length && food.has(`${s.body[0][0]},${s.body[0][1]}`)) out.push(i);
+    });
+    return out;
+  }
+
+  // Path ops for the tail's last segment, screen coordinates: half-width w0 at (sx, sy),
+  // narrowing over `len` along the unit direction (dx, dy) to a round tip of radius w1.
+  function taperPath(sx, sy, dx, dy, len, w0, w1) {
+    const bx = sx + dx * len, by = sy + dy * len, nx = -dy, ny = dx;
+    return [
+      ["moveTo", sx + nx * w0, sy + ny * w0],
+      ["lineTo", bx + nx * w1, by + ny * w1],
+      // From +n round through +d (outward) to -n. Screen y points down, so canvas angles
+      // grow clockwise and this half-turn is anticlockwise.
+      ["arc", bx, by, w1, Math.atan2(ny, nx), Math.atan2(-ny, -nx), true],
+      ["lineTo", sx - nx * w0, sy - ny * w0],
+    ];
+  }
+
+  const crossSize = (now) => (now ? 0.24 : 0.16);   // half-size of a cross, in cells
+
+  // Cause labels for the eliminations on `turn`: one per cell and cause (a head-on draw
+  // puts both snakes on one cell), each beside its cell and clear of every cross, every
+  // labelled cell and every earlier label. g: board geometry; measure(text): text width
+  // at font size fs. Returns [{text, x, y, w, h}] in CSS pixels.
+  function layoutDeathLabels(deaths, turn, g, fs, measure) {
+    const cx = (x) => g.gl + (x + 0.5) * g.cell;
+    const cy = (y) => g.pad + (g.H - 1 - y + 0.5) * g.cell;
+    const box = (x, y, half) => ({ x: x - half, y: y - half, w: 2 * half, h: 2 * half });
+    const avoid = [];
+    const groups = new Map();
+    for (const d of deaths) {
+      if (!d.pos || d.turn > turn) continue;
+      // 1.5x the arm length covers the cross's halo and round caps.
+      avoid.push(box(cx(d.pos[0]), cy(d.pos[1]), g.cell * crossSize(d.turn === turn) * 1.5));
+      if (d.turn !== turn) continue;
+      const anchor = d.anchor || d.pos;
+      const key = `${d.cause}|${anchor[0]},${anchor[1]}`;
+      if (!groups.has(key)) groups.set(key, { cause: d.cause, anchor, seats: [] });
+      groups.get(key).seats.push(d.seat);
+    }
+    for (const grp of groups.values()) avoid.push(box(cx(grp.anchor[0]), cy(grp.anchor[1]), g.cell * 0.45));
+    const x0 = g.gl + 2, x1 = g.gl + g.cell * g.W - 2, y0 = g.pad + 2, y1 = g.pad + g.cell * g.H - 2;
+    const out = [];
+    for (const grp of groups.values()) {
+      const cause = grp.cause || "eliminated";
+      const text = grp.seats.length > 1 ? `${cause} (seats ${grp.seats.join(", ")})` : cause;
+      const w = measure(text) + 12, h = fs + 9;
+      const px = cx(grp.anchor[0]), py = cy(grp.anchor[1]);
+      const x = Math.max(x0, Math.min(x1 - w, px - w / 2));
+      const clear = (y) => y >= y0 && y + h <= y1 &&
+        !avoid.some((r) => x < r.x + r.w && r.x < x + w && y < r.y + r.h && r.y < y + h);
+      let y;
+      for (let k = 0.55; y === undefined && k < 3; k += 0.25) y = [py - g.cell * k - h, py + g.cell * k].find(clear);
+      if (y === undefined) y = Math.max(y0, Math.min(y1 - h, py - g.cell * 0.55 - h));  // crowded: best effort
+      const r = { text, x, y, w, h };
+      avoid.push(r);
+      out.push(r);
+    }
+    return out;
+  }
+
+  // Pieces of a name, split after ":", "/" and "=" so registry names such as
+  // "mcts-128:exploration=1.0" or "dqn:runs/a" wrap between their parts.
+  function nameParts(name) {
+    return String(name).match(/[^:/=]*[:/=]?/g).filter(Boolean);
+  }
+  // @pure-end
 
   const view = { replay: null, game: 0, turn: 0, playing: false, speed: 8 };
   let cur = null;          // prepared current game
@@ -401,6 +517,7 @@ button, input, select { font: inherit; color: inherit; }
   let raf = 0, lastTick = 0, acc = 0;
   let hoverTurn = null;
   let boardGeom = null;
+  let titleExtra = 0;
 
   // --- Theme --------------------------------------------------------------------
   function readColors() {
@@ -415,7 +532,14 @@ button, input, select { font: inherit; color: inherit; }
       mono: g("--font-mono") || "monospace",
     };
   }
-  function seatColor(i) { return colors.snakes[i % PALETTE]; }
+  // Colour slot of seat i: the agent's place in the roster, so an agent keeps its colour
+  // when seats rotate between games. A game that seats one agent twice (only possible in
+  // hand-made files) falls back to seat colours, or two snakes would look the same.
+  function colorIdx(game, i) {
+    const k = view.replay.agents.indexOf(game.seats[i]);
+    return k >= 0 && new Set(game.seats).size === game.seats.length ? k : i;
+  }
+  function seatColor(i) { return colors.snakes[colorIdx(cur.game, i) % PALETTE]; }
   function parseHex(c) {
     const m = /^#([0-9a-f]{6})$/i.exec(c);
     if (!m) return null;
@@ -446,6 +570,14 @@ button, input, select { font: inherit; color: inherit; }
       for (const f of g.frames) {
         if (!f || !Array.isArray(f.snakes) || f.snakes.length !== g.seats.length) {
           throw new Error(`game ${i + 1} has a frame whose snakes don't match its ${g.seats.length} seats`);
+        }
+        if (!Array.isArray(f.food)) throw new Error(`game ${i + 1} has a frame with no food list`);
+        for (const s of f.snakes) {
+          if (!s || !Array.isArray(s.body)) throw new Error(`game ${i + 1} has a frame with a snake that has no body`);
+          if (typeof s.health !== "number") throw new Error(`game ${i + 1} has a frame with a snake that has no health`);
+          if (s.alive && !(s.body.length && Array.isArray(s.body[0]))) {
+            throw new Error(`game ${i + 1} has a frame with a live snake whose body is empty`);
+          }
         }
       }
     });
@@ -479,8 +611,22 @@ button, input, select { font: inherit; color: inherit; }
         showStatus(`Couldn't open “${file.name}”: ${e.message}.`);
         return;
       }
+      const prev = view.replay && { data: view.replay, game: view.game, turn: view.turn };
+      try {
+        loadReplay(data, { game: 0, turn: 0, playing: !reduceMotion.matches });
+      } catch (e) {
+        // Something the checks above missed: put back what was showing.
+        if (prev) {
+          loadReplay(prev.data, { game: prev.game, turn: prev.turn, playing: false });
+        } else {
+          setPlaying(false);
+          view.replay = null; cur = null;
+          el.layout.hidden = true; el.empty.hidden = false;
+        }
+        showStatus(`Couldn't show “${file.name}”: ${e.message}.`);
+        return;
+      }
       showStatus(`Opened “${file.name}”: ${data.games.length} game${data.games.length === 1 ? "" : "s"}.`, true);
-      loadReplay(data, { game: 0, turn: 0, playing: !reduceMotion.matches });
     };
     reader.readAsText(file);
   }
@@ -490,13 +636,6 @@ button, input, select { font: inherit; color: inherit; }
     const b = view.replay.board;
     return x >= 0 && y >= 0 && x < b.width && y < b.height;
   }
-  function deathPoint(body) {
-    const [hx, hy] = body[0];
-    if (onBoard(hx, hy)) return [hx, hy];
-    const neck = body.find((p) => onBoard(p[0], p[1]));
-    if (!neck) return null;
-    return [(hx + neck[0]) / 2, (hy + neck[1]) / 2];  // on the wall it ran into
-  }
   function prepare(gi) {
     const game = view.replay.games[gi];
     const frames = game.frames;
@@ -505,7 +644,11 @@ button, input, select { font: inherit; color: inherit; }
     const deaths = (game.result.elims || []).map((e) => {
       const f = frames[Math.min(e.turn, last)];
       const s = f && f.snakes[e.seat];
-      return { seat: e.seat, turn: e.turn, cause: e.cause, pos: s && s.body && s.body.length ? deathPoint(s.body) : null };
+      const body = s && s.body && s.body.length ? s.body : null;
+      const pos = body ? deathPoint(body, e.cause, view.replay.board) : null;
+      // The label goes by the cell where it happened (shared by both heads in a head-on).
+      const anchor = body && onBoard(body[0][0], body[0][1]) ? body[0] : pos;
+      return { seat: e.seat, turn: e.turn, cause: e.cause, pos, anchor };
     });
     const deathOf = Array(n).fill(null);
     for (const d of deaths) deathOf[d.seat] = d;
@@ -527,7 +670,9 @@ button, input, select { font: inherit; color: inherit; }
     const cssW = Math.max(200, el.wrap.clientWidth);
     const gl = Math.round(Math.min(24, Math.max(16, cssW * 0.04)));   // y labels
     const gb = gl;                                                   // x labels
-    const pad = 2;
+    // Top and right margin: room for a cross on the wall line (wall-collision), whose
+    // halo reaches 0.36 of a cell. The cell size itself depends on it, hence the solve.
+    const pad = Math.ceil((0.37 * (cssW - gl)) / (b.width + 0.37));
     const cell = (cssW - gl - pad) / b.width;
     const cssH = Math.round(pad + cell * b.height + gb);
     boardGeom = { cssW, cssH, gl, gb, pad, cell, W: b.width, H: b.height };
@@ -624,15 +769,21 @@ button, input, select { font: inherit; color: inherit; }
     ctx.restore();
 
     // Elimination markers: bold with the cause on the turn it happened, faint after.
-    const labels = [];
     for (const d of cur.deaths) {
       if (!d.pos || d.turn > view.turn) continue;
       const now = d.turn === view.turn;
-      drawCross(ctx, cx(d.pos[0]), cy(d.pos[1]), cell * (now ? 0.24 : 0.16), now ? 1 : 0.45);
-      if (now) labels.push(d);
+      drawCross(ctx, cx(d.pos[0]), cy(d.pos[1]), cell * crossSize(now), now ? 1 : 0.45);
     }
-    const placed = [];
-    for (const d of labels) drawDeathLabel(ctx, d, placed);
+    const lfs = Math.max(10, Math.min(12, cell * 0.32));
+    ctx.font = `500 ${lfs}px ${colors.mono}`;
+    for (const r of layoutDeathLabels(cur.deaths, view.turn, g, lfs, (t) => ctx.measureText(t).width)) {
+      ctx.fillStyle = colors.ink;
+      roundRect(ctx, r.x, r.y, r.w, r.h, 3);
+      ctx.fill();
+      ctx.fillStyle = colors.bg;
+      ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      ctx.fillText(r.text, r.x + 6, r.y + r.h / 2 + 0.5);
+    }
   }
 
   function drawSnake(ctx, body, color, seat) {
@@ -645,13 +796,8 @@ button, input, select { font: inherit; color: inherit; }
     const stacked = body.length > pts.length;   // just ate (or the starting stack)
     const base = cell * 0.56;
     const P = (p) => [cx(p[0]), cy(p[1])];
-    // Unit step from a to b in board cells, wrap-aware (screen y points down).
-    const dirOf = (a, b) => {
-      let dx = b[0] - a[0], dy = b[1] - a[1];
-      if (Math.abs(dx) > 1) dx = -Math.sign(dx);
-      if (Math.abs(dy) > 1) dy = -Math.sign(dy);
-      return [dx, -dy];
-    };
+    // Unit step from a to b in screen space (y points down), wrap-aware.
+    const dirOf = (a, b) => { const [dx, dy] = unitStep(a, b); return [dx, -dy]; };
     const adjacent = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) === 1;
     const segment = (a, b) => {
       const [ax, ay] = P(a);
@@ -688,13 +834,8 @@ button, input, select { font: inherit; color: inherit; }
           const [tx, ty] = P(tailEnd);
           sx = tx - dx * cell * 0.5; sy = ty - dy * cell * 0.5; len = cell * 0.5;
         }
-        const bx = sx + dx * len, by = sy + dy * len;
-        const nx = -dy, ny = dx;
         ctx.beginPath();
-        ctx.moveTo(sx + nx * w0, sy + ny * w0);
-        ctx.lineTo(bx + nx * w1, by + ny * w1);
-        ctx.arc(bx, by, w1, Math.atan2(ny, nx), Math.atan2(-ny, -nx), false);
-        ctx.lineTo(sx - nx * w0, sy - ny * w0);
+        for (const [op, ...args] of taperPath(sx, sy, dx, dy, len, w0, w1)) ctx[op](...args);
         ctx.closePath();
         ctx.fill();
       } else {
@@ -747,31 +888,6 @@ button, input, select { font: inherit; color: inherit; }
     path(); ctx.strokeStyle = colors.cell; ctx.lineWidth = s * 0.95; ctx.stroke();
     path(); ctx.strokeStyle = colors.ink; ctx.lineWidth = s * 0.42; ctx.stroke();
     ctx.restore();
-  }
-
-  function drawDeathLabel(ctx, d, placed) {
-    const g = boardGeom;
-    const text = d.cause || "eliminated";
-    const fs = Math.max(10, Math.min(12, g.cell * 0.32));
-    ctx.font = `500 ${fs}px ${colors.mono}`;
-    const w = ctx.measureText(text).width + 12, h = fs + 9;
-    const px = cx(d.pos[0]), py = cy(d.pos[1]);
-    const minX = g.gl + 2, maxX = g.gl + g.cell * g.W - w - 2;
-    const minY = g.pad + 2, maxY = g.pad + g.cell * g.H - h - 2;
-    let x = Math.max(minX, Math.min(maxX, px - w / 2));
-    let y = py - g.cell * 0.55 - h;
-    if (y < minY) y = py + g.cell * 0.55;
-    for (const r of placed) {
-      if (x < r.x + r.w && r.x < x + w && y < r.y + r.h && r.y < y + h) y = r.y + r.h + 3;
-    }
-    y = Math.max(minY, Math.min(maxY, y));
-    placed.push({ x, y, w, h });
-    ctx.fillStyle = colors.ink;
-    roundRect(ctx, x, y, w, h, 3);
-    ctx.fill();
-    ctx.fillStyle = colors.bg;
-    ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    ctx.fillText(text, x + 6, y + h / 2 + 0.5);
   }
 
   // --- Health strip (a scrubber with every snake's health over the game) -------------------
@@ -833,12 +949,23 @@ button, input, select { font: inherit; color: inherit; }
   }
 
   // --- DOM panels ------------------------------------------------------------------------
-  function resultText(game) {
+  // Agent names are never re-cased (they can be case-sensitive paths); `capital` only
+  // capitalises the fixed phrases.
+  function resultText(game, capital) {
     const r = game.result;
     if (r.winner !== null && r.winner !== undefined) return `${game.seats[r.winner]} won`;
-    if (r.truncated) return "cut off at the turn limit";
-    if (r.draw) return "draw";
-    return "no winner";
+    const t = r.truncated ? "cut off at the turn limit" : r.draw ? "draw" : "no winner";
+    return capital ? t[0].toUpperCase() + t.slice(1) : t;
+  }
+
+  // Text with <wbr> break points after ":", "/" and "=" (see nameParts).
+  function breakable(text) {
+    const frag = document.createDocumentFragment();
+    nameParts(text).forEach((part, i) => {
+      if (i) frag.append(document.createElement("wbr"));
+      frag.append(part);
+    });
+    return frag;
   }
 
   function buildMatch() {
@@ -868,16 +995,33 @@ button, input, select { font: inherit; color: inherit; }
     el.score.textContent = "";
     el.score.classList.toggle("multi", !duels);
     el.score.classList.toggle("lines", duels && pairings.length > 1);
+    // Snakes are coloured by agent (colorIdx) when no game seats an agent twice; then the
+    // scoreline carries the same swatches.
+    const byAgent = r.games.every((g) => new Set(g.seats).size === g.seats.length);
+    const who = (a) => {
+      const frag = document.createDocumentFragment();
+      if (byAgent) {
+        const sw = span("sw", "");
+        sw.style.setProperty("--c", `var(--s${r.agents.indexOf(a) % PALETTE})`);
+        frag.append(sw);
+      }
+      frag.append(breakable(a));
+      return frag;
+    };
     if (duels) {
       for (const p of pairings) {
         const [a, b] = p.names;
         const line = span("line", "");
-        line.append(a + " ", span("pts", String(p.wins.get(a))), span("dash", "–"), span("pts", String(p.wins.get(b))), " " + b);
+        line.append(who(a), " ", span("pts", String(p.wins.get(a))), span("dash", "–"), span("pts", String(p.wins.get(b))), " ", who(b));
         if (pairings.length > 1) line.append(span("n", `${p.games} game${p.games === 1 ? "" : "s"}`));
         el.score.append(line);
       }
     } else {
-      for (const [a, w] of wins) el.score.append(span("nm", a), span("pts", String(w)));
+      for (const [a, w] of wins) {
+        const nm = span("nm", "");
+        nm.append(who(a));
+        el.score.append(nm, span("pts", String(w)));
+      }
     }
     const n = r.games.length;
     el.scoreSub.textContent = `wins over ${n} game${n === 1 ? "" : "s"} · ${draws} draw${draws === 1 ? "" : "s"} · ${cut} cut off · ${Math.round(turns / n)} turns on average`;
@@ -893,14 +1037,17 @@ button, input, select { font: inherit; color: inherit; }
       const seats = span("seats", "");
       g.seats.forEach((name, s) => {
         const who = span("who", "");
-        who.style.setProperty("--c", `var(--s${s % PALETTE})`);
+        who.style.setProperty("--c", `var(--s${colorIdx(g, s) % PALETTE})`);
+        who.title = name;
         const w = g.result.winner;
         if (w !== null && w !== undefined) who.classList.add(w === s ? "won" : "lost");
-        who.append(document.createElement("i"), name);
+        who.append(document.createElement("i"), span("nm", name));
         seats.append(who);
       });
       const elims = (g.result.elims || []).map((e) => `${g.seats[e.seat]}: ${e.cause}, turn ${e.turn}`).join("; ");
-      btn.append(span("gid", `#${gi + 1}`), seats, span("turns", `${g.result.turns} t`), span("res", resultText(g) + (elims ? ` · ${elims}` : "")));
+      const res = span("res", "");
+      res.append(breakable(resultText(g) + (elims ? ` · ${elims}` : "")));
+      btn.append(span("gid", `#${gi + 1}`), seats, span("turns", `${g.result.turns} t`), res);
       btn.setAttribute("aria-label", `Game ${gi + 1}: ${g.seats.join(" vs ")}, ${resultText(g)} after ${g.result.turns} turns`);
       btn.addEventListener("click", () => selectGame(gi, true));
       li.append(btn);
@@ -920,10 +1067,12 @@ button, input, select { font: inherit; color: inherit; }
     cur.rows = cur.game.seats.map((name, i) => {
       const li = document.createElement("li");
       li.className = "snake";
-      li.style.setProperty("--c", `var(--s${i % PALETTE})`);
+      li.style.setProperty("--c", `var(--s${colorIdx(cur.game, i) % PALETTE})`);
       const nameRow = span("snake-name", "");
       const tag = span("tag", "winner"); tag.hidden = true;
-      nameRow.append(span("name", name), span("seat", `seat ${i}`), tag);
+      const nm = span("name", "");
+      nm.append(breakable(name));
+      nameRow.append(nm, span("seat", `seat ${i}`), tag);
       const stats = span("snake-stats", "");
       const lenStat = span("stat", ""); const lenV = span("v", "");
       lenStat.append(span("k", "LENGTH"), lenV);
@@ -975,12 +1124,11 @@ button, input, select { font: inherit; color: inherit; }
     el.outcome.textContent = "";
     if (atEnd) {
       const strong = document.createElement("strong");
-      strong.textContent = resultText(cur.game).replace(/^./, (c) => c.toUpperCase());
+      strong.append(breakable(resultText(cur.game, true)));
       el.outcome.append(strong, ` after ${r.turns} turns.`);
     } else {
-      const ate = f.snakes.filter((s, i) => view.turn > 0 && s.alive && s.length > cur.frames[view.turn - 1].snakes[i].length)
-        .map((s) => cur.game.seats[f.snakes.indexOf(s)]);
-      el.outcome.textContent = ate.length ? `${ate.join(" and ")} ate on this turn.` : `${f.food.length} food on the board.`;
+      const ate = eaters(view.turn > 0 ? cur.frames[view.turn - 1] : null, f).map((i) => cur.game.seats[i]);
+      el.outcome.append(breakable(ate.length ? `${ate.join(" and ")} ate on this turn.` : `${f.food.length} food on the board.`));
     }
   }
 
@@ -1041,20 +1189,36 @@ button, input, select { font: inherit; color: inherit; }
     el.gameTitle.textContent = "";
     g.seats.forEach((name, i) => {
       if (i) el.gameTitle.append(span("vs", " vs "));
-      el.gameTitle.append(name);
+      el.gameTitle.append(breakable(name));
     });
+    el.gameTitle.title = g.seats.join(" vs ");   // the title is clamped to two lines
     el.stripRange.textContent = `turns 0–${cur.last}`;
     el.scrub.max = String(cur.last);
     for (const btn of el.gameList.querySelectorAll(".game-row")) {
       btn.setAttribute("aria-current", btn.dataset.game === String(gi) ? "true" : "false");
     }
+    // Room for the widest number this game shows (the display face's digits vary in width).
+    el.turnNum.style.minWidth = `${Math.max(2, String(cur.last).length) * 1.05}ch`;
     buildSnakes();
+    fitTitle();
     layoutBoard();
     view.turn = Math.max(0, Math.min(cur.last, turn ?? 0));
     cur.drawn = true;
     render();
     if (!keepPlaying) setPlaying(false);
     else if (view.playing) setPlaying(true);
+  }
+
+  // The desktop board cap assumes a one-line game title (CSS); a two-line title takes
+  // its extra height from the board. Bounded: the title is clamped to two lines.
+  function fitTitle() {
+    for (let i = 0; i < 2; i++) {
+      const line = parseFloat(getComputedStyle(el.gameTitle).lineHeight) || 21;
+      const extra = Math.max(0, Math.round(el.gameTitle.getBoundingClientRect().height - line));
+      if (extra === titleExtra) return;
+      titleExtra = extra;
+      el.app.style.setProperty("--title-extra", `${extra}px`);
+    }
   }
 
   function loadReplay(data, opts) {
@@ -1130,9 +1294,9 @@ button, input, select { font: inherit; color: inherit; }
   new ResizeObserver(() => {
     if (resizePending) return;
     resizePending = true;
-    requestAnimationFrame(() => { resizePending = false; if (cur) { layoutBoard(); render(); } });
+    requestAnimationFrame(() => { resizePending = false; if (cur) { fitTitle(); layoutBoard(); render(); } });
   }).observe(el.wrap);
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (cur) render(); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (cur) { fitTitle(); render(); } });
 
   // --- Boot -------------------------------------------------------------------------------
   function start(saved) {

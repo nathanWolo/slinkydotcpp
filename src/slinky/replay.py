@@ -20,7 +20,8 @@ no network beyond Google Fonts. It can also open other replay files.
 
     {"format": "slinky-replay/1",
      "board": {"width": 11, "height": 11}, "ruleset": "standard", "map": "standard",
-     "agents": ["heuristic", "dqn"],          # the roster, in the order given
+     "agents": ["heuristic", "dqn"],          # the roster, in the order given; repeated
+                                              # names get roster letters ("heuristic A")
      "max_turns": 500,
      "games": [
        {"id": 0,
@@ -119,10 +120,16 @@ def _seating(num_agents: int, num_snakes: int, num_games: int, rotate: bool | No
 
 
 def _roster_names(agents: Sequence[Agent]) -> list[str]:
+    """Agent names, with duplicates told apart by roster letter (``"heuristic A"``, ``"... B"``).
+
+    Letters, not numbers, so a suffix can't be mistaken for the (0-based) seat the
+    viewer shows: with rotation the roster position and the seat differ anyway.
+    """
     names = [a.name for a in agents]
     if len(set(names)) == len(names):
         return names
-    return [f"{n} ({i + 1})" if names.count(n) > 1 else n for i, n in enumerate(names)]
+    tag = [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(len(names))]
+    return [f"{n} {tag[i]}" if names.count(n) > 1 else n for i, n in enumerate(names)]
 
 
 def record_games(
@@ -206,14 +213,26 @@ def game_from_states(
     """One replay game (``{"id", "seats", "result", "frames"}``) from your own game loop.
 
     Args:
-      states: the unbatched states of one game, one per turn, consecutive
-        (usually turn 0 first). Frames stop at the first finished state.
+      states: the unbatched states of one game, one per turn from turn 0 (frame
+        ``t`` is turn ``t``). Frames stop at the first finished state; later
+        states are ignored.
       seats: agent name per seat (default ``"seat 0"``, ``"seat 1"``, ...).
+
+    Raises:
+      ValueError: if the states up to the first finished one are not turns
+        0, 1, 2, ... (e.g. a game picked up mid-way, or a skipped turn).
     """
     if not states:
         raise ValueError("no states")
     host = jax.device_get([{f: getattr(s, f) for f in _RECORDED} for s in states])
     arrays = {f: np.stack([np.asarray(h[f]) for h in host]) for f in _RECORDED}
+    done = np.nonzero(arrays["done"])[0]
+    turns = arrays["turn"][: int(done[0]) + 1 if done.size else len(states)]
+    if not np.array_equal(turns, np.arange(len(turns))):
+        shown = ", ".join(str(int(t)) for t in turns[:6]) + (", ..." if len(turns) > 6 else "")
+        raise ValueError(
+            f"states must be consecutive turns from turn 0 (frame t is turn t), got turns {shown}"
+        )
     seats = list(seats) if seats is not None else [f"seat {i}" for i in range(config.num_snakes)]
     return {"id": game_id, "seats": seats, **_game_record(arrays, config)}
 

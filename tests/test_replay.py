@@ -5,7 +5,12 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import math
 import re
+import shutil
+import subprocess
+from importlib import resources
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -25,7 +30,7 @@ from slinky.replay import (
     render_html,
     to_json,
 )
-from slinky.types import ACTION_DELTAS, CAUSE_TO_ENGINE, Cause, GameConfig
+from slinky.types import ACTION_DELTAS, CAUSE_TO_ENGINE, Cause, GameConfig, Ruleset
 
 CONFIG = GameConfig()
 CAUSES = set(CAUSE_TO_ENGINE.values()) - {""}
@@ -90,6 +95,29 @@ def test_frames_match_env_states():
     for e in game["result"]["elims"]:
         assert e["turn"] == int(final.elim_turn[e["seat"]])
         assert e["cause"] == CAUSE_TO_ENGINE[Cause(int(final.elim_cause[e["seat"]]))]
+
+
+def test_game_from_states_requires_frames_from_turn_zero():
+    """Frame t is turn t: the viewer reads the frame index as the turn (counter, deaths)."""
+    env = make_env(CONFIG, False)
+    step = jax.jit(env.step)
+    key = jax.random.key(4)
+    state, _ = env.reset(key)
+    states = [state]
+    for _ in range(6):
+        key, k_act, k_step = jax.random.split(key, 3)
+        state, _ = step(k_step, state, random_legal_policy(k_act, state, env))
+        states.append(state)
+    assert not states[-1].done
+    assert [f["turn"] for f in game_from_states(states, CONFIG)["frames"]] == list(range(7))
+    with pytest.raises(ValueError, match="from turn 0"):
+        game_from_states(states[3:], CONFIG)  # picked up mid-game: turns 3, 4, 5, 6
+    with pytest.raises(ValueError, match="got turns 0, 1, 3"):
+        game_from_states([*states[:2], *states[3:]], CONFIG)  # a skipped turn
+    # States after the first finished one are ignored, whatever their turn.
+    done = states[-1]._replace(done=jnp.asarray(True))
+    game = game_from_states([*states[:-1], done, states[2]], CONFIG)
+    assert len(game["frames"]) == 7
 
 
 def test_replay_structure_and_results(replay):
@@ -200,7 +228,8 @@ def test_seats_rotate_like_play_match(replay):
     fixed = record_games(
         four, ["random_legal", "random", "random", "random_legal"], jax.random.key(2), 2, 3
     )
-    assert fixed["agents"] == ["random_legal (1)", "random (2)", "random (3)", "random_legal (4)"]
+    # Repeated names get roster letters, which can't be mistaken for the 0-based seats.
+    assert fixed["agents"] == ["random_legal A", "random B", "random C", "random_legal D"]
     assert all(g["seats"] == fixed["agents"] for g in fixed["games"])
     shifted = record_games(
         four, ["random_legal", "random", "random", "random_legal"], jax.random.key(2), 2, 3,
@@ -214,7 +243,7 @@ def test_seats_rotate_like_play_match(replay):
 
 def test_truncation_and_determinism():
     a = record_games(CONFIG, ["random_legal", "random_legal"], jax.random.key(5), 2, 4)
-    assert a["agents"] == ["random_legal (1)", "random_legal (2)"]
+    assert a["agents"] == ["random_legal A", "random_legal B"]
     for g in a["games"]:
         r = g["result"]
         if r["truncated"]:
@@ -270,6 +299,183 @@ def test_render_html_escapes_script_breakouts():
     assert evil not in html and "<!--" not in html[data_start:data_end]
     assert _embedded(html)["agents"][0] == evil
     assert html.count("</script>") == 2  # the data block and the viewer script
+
+
+# --- The viewer's drawing logic (its pure helpers, run under node) ------------------------
+
+
+def _viewer_js(fn: str, data: Any) -> Any:
+    """``fn(input)`` evaluated after viewer.html's ``@pure-begin``/``@pure-end`` block."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    page = resources.files("slinky").joinpath("viewer.html").read_text(encoding="utf-8")
+    m = re.search(r"// @pure-begin\n(.*?)// @pure-end", page, re.S)
+    assert m is not None
+    code = (
+        m.group(1)
+        + "\nconst input = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+        + f"\nprocess.stdout.write(JSON.stringify(({fn})(input)));"
+    )
+    out = subprocess.run(
+        [node, "-e", code], input=json.dumps(data), capture_output=True, text=True, timeout=60
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+_EATERS = "(games) => games.map((fs) => fs.slice(1).map((f, t) => eaters(fs[t], f)))"
+
+
+def _head_on_food(frames):
+    """Per turn t >= 1: the live snakes whose head is on a food cell of frame t - 1."""
+    return [
+        [i for i, s in enumerate(f["snakes"]) if s["alive"] and s["body"][0] in prev["food"]]
+        for prev, f in zip(frames, frames[1:], strict=False)
+    ]
+
+
+def test_viewer_eating_is_head_on_food_not_growth(replay):
+    """'X ate on this turn' must not fire for constrictor snakes, which grow every turn."""
+    shown = _viewer_js(_EATERS, [g["frames"] for g in replay["games"]])
+    meals = 0
+    for g, ate in zip(replay["games"], shown, strict=True):
+        frames = g["frames"]
+        assert ate == _head_on_food(frames)
+        # Standard rules: a live snake grows exactly when it eats.
+        grew = [
+            [
+                i
+                for i, s in enumerate(f["snakes"])
+                if s["alive"] and s["length"] > prev["snakes"][i]["length"]
+            ]
+            for prev, f in zip(frames, frames[1:], strict=False)
+        ]
+        assert ate == grew
+        meals += sum(map(len, ate))
+    assert meals > 0
+
+    config = GameConfig(ruleset=Ruleset.CONSTRICTOR)
+    constrictor = record_games(config, ["random_legal", "random_legal"], jax.random.key(0), 2, 30)
+    frames = [g["frames"] for g in constrictor["games"]]
+    shown = _viewer_js(_EATERS, frames)
+    grown = 0
+    for fs, ate in zip(frames, shown, strict=True):
+        assert ate == _head_on_food(fs)
+        grown += sum(
+            s["alive"] and s["length"] > prev["snakes"][i]["length"]
+            for prev, f in zip(fs, fs[1:], strict=False)
+            for i, s in enumerate(f["snakes"])
+        )
+    assert grown > sum(map(len, sum(shown, [])))  # growth without eating happened
+
+
+def _arc(x, y, r, a0, a1, anticlockwise, n=48):
+    """Points along a canvas ``arc()`` (angles grow clockwise on screen, y down)."""
+    sweep = -((a0 - a1) % (2 * math.pi)) if anticlockwise else (a1 - a0) % (2 * math.pi)
+    return [
+        (x + r * math.cos(a0 + sweep * k / n), y + r * math.sin(a0 + sweep * k / n))
+        for k in range(n + 1)
+    ]
+
+
+def _inside(pt, poly):
+    x, y = pt
+    hit = False
+    for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1], strict=True):
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            hit = not hit
+    return hit
+
+
+def test_viewer_tail_tip_is_rounded_outward():
+    """The taper ends in a round tip covering the tail cell, not a notch cut into it."""
+    w0, w1, length = 11.2, 5.8, 40.0
+    dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+    paths = _viewer_js(
+        f"() => {json.dumps(dirs)}.map(([dx, dy]) => taperPath(100, 100, dx, dy, {length}, "
+        f"{w0}, {w1}))",
+        None,
+    )
+    for (dx, dy), ops in zip(dirs, paths, strict=True):
+        poly = []
+        for op, *args in ops:
+            poly += _arc(*args) if op == "arc" else [tuple(args)]
+        bx, by = 100 + dx * length, 100 + dy * length
+        for t in (-0.6, 0.0, 0.6):  # the tail cell's centre and either side of it
+            assert _inside((bx + dx * w1 * t + dy * 0.01, by + dy * w1 * t + dx * 0.01), poly)
+        assert not _inside((bx + dx * w1 * 1.2, by + dy * w1 * 1.2), poly)
+        assert _inside((100 + dx * length / 2 + dy * 0.01, 100 + dy * length / 2 + dx * 0.01), poly)
+
+
+def _geometry(css_width, size=11):
+    """The board geometry ``layoutBoard()`` computes for a canvas this wide."""
+    gl = round(min(24, max(16, css_width * 0.04)))
+    pad = math.ceil(0.37 * (css_width - gl) / (size + 0.37))
+    return {"gl": gl, "pad": pad, "cell": (css_width - gl - pad) / size, "W": size, "H": size}
+
+
+_LABELS = """({deaths, geoms}) => {
+  const board = {width: 11, height: 11};
+  const ds = deaths.map(
+    (d) => ({...d, anchor: d.body[0], pos: deathPoint(d.body, d.cause, board)}),
+  );
+  return {
+    pos: ds.map((d) => d.pos),
+    labels: geoms.map((g) => {
+      const fs = Math.max(10, Math.min(12, g.cell * 0.32));
+      return layoutDeathLabels(ds, 9, g, fs, (t) => t.length * fs * 0.6);
+    }),
+  };
+}"""
+
+
+def _overlap(a, b):
+    x = a["x"] < b["x"] + b["w"] and b["x"] < a["x"] + a["w"]
+    return x and a["y"] < b["y"] + b["h"] and b["y"] < a["y"] + a["h"]
+
+
+def _box(x, y, half):
+    return {"x": x - half, "y": y - half, "w": 2 * half, "h": 2 * half}
+
+
+def test_viewer_death_labels_leave_crosses_and_heads_visible():
+    """A head-on draw (two deaths on one cell) gets one label, and no label covers a cross."""
+    deaths = [
+        # Head-on on (1, 5): seat 0 came from the left, seat 3 from above.
+        {"seat": 0, "turn": 9, "cause": "head-collision", "body": [[1, 5], [0, 5], [0, 4]]},
+        {"seat": 3, "turn": 9, "cause": "head-collision", "body": [[1, 5], [1, 6], [1, 7]]},
+        # Two deaths in neighbouring cells, and one on the top row.
+        {"seat": 1, "turn": 9, "cause": "snake-collision", "body": [[6, 5], [6, 4]]},
+        {"seat": 2, "turn": 9, "cause": "out-of-health", "body": [[7, 5], [7, 4]]},
+        {"seat": 4, "turn": 9, "cause": "head-collision", "body": [[4, 10], [4, 9]]},
+        {"seat": 5, "turn": 9, "cause": "head-collision", "body": [[4, 10], [3, 10]]},
+    ]
+    geoms = [_geometry(368), _geometry(560)]  # phone and desktop canvas widths
+    out = _viewer_js(_LABELS, {"deaths": deaths, "geoms": geoms})
+    # Head-collision crosses sit on the edge each loser came in through, off the shared cell.
+    assert out["pos"] == [[0.5, 5], [1, 5.5], [6, 5], [7, 5], [4, 9.5], [3.5, 10]]
+    for g, labels in zip(geoms, out["labels"], strict=True):
+        cell = g["cell"]
+        centres = {  # canvas pixels of each cross and each head
+            (x, y): (g["gl"] + (x + 0.5) * cell, g["pad"] + (10 - y + 0.5) * cell)
+            for x, y in [*map(tuple, out["pos"]), *(tuple(d["body"][0]) for d in deaths)]
+        }
+        texts = [lb["text"] for lb in labels]
+        assert texts == [
+            "head-collision (seats 0, 3)",
+            "snake-collision",
+            "out-of-health",
+            "head-collision (seats 4, 5)",
+        ]
+        # A cross's arms plus its halo; a head's radius.
+        crosses = [_box(*centres[tuple(p)], 0.24 * cell * 1.475) for p in out["pos"]]
+        heads = [_box(*centres[tuple(d["body"][0])], 0.56 * 0.62 * cell) for d in deaths]
+        for i, lb in enumerate(labels):
+            assert g["gl"] <= lb["x"] and lb["x"] + lb["w"] <= g["gl"] + 11 * cell
+            assert g["pad"] <= lb["y"] and lb["y"] + lb["h"] <= g["pad"] + 11 * cell
+            assert not any(_overlap(lb, box) for box in crosses + heads), (lb, g)
+            assert not any(_overlap(lb, other) for other in labels[:i])
 
 
 def test_agents_registry():
