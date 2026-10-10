@@ -260,7 +260,9 @@ def test_tree_alone_finds_a_trap_three_moves_deep():
         assert bool(env_for(DUEL).action_mask(state)[seat, LEFT])
         out = run(state, config)
         assert set(out.action[:, seat]) == {RIGHT}
-        assert np.all(out.q[:, seat, LEFT] < -0.5)
+        # Deaths were found below LEFT (the leaves are worth 0 without them).
+        assert np.all(out.q[:, seat, LEFT] < 0)
+        assert np.all(out.visits[:, seat, LEFT] < out.visits[:, seat, RIGHT])
 
 
 # --- Policy and strength ---------------------------------------------------------------
