@@ -184,11 +184,11 @@ MIN_GAMES_TO_STOP = 64  # --target-ci never stops before this many games
 TREE_SAFETY = 2.0  # memory model: XLA temporaries and double buffering
 PROGRESS_SECONDS = 15.0  # at most one progress line per this many seconds
 # --dry-run's rough model of one game-turn on one pinned core of a 2.1 GHz Xeon, fitted to
-# mcts-16 ... mcts-1024 against the heuristic and the DQN with 32 slots: 0.06 ms plus
-# 0.0061 ms per simulation of the matchup's searches, growing by sims / 2048 (bigger trees
-# cost more per node), plus 0.25 ms per DQN move. Games against random agents are short.
-# --estimate measures instead.
-ROUGH_MS = {"fixed": 0.06, "per_sim": 0.0061, "sim_scale": 2048.0, "dqn": 0.25}
+# mcts-64 ... mcts-24000 against the heuristic with 32 slots: 0.06 ms plus 0.0055 ms per
+# simulation of the matchup's searches, growing by sims / 48000 (bigger trees cost more per
+# node), plus 0.25 ms per DQN move and about 0.15 per PPO move (smaller network). Games
+# against random agents are short. --estimate measures instead.
+ROUGH_MS = {"fixed": 0.06, "per_sim": 0.0055, "sim_scale": 48000.0, "dqn": 0.25, "ppo": 0.15}
 ROUGH_TURNS_PER_GAME = 120
 ROUGH_TURNS_VS_RANDOM = 40
 COMPILE_SECONDS = 10.0  # about what compiling a matchup takes
@@ -294,15 +294,19 @@ def git_info() -> tuple[str, bool]:
 
 
 def code_fingerprint() -> tuple[str, int]:
-    """Hash of the slinky modules this process has loaded, ``baselines/dqn.py`` and this file.
+    """Hash of the slinky modules this process has loaded, the baselines and this file.
 
     Returns ``(hash, number of files)``. Every module an agent can need is imported at
     startup, so the set of files does not depend on the agents. Files are keyed by module
     name, so checkouts in different directories with the same code agree.
     """
     files = {"benchmarks/strength.py": Path(__file__)}
-    if registry.DQN_SCRIPT.is_file():
-        files["baselines_dqn"] = registry.DQN_SCRIPT
+    for name, script in (
+        ("baselines_dqn", registry.DQN_SCRIPT),
+        ("baselines_ppo", registry.PPO_SCRIPT),
+    ):
+        if script.is_file():
+            files[name] = script
     for name, module in list(sys.modules.items()):
         path = getattr(module, "__file__", None)
         if path and (name == "slinky" or name.startswith("slinky.")):
@@ -352,7 +356,7 @@ class Matchup:
         kinds = (self.a.spec.kind, self.b.spec.kind)
         sims = self.a.sims + self.b.sims
         ms = ROUGH_MS["fixed"] + ROUGH_MS["per_sim"] * sims * (1 + sims / ROUGH_MS["sim_scale"])
-        ms += ROUGH_MS["dqn"] * kinds.count("dqn")
+        ms += ROUGH_MS["dqn"] * kinds.count("dqn") + ROUGH_MS["ppo"] * kinds.count("ppo")
         random = {"random", "random_legal"} & set(kinds)
         turns = ROUGH_TURNS_VS_RANDOM if random else ROUGH_TURNS_PER_GAME
         return self.games * turns * ms / 1e3
@@ -1051,7 +1055,7 @@ def estimate(s: Settings, matchups: list[Matchup], out: Path, assume_turns: int)
 def agent_sort_key(name: str) -> tuple[int, int, str]:
     if name in registry.SIMPLE_AGENTS:
         return registry.SIMPLE_AGENTS.index(name), 0, name
-    if name.startswith("dqn"):
+    if name.startswith(("dqn", "ppo")):
         return 3, 0, name
     if match := re.match(r"mcts-(\d+)(.*)", name):
         return 4, int(match[1]), match[2]

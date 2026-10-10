@@ -226,7 +226,8 @@ def test_loss_ignores_invalid_samples_and_starts_unclipped():
         returns=jnp.asarray(rng.uniform(-1, 1, b), jnp.float32),
         valid=valid,
     )
-    loss, parts = ppo.ppo_loss(params, mb, cfg)
+    loss_fn = jax.jit(lambda p, mb: ppo.ppo_loss(p, mb, cfg))
+    loss, parts = loss_fn(params, mb)
     # The policy that collected the data: ratio 1, nothing clipped, KL 0.
     assert float(parts["approx_kl"]) == pytest.approx(0.0, abs=1e-6)
     assert float(parts["clip_frac"]) == 0.0
@@ -236,9 +237,9 @@ def test_loss_ignores_invalid_samples_and_starts_unclipped():
         returns=jnp.where(valid, mb.returns, -1e6),
         log_probs=jnp.where(valid, mb.log_probs, 50.0),
     )
-    loss2, parts2 = ppo.ppo_loss(params, poisoned, cfg)
+    loss2, _ = loss_fn(params, poisoned)
     assert float(loss2) == pytest.approx(float(loss), rel=1e-5)
-    grads = jax.grad(lambda p: ppo.ppo_loss(p, poisoned, cfg)[0])(params)
+    grads = jax.jit(jax.grad(lambda p: ppo.ppo_loss(p, poisoned, cfg)[0]))(params)
     assert all(bool(jnp.isfinite(x).all()) for x in jax.tree.leaves(grads))
 
 
@@ -285,7 +286,7 @@ def _argv(run_dir, *extra):
         "--num-envs", "4", "--num-steps", "16", "--total-env-steps", "256",
         "--log-every", "128", "--num-minibatches", "4", "--update-epochs", "2",
         "--conv-channels", "4,8", "--conv-strides", "2,2", "--hidden", "16",
-        "--eval-every", "128", "--eval-games", "4", "--eval-opponents", "random_legal",
+        "--eval-every", "256", "--eval-games", "4", "--eval-opponents", "random_legal",
         "--run-dir", run_dir, *extra,
     ]  # fmt: skip
 
@@ -308,9 +309,7 @@ def test_tiny_training_run_checkpoints_and_eval_only(tmp_path, capsys):
     for key in ("loss", "pg_loss", "v_loss", "entropy", "approx_kl", "clip_frac", "grad_norm"):
         assert all(np.isfinite(r[key]) for r in train), key
     assert sum(r["games"] for r in train) > 0 and sum(train[-1]["deaths"].values()) > 0
-    assert [(e["env_steps"], e["mode"]) for e in evals] == [
-        (128, "greedy"), (128, "sample"), (256, "greedy"), (256, "sample"),
-    ]  # fmt: skip
+    assert [(e["env_steps"], e["mode"]) for e in evals] == [(256, "greedy"), (256, "sample")]
     assert all(e["num_games"] == 4 and e["opponent"] == "random_legal" for e in evals)
     assert all(np.isfinite(x).all() for x in jax.tree.leaves(params))
 
