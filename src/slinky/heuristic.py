@@ -22,8 +22,8 @@ pure, fixed-shape functions of one (unbatched) game that ``jit`` and ``vmap``.
    trap term. In a duel the value is exactly antisymmetric. All snakes' fills
    run together as a race on bit-packed rows (one ``uint32`` per board row),
    which gives the same numbers as :func:`arrival_times` plus :func:`voronoi`
-   about 4x faster. An evaluation costs about 1.5 ``env.step``\\ s, so it is
-   cheap enough for every MCTS leaf.
+   about 4x faster. One evaluation costs about as much as 1.6 calls to
+   ``env.step``, so it is cheap enough for every MCTS leaf.
 
 3. **A policy**, :func:`heuristic_policy` (and :func:`heuristic`, the cached
    ``evaluate.Policy``). Each snake ranks its candidate moves
@@ -41,7 +41,8 @@ pure, fixed-shape functions of one (unbatched) game that ``jit`` and ``vmap``.
    ``(a, b)`` are applied with ``rules.rules_step`` and evaluated, and move
    ``a`` scores ``min_b M[a, b] + mean_weight * mean_b M[a, b]`` over the
    opponent's legal replies ``b``. A mutual elimination is worth
-   ``-contempt``, so the snake trades heads only when it is otherwise losing.
+   ``-contempt``, so the snake risks an equal-length head-on only when its
+   other moves look worse than that.
    This one matrix covers both kinds of head-to-head exactly: danger from an
    equal-or-longer snake, and the chance to kill a shorter one. With other
    numbers of snakes (solo, or three or more), the tiers and a weighted sum
@@ -68,6 +69,7 @@ import jax.numpy as jnp
 
 from slinky import rules
 from slinky.env import BattlesnakeEnv
+from slinky.evaluate import Policy
 from slinky.types import ACTION_DELTAS, NUM_ACTIONS, GameConfig, State, TimeStep
 
 INF = 1000  # distance / arrival time of cells that are not reached
@@ -75,8 +77,6 @@ _NEVER = 30_000  # countdown of cells that never free up (constrictor bodies)
 _DELTAS = jnp.array(ACTION_DELTAS, jnp.int32)  # [4, 2] (dx, dy)
 _ALL_BITS = 0xFFFFFFFF
 _MAX_PACKED_WIDTH = 32  # boards up to 32 wide use bit-packed rows
-
-Policy = Callable[[jax.Array, State, TimeStep], jax.Array]
 
 # --- Grid utilities ---------------------------------------------------------------
 
@@ -387,21 +387,31 @@ class Weights(NamedTuple):
     * ``greedy_*``: the weighted sum used when the game is not a duel (see
       :func:`greedy_scores`).
     * ``fill_steps``: length of every flood fill; ``None`` means ``H + W``.
-    * ``fill_wait``: the fills' ``wait`` flag (see :func:`distances`).
+    * ``fill_wait``: the fills' ``wait`` flag (see :func:`distances`). Letting
+      fills wait played clearly worse in the duel.
 
-    The defaults come from ``docs/research/battlesnake_heuristics.md`` (fitted
-    on 46.5k sampled states, then hand-tuned), followed by a held-out tuning
-    pass in the 11x11 duel.
+    The evaluator coefficients start from the research note's fit
+    (``docs/research/battlesnake_heuristics.md``: territory 0.40, food
+    territory 0.35, length 0.15, hunger 0.50, shortfall 0.50, contempt 0.4,
+    mean weight 0.25). A held-out tuning pass in the 11x11 duel then changed
+    three of them: length 0.15 -> 0.25, contempt 0.4 -> 0.25, and mean weight
+    0.25 -> 0.5. Each candidate played 1,024 games against the original
+    weights, the feature-only snake and the DQN. Scores against the DQN stayed
+    level, at about 0.95. The new weights won more often against the other two
+    opponents. Lower contempt and a larger length weight both make the snake
+    more willing to contest cells, and passive settings lost to aggressive
+    opponents. The other coefficients, and both safety tiers, were flat within
+    noise.
     """
 
     territory: float = 0.40
     food_territory: float = 0.35
-    length: float = 0.15
+    length: float = 0.25
     hunger: float = 0.50
     shortfall: float = 0.50
     sharpness: float = 1.0
-    contempt: float = 0.4
-    mean_weight: float = 0.25
+    contempt: float = 0.25
+    mean_weight: float = 0.5
     greedy_territory: float = 1.5
     greedy_food_territory: float = 2.0
     greedy_hunger: float = 1.5
