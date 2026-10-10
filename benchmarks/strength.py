@@ -625,9 +625,9 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
     upper = prep.seconds_per_batch_turn * s.max_turns
     log(
         f"{tag}   compile {fmt_duration(prep.compile_seconds)}; probe "
-        f"{1e3 * prep.seconds_per_batch_turn:.2f} ms per batch-turn -> a round of "
-        f"{s.max_turns} turns takes at most {fmt_duration(upper)} "
-        f"({plan.rounds} round(s): at most {fmt_duration(upper * plan.rounds)})"
+        f"{1e3 * prep.seconds_per_batch_turn:.2f} ms per batch-turn, so a round whose longest "
+        f"game reaches turn {s.max_turns} takes about {fmt_duration(upper)} "
+        f"({plan.rounds} round(s): about {fmt_duration(upper * plan.rounds)})"
     )
     w = d = lo = trunc = turns = 0
     rounds_detail: list[list[float]] = []
