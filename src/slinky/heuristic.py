@@ -331,7 +331,9 @@ def _fill_stats_packed(countdown, heads, lengths, food, tails, steps, wrapped, w
     d_all = jnp.arange(1, steps + 1)
     # The open cells for each step, precomputed, broadcast to every snake. Pre-broadcasting
     # keeps broadcasts out of the loop body, which is noticeably faster on CPU.
-    open_rows = jnp.broadcast_to(_pack(countdown[None] <= d_all[:, None, None])[:, None], (steps, n, h))
+    open_rows = jnp.broadcast_to(
+        _pack(countdown[None] <= d_all[:, None, None])[:, None], (steps, n, h)
+    )
     dist0 = jnp.where(jnp.any((seeds & food_rows) != 0, axis=-1), 0, INF)
 
     def step(carry, x):
@@ -576,7 +578,7 @@ class MoveFeatures(NamedTuple):
     kill_chance: jax.Array  # float32: sum over shorter opponents that can move there of 1/#moves
     territory: jax.Array  # float32: (claimed - claimed by opponents) / (H * W)
     food_territory: jax.Array  # float32: (food claimed - food opponents claim) / max(1, #food)
-    dist_food: jax.Array  # int32: moves to the nearest reachable food (this one counts), INF if none
+    dist_food: jax.Array  # int32: moves to the nearest reachable food (incl. this move), or INF
     hunger: jax.Array  # float32 in [0, 1], see :func:`hunger`
 
 
@@ -732,9 +734,7 @@ def _joint_outcomes(
     return tuple(x.reshape(shape) for x in jax.vmap(outcome)(acts))
 
 
-def joint_values(
-    state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS
-) -> jax.Array:
+def joint_values(state: State, config: GameConfig, weights: Weights = DEFAULT_WEIGHTS) -> jax.Array:
     """float32[4, 4, 2] duel values after every joint move: ``[action 0, action 1, snake]``.
 
     Each joint move is applied with the exact ``rules.rules_step`` (no food

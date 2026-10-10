@@ -44,12 +44,12 @@ def board(snakes, config=DUEL, food=(), health=None, causes=None, turn=10) -> St
     return state_from_engine(d, config)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def env_for(config: GameConfig) -> BattlesnakeEnv:
     return BattlesnakeEnv(config, obs=None)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def jitted_policy(config: GameConfig):
     env = env_for(config)
     return jax.jit(jax.vmap(lambda k, s: H.heuristic_policy(k, s, env), in_axes=(0, None)))
@@ -218,7 +218,9 @@ def test_evaluate_terminal_values():
     three = GameConfig(num_snakes=3)
     c = [(8, 8), (8, 7), (8, 6)]
     causes = [("wall-collision", 4), ("head-collision", 9), ("head-collision", 9)]
-    np.testing.assert_array_equal(H.evaluate(board([a, b, c], three, causes=causes), three), [-1, 0, 0])
+    np.testing.assert_array_equal(
+        H.evaluate(board([a, b, c], three, causes=causes), three), [-1, 0, 0]
+    )
     # Not over yet: the dead snake gets -1, the living ones a heuristic value.
     v = np.asarray(H.evaluate(board([a, b, c], three, causes=[("", 0)] * 2 + [causes[0]]), three))
     assert v[2] == -1 and np.all(np.abs(v[:2]) < 1)
