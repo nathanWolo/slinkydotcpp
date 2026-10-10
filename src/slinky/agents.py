@@ -24,7 +24,8 @@ Names:
   argmax of the policy logits) and ``ppo-sample`` (a move sampled from the
   policy over the legal moves, with the match's random keys) choose the mode
   explicitly, also with ``:<run dir>``. The canonical name leaves the default
-  mode out.
+  mode out. The default is greedy: in the pilot runs it scored at least as well
+  as sampled play against the heuristic and the DQN.
 * ``mcts-<n>``: simultaneous-move MCTS (:func:`slinky.mcts.mcts`) with ``n``
   simulations per move and the default :class:`slinky.mcts.MCTSConfig`. Other
   fields are set with dash-separated shorthands (``mcts-256-rm-c0.5``; the list

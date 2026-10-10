@@ -21,8 +21,8 @@
 The reward is the environment's sparse win/loss reward (no shaping), as in the
 DQN baseline. Everything between two log lines (rollouts and updates) is one
 jitted ``lax.scan`` (:func:`make_train_chunk`). The Python loop only logs,
-evaluates (greedy and sampled play against ``random_legal`` and the heuristic)
-and saves checkpoints::
+evaluates (greedy and sampled play against ``random_legal``, the heuristic and
+the DQN baseline) and saves checkpoints::
 
     python baselines/ppo.py                                   # default run
     python baselines/ppo.py --total-env-steps 1000000 --lr 3e-4
@@ -88,7 +88,7 @@ class PPOConfig:
     # Collection.
     num_envs: int = 64  # games stepped in parallel
     num_steps: int = 128  # turns per rollout (per iteration)
-    total_env_steps: int = 4_194_304  # rounded up to whole log chunks
+    total_env_steps: int = 5_242_880  # rounded up to whole log chunks
     # PPO.
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -100,20 +100,21 @@ class PPOConfig:
     ent_coef: float = 0.01
     norm_adv: bool = True
     # Optimization.
-    lr: float = 2.5e-4
+    lr: float = 1e-3
     anneal_lr: bool = True  # linear decay to 0 over the run
     max_grad_norm: float = 0.5
     adam_eps: float = 1e-5
     # Network: 3x3 convs (ReLU), a dense hidden layer (ReLU), then linear policy and value heads.
-    conv_channels: tuple[int, ...] = (32, 64, 64)
+    # Half the DQN's channels: twice the env steps per second, as strong per minute in pilots.
+    conv_channels: tuple[int, ...] = (16, 32, 32)
     conv_strides: tuple[int, ...] = (2, 2, 1)
     hidden: int = 256
     # Logging, evaluation and checkpoints.
     seed: int = 0
     log_every: int = 32_768  # env steps per jitted chunk (one log line), whole iterations
-    eval_every: int = 524_288  # env steps between evaluations (and checkpoints)
+    eval_every: int = 1_048_576  # env steps between evaluations (and checkpoints)
     eval_games: int = 256  # per opponent and mode
-    eval_opponents: tuple[str, ...] = ("random_legal", "heuristic")  # slinky.agents names
+    eval_opponents: tuple[str, ...] = ("random_legal", "heuristic", "dqn")  # slinky.agents
     eval_modes: tuple[str, ...] = EVAL_MODES  # greedy (masked argmax) and/or sample
     checkpoint_every: int = 262_144  # env steps between full checkpoints (for --resume)
     run_dir: str | None = None  # default: runs/ppo-<timestamp>
@@ -849,6 +850,11 @@ def train(cfg: PPOConfig, resume: bool = False) -> tuple[str, Params]:
     metrics_path = os.path.join(run_dir, "metrics.jsonl")
 
     env, sim = make_envs(cfg)
+    if cfg.eval_games > 0:  # fail now, not at the first evaluation, if one can't be built
+        from slinky.agents import make_agent
+
+        for opponent in cfg.eval_opponents:
+            make_agent(opponent, env.config)
     k_eval, k_init = jax.random.split(jax.random.key(cfg.seed))
     runner = jax.jit(init_runner, static_argnums=(0, 1))(cfg, sim, k_init)
     agent_total = 0

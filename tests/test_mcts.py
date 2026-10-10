@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import re
 
 import jax
 import jax.numpy as jnp
@@ -265,6 +266,39 @@ def test_variants_run():
         assert np.all(np.abs(out.q) <= 1)
         # Sampled or not, every move is one the mask allows.
         assert mask[np.arange(2), out.action].all()
+
+
+def tree_copies(fn, *args, num_nodes: int) -> list[str]:
+    """``copy`` instructions of tree-sized arrays (a ``num_nodes`` axis) in ``fn``'s loops.
+
+    Those are the HLO computations other than the entry, which runs once per call.
+    """
+    hlo = jax.jit(fn).lower(*args).compile().as_text()
+    copies, entry = [], False
+    for line in hlo.splitlines():
+        if line.endswith("{") and not line.startswith(" "):  # a computation's header
+            entry = line.startswith("ENTRY")
+        elif not entry and re.search(rf"= \w+\[[\d,]*\b{num_nodes}\b[\d,]*\]\S* copy\(", line):
+            copies.append(line.strip())
+    return copies
+
+
+@pytest.mark.parametrize("batch", [None, 1, 2])
+def test_tree_is_updated_in_place(batch):
+    # XLA compiled one unbatched game (and a vmap of one) with a copy of every
+    # Tree.state array on every simulation, about 1 MB per copy at 1024 simulations,
+    # so the search was quadratic in num_simulations. 41 nodes: a size no other axis has.
+    config = M.MCTSConfig(num_simulations=40)
+    env, key, state = env_for(DUEL), jax.random.key(0), mid_game_state()
+
+    def search(k, s):
+        return M.search(k, s, env, config)
+
+    if batch is not None:
+        search = jax.vmap(search)
+        key = jax.random.split(key, batch)
+        state = jax.tree.map(lambda x: jnp.stack([x] * batch), state)
+    assert tree_copies(search, key, state, num_nodes=41) == []
 
 
 def test_spawn_free_transition_matches_env_step():

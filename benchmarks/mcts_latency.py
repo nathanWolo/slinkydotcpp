@@ -9,12 +9,11 @@ compilation (untimed warmup calls). Its distribution is reported per ``n``: medi
 p90 and max over ``--repeats`` searches (fresh keys) of every position.
 
 ``--batch B`` (``B >= 2``) measures ``jax.jit(jax.vmap(search))`` on ``B`` copies of the
-position instead, i.e. the latency of a ``B``-game call. With the current ``mcts.py``
-this matters: XLA compiles the unbatched search (and ``B = 1``) with a full copy of the
-tree's state arrays on every simulation, so its cost per simulation grows linearly with
-``n`` (quadratic total), while for ``B >= 2`` the updates are in place. The cheapest
-way to serve one game on the current code is therefore ``--batch 2`` (the second search
-is wasted work, which the latency includes).
+position instead, i.e. the latency of a ``B``-game call. Both programs update the
+tree in place, so the cost per simulation grows only slowly with ``n`` (cache misses,
+deeper descents) and serving one game needs no batch. (Before ``mcts._unbatched_barrier``,
+XLA copied the tree's state arrays on every simulation of the unbatched search and of
+``B = 1``, which made it quadratic in ``n``.)
 
 Positions come from real games, so the cost is not that of a lucky opening: a batch of
 ``--games`` games of MCTS (``--player``, a cheap ``mcts-<n>``) against the heuristic is

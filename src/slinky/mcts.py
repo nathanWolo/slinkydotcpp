@@ -19,8 +19,9 @@ replay from the root. Per node there are also ``children[4**N]`` (``-1`` = not
 expanded), the move mask ``legal[N, 4]``, ``terminal`` and the leaf
 ``value[N]``, plus the selection statistics. Everything is updated in place
 with ``.at[]`` inside a ``fori_loop`` over simulations; XLA never copies the
-tree (checked in the compiled HLO), and the time per simulation grows only
-slowly with ``M`` (cache misses, deeper descents).
+tree (a test checks the compiled HLO, batched and not; one unbatched game needs
+the barrier of :func:`_unbatched_barrier` for that), and the time per
+simulation grows only slowly with ``M`` (cache misses, deeper descents).
 
 **One simulation.**
 

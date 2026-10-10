@@ -270,6 +270,13 @@ def test_config_checks():
     assert cfg.minibatch_size == 4 * 8 * 2 // cfg.num_minibatches
 
 
+def test_bad_eval_opponent_fails_before_training(tmp_path):
+    cfg = ppo.PPOConfig(eval_opponents=("alphasnake",), run_dir=str(tmp_path), **TINY)
+    with pytest.raises(ValueError, match="unknown agent"):
+        ppo.train(cfg)
+    assert not (tmp_path / "metrics.jsonl").exists()
+
+
 # --- (3) End to end ---------------------------------------------------------------
 
 
