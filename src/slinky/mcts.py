@@ -35,8 +35,9 @@ slowly with ``M`` (cache misses, deeper descents).
    spawn is drawn once, when the node is expanded, from a key folded with the
    slot number, so the tree is one consistent sample of the chance events.
 3. *Leaf evaluation*: the exact outcome if the game is over (as
-   ``env.win_loss_reward``: dead -1, sole survivor +1, snakes dying together on
-   the last turn 0; a truncated game is 0 for every living snake). Otherwise
+   ``env.win_loss_reward``: dead -1, sole survivor +1, and ``draw_value`` for
+   snakes dying together on the last turn, 0 in the reward but -0.5 by default
+   here; a truncated game is 0 for every living snake). Otherwise
    optional rollouts (``rollout_steps`` turns of ``rollout_policy``) and then
    :func:`slinky.heuristic.evaluate` (``leaf="heuristic"``, in ``[-0.99,
    0.99]`` so exact outcomes always dominate) or 0 for living snakes
@@ -95,6 +96,14 @@ of :mod:`slinky.heuristic`, with 95% confidence intervals; see
   0.25, so 0.12 from the middle of UCB's ``[0, 1]`` scale), and a large ``C``
   spreads the visits almost uniformly. At 64 simulations ``C = 1.4`` scored 0.49 +- 0.03
   and ``C = 0.25`` 0.54 +- 0.03 (256 games each).
+* ``draw_value=-0.5``, contempt for mutual eliminations. With a draw worth 0,
+  as in ``env.win_loss_reward``, the search happily trades heads at equal
+  length whenever its position looks slightly worse, and about 75% of games
+  against the heuristic were draws. With contempt they are decided by play:
+  0.596 +- 0.034 rose to 0.700 +- 0.049 at 256 simulations (192 games), and
+  0.539 +- 0.030 to 0.590 +- 0.046 at 64. Against the DQN it made no
+  difference (0.961 and 0.969 +- 0.03 at 64). A draw still beats a loss, and
+  ``draw_value=0`` gives the pure win/loss objective.
 * ``spawn_food=False``: the same strength per simulation as sampled spawns
   (0.594 +- 0.043 against 0.590 +- 0.046 at 64 simulations) at about 1.5x the
   simulations per second, since the spawn's random draw costs more than the
@@ -158,8 +167,9 @@ class MCTSConfig:
       max_depth: the deepest a simulation descends (edges from the root). A
         selection that reaches it backs up that node's stored leaf value.
       final: ``"max"`` or ``"sample"`` (see the module docstring).
-      draw_value: value of a mutual elimination inside the search (0 matches
-        ``env.win_loss_reward``; negative values are "contempt" for draws).
+      draw_value: value of a mutual elimination inside the search. 0 matches
+        ``env.win_loss_reward``; the default -0.5 is "contempt" for draws (see
+        the module docstring).
       spawn_food: transitions inside the tree (and rollouts) sample the map's
         food spawn with ``env.step``. If False they run ``rules.rules_step``
         with no spawn, a deterministic model of the game (Schier &
@@ -178,7 +188,7 @@ class MCTSConfig:
     weights: heuristic.Weights = heuristic.DEFAULT_WEIGHTS
     max_depth: int = 32
     final: str = "max"
-    draw_value: float = 0.0
+    draw_value: float = -0.5
     spawn_food: bool = False
 
     def __post_init__(self) -> None:
