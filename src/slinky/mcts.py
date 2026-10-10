@@ -151,6 +151,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.custom_batching import custom_vmap
 
 from slinky import heuristic, rules
 from slinky.env import BattlesnakeEnv
@@ -391,6 +392,37 @@ def _depth_noise(bits: jax.Array, depth: jax.Array) -> jax.Array:
     return (x >> 8).astype(jnp.float32) * (1.0 / (1 << 24))
 
 
+@custom_vmap
+def _unbatched_barrier(x: State) -> State:
+    """``jax.lax.optimization_barrier(x)``, except under a ``vmap`` of two or more games.
+
+    Applied to the parent's state, just read from ``tree.state``. Without it,
+    XLA compiles one unbatched game (and a ``vmap`` of size 1) by fusing that
+    read, a dynamic slice, into every fusion that computes the child, including
+    the dynamic-update-slices that store the child in the other ``tree.state``
+    arrays. It cannot prove that the slot written is not the node read, so it
+    copies every state array (about 1 MB at 1024 simulations) on every
+    simulation, and the search became quadratic in ``num_simulations`` (663 us
+    per simulation at 4096). The barrier materializes the parent first, so the
+    stores are in place. With two or more games the read is a gather, the write
+    a scatter, and XLA already updates in place; the barrier there would only
+    change the fusion of the batched program, so the ``vmap`` rule drops it.
+    """
+    return jax.lax.optimization_barrier(x)
+
+
+@_unbatched_barrier.def_vmap
+def _unbatched_barrier_vmap(axis_size: int, in_batched: list, x: State) -> tuple[State, State]:
+    (batched,) = in_batched
+    if axis_size > 1:
+        return x, batched
+    # A vmap of size 1 compiles like the unbatched program: leave the decision to the
+    # enclosing level (the barrier itself if there is none).
+    x = jax.tree.map(lambda a, b: a[0] if b else a, x, batched)
+    x = _unbatched_barrier(x)
+    return jax.tree.map(lambda a, b: a[None] if b else a, x, batched), batched
+
+
 def _rm_sigma(regret: jax.Array, legal: jax.Array) -> jax.Array:
     """float32[..., 4] regret matching: positive regrets normalized; uniform if none."""
     pos = jnp.where(legal, jnp.maximum(regret, 0.0), 0.0)
@@ -609,7 +641,7 @@ def search(
         # Expansion is computed unconditionally (under vmap both branches of a
         # cond would run anyway); without one, slot ``sim + 1`` stays unreferenced.
         joint = path.path_joint[jnp.maximum(path.depth - 1, 0)]
-        parent = jax.tree.map(lambda x: x[leaf], tree.state)
+        parent = _unbatched_barrier(jax.tree.map(lambda x: x[leaf], tree.state))
         child, mask = _transition(
             jax.random.fold_in(k_spawn, slot), parent, digits[joint], env, config
         )
