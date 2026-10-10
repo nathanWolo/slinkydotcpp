@@ -6,6 +6,10 @@ Wilson interval of each point as a whisker::
 
     python benchmarks/plot_strength.py      # results/strength.jsonl -> results/strength.svg
     python benchmarks/plot_strength.py --out other.svg --opponents heuristic,dqn
+    python benchmarks/plot_strength.py --mark ""   # no marked budget
+
+``--mark N=label`` draws a dashed vertical line at ``N`` simulations (by default
+24000, the budget that fits 500 ms per move; see ``mcts_latency.py``).
 """
 
 from __future__ import annotations
@@ -41,7 +45,7 @@ def load(path: Path, opponents: list[str], seed: int) -> dict[str, list[tuple[in
     return {b: sorted(pts.items()) for b, pts in series.items() if pts}
 
 
-def render(series: dict[str, list[tuple[int, dict]]]) -> str:
+def render(series: dict[str, list[tuple[int, dict]]], marks: dict[int, str] | None = None) -> str:
     sims = sorted({n for pts in series.values() for n, _ in pts})
     lo, hi = math.log2(sims[0]), math.log2(sims[-1])
     pw, ph = W - LEFT - RIGHT, H - TOP - BOTTOM
@@ -83,6 +87,16 @@ def render(series: dict[str, list[tuple[int, dict]]]) -> str:
     out.append(
         f'<line x1="{LEFT}" x2="{LEFT + pw}" y1="{TOP + ph}" y2="{TOP + ph}" stroke="#555b63"/>'
     )
+    for n, text in (marks or {}).items():  # marked budgets, e.g. the 500 ms one
+        if n in sims:
+            out.append(
+                f'<line x1="{x(n):.1f}" x2="{x(n):.1f}" y1="{TOP}" y2="{TOP + ph}" '
+                'stroke="#9aa0a8" stroke-dasharray="3 3"/>'
+            )
+            out.append(
+                f'<text x="{x(n) - 5:.1f}" y="{TOP + ph - 8}" text-anchor="end" '
+                f'fill="#6b7179">{text}</text>'
+            )
     out.append(
         f'<text x="{LEFT + pw / 2:.1f}" y="{H - 14}" text-anchor="middle" fill="#30353b">'
         "MCTS simulations per move (log scale)</text>"
@@ -131,11 +145,16 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=HERE / "results" / "strength.svg")
     p.add_argument("--opponents", default="random_legal,dqn,ppo,heuristic")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--mark", default="24000=500 ms per move", help="N=label, or empty for none")
     args = p.parse_args()
+    marks = {}
+    if args.mark:
+        n, _, text = args.mark.partition("=")
+        marks[int(n)] = text
     series = load(args.results, args.opponents.split(","), args.seed)
     if not series:
         raise SystemExit(f"no mcts-<n> results against {args.opponents} in {args.results}")
-    args.out.write_text(render(series))
+    args.out.write_text(render(series, marks))
     print(f"wrote {args.out}")
 
 
