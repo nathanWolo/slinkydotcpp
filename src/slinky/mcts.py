@@ -153,6 +153,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import math
+from collections.abc import Callable
 from typing import NamedTuple
 
 import jax
@@ -166,10 +167,19 @@ from slinky.evaluate import Policy
 from slinky.types import NUM_ACTIONS, GameConfig, State, TimeStep
 
 MAX_SNAKES = 4  # the joint-action children table has 4**N entries per node
-_SELECTIONS = ("duct", "rm")
-_LEAVES = ("heuristic", "none")
+_SELECTIONS = ("duct", "rm", "puct")
+_LEAVES = ("heuristic", "none", "network")
+_PRIORS = ("uniform", "network")
 _ROLLOUT_POLICIES = ("random", "heuristic")
 _FINALS = ("max", "sample")
+# ``fold_in(key, _ROOT_NOISE_STREAM)`` draws the root's Dirichlet noise. No 4-way split of
+# the search key gives this key (under either threefry mode), and the other keys stay as
+# they were, so turning the noise on changes nothing else about a search.
+_ROOT_NOISE_STREAM = 0x524F4F54
+
+# ``evaluator(state) -> (value f32[N] in [-1, 1], prior_logits f32[N, 4])`` for ONE
+# unbatched state (see :func:`search`).
+Evaluator = Callable[[State], tuple[jax.Array, jax.Array]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -178,13 +188,23 @@ class MCTSConfig:
 
     Attributes:
       num_simulations: simulations per search; the tree has one more node.
-      selection: ``"duct"`` (decoupled UCT) or ``"rm"`` (regret matching).
+      selection: ``"duct"`` (decoupled UCT), ``"rm"`` (regret matching) or
+        ``"puct"`` (decoupled PUCT with priors, for AlphaZero).
       exploration: DUCT's UCB1 constant ``C``, on the ``[0, 1]`` value scale.
       ucb1_tuned: DUCT uses UCB1-Tuned's variance bound instead of ``C``.
-      tie_noise: scale of the ``U(0, 1)`` noise added to DUCT scores.
+      tie_noise: scale of the ``U(0, 1)`` noise added to DUCT and PUCT scores.
       rm_gamma: RM's exploration mix (0.1-0.3 in the literature).
-      leaf: ``"heuristic"`` (:func:`slinky.heuristic.evaluate`) or ``"none"``
-        (0 for every living snake) at non-terminal leaves.
+      c_puct: PUCT's prior weight, on the ``[0, 1]`` value scale.
+      fpu_reduction: PUCT's first-play urgency: an unvisited move is worth the
+        node's own stored value minus this (on the ``[-1, 1]`` scale).
+      prior: where PUCT's priors come from: ``"uniform"`` over the legal moves
+        or ``"network"`` (the evaluator's logits). Needs ``selection="puct"``.
+      root_noise_frac: weight of the Dirichlet noise mixed into each player's
+        root priors (0 = off; AlphaZero used 0.25). Needs ``selection="puct"``.
+      root_dirichlet_alpha: concentration of that noise, per legal move.
+      leaf: ``"heuristic"`` (:func:`slinky.heuristic.evaluate`), ``"none"``
+        (0 for every living snake) or ``"network"`` (the evaluator's value) at
+        non-terminal leaves.
       rollout_steps: turns played from each new node before the leaf
         evaluation (0 = none); a rollout stops early if the game ends.
       rollout_policy: ``"random"`` (uniform over ``env.action_mask``) or
@@ -211,6 +231,11 @@ class MCTSConfig:
     ucb1_tuned: bool = False
     tie_noise: float = 0.01
     rm_gamma: float = 0.2
+    c_puct: float = 1.25
+    fpu_reduction: float = 0.2
+    prior: str = "uniform"
+    root_noise_frac: float = 0.0
+    root_dirichlet_alpha: float = 0.5
     leaf: str = "heuristic"
     rollout_steps: int = 0
     rollout_policy: str = "random"
@@ -227,21 +252,38 @@ class MCTSConfig:
             raise ValueError("max_depth must be >= 1")
         if self.rollout_steps < 0:
             raise ValueError("rollout_steps must be >= 0")
-        for name in ("exploration", "tie_noise"):
+        for name in ("exploration", "tie_noise", "c_puct"):
             if not 0.0 <= getattr(self, name) < math.inf:  # also rejects NaN
                 raise ValueError(f"{name} must be finite and >= 0, got {getattr(self, name)!r}")
-        if not 0.0 <= self.rm_gamma <= 1.0:
-            raise ValueError(f"rm_gamma must be in [0, 1], got {self.rm_gamma!r}")
+        for name in ("rm_gamma", "root_noise_frac"):
+            if not 0.0 <= getattr(self, name) <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1], got {getattr(self, name)!r}")
+        if not -2.0 <= self.fpu_reduction <= 2.0:
+            raise ValueError(f"fpu_reduction must be in [-2, 2], got {self.fpu_reduction!r}")
+        if not 0.0 < self.root_dirichlet_alpha < math.inf:
+            raise ValueError(
+                f"root_dirichlet_alpha must be finite and > 0, got {self.root_dirichlet_alpha!r}"
+            )
         if not -1.0 <= self.draw_value <= 1.0:
             raise ValueError(f"draw_value must be in [-1, 1], got {self.draw_value!r}")
         for name, allowed in (
             ("selection", _SELECTIONS),
             ("leaf", _LEAVES),
+            ("prior", _PRIORS),
             ("rollout_policy", _ROLLOUT_POLICIES),
             ("final", _FINALS),
         ):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}, got {getattr(self, name)!r}")
+        if self.selection != "puct" and (self.prior != "uniform" or self.root_noise_frac > 0):
+            raise ValueError("prior and root_noise_frac only apply to selection='puct'")
+        if self.leaf == "network" and self.rollout_steps > 0:
+            raise ValueError("leaf='network' evaluates the new node itself: no rollout_steps")
+
+    @property
+    def uses_evaluator(self) -> bool:
+        """The search calls an evaluator (``leaf`` or ``prior`` is ``"network"``)."""
+        return self.leaf == "network" or self.prior == "network"
 
 
 DEFAULT_CONFIG = MCTSConfig()
@@ -257,13 +299,17 @@ class SearchOutput(NamedTuple):
     value: jax.Array  # float32[N]: root value estimate in [-1, 1]
     nodes_used: jax.Array  # int32[]: expanded nodes, root included
     depth: jax.Array  # int32[]: depth of the deepest node
+    # float32[N, 4]: the root priors PUCT used (after root noise); uniform over the
+    # selectable moves under DUCT and RM
+    root_prior: jax.Array
 
 
 class Tree(NamedTuple):
     """One game's search tree; ``M`` nodes, ``N`` players, ``J = 4**N`` joint actions.
 
-    The RM fields are ``None`` under DUCT, and ``value_sq`` is ``None``
-    unless ``ucb1_tuned``.
+    The RM fields are ``None`` unless ``selection="rm"``, ``prior`` is ``None``
+    unless ``selection="puct"``, and ``value_sq`` is ``None`` unless
+    ``ucb1_tuned``.
     """
 
     state: State  # State stacked to [M, ...]
@@ -278,6 +324,7 @@ class Tree(NamedTuple):
     strategy_sum: jax.Array | None  # float32[M, N, 4]: RM sum of played strategies
     joint_visits: jax.Array | None  # int32[M, J]: RM joint-action visit counts
     joint_value: jax.Array | None  # float32[M, J, N]: RM joint-action value sums
+    prior: jax.Array | None  # float32[M, N, 4]: PUCT priors over the ``legal`` moves
 
 
 class _Descent(NamedTuple):
@@ -341,24 +388,100 @@ def _transition(
     return nxt, env.action_mask(nxt)
 
 
-def _static_value(state: State, env: BattlesnakeEnv, config: MCTSConfig) -> jax.Array:
-    """float32[N]: the exact outcome if the game is over, else the leaf estimate."""
+def _static_value(
+    state: State, env: BattlesnakeEnv, config: MCTSConfig, net_value: jax.Array | None = None
+) -> jax.Array:
+    """float32[N]: the exact outcome if the game is over, else the leaf estimate.
+
+    ``net_value`` is the evaluator's value of ``state`` (needed for ``leaf="network"``).
+    """
     exact = heuristic.terminal_values(state, env.config, config.draw_value)
     if config.leaf == "heuristic":
         estimate = heuristic.evaluate(state, env.config, config.weights)
+    elif config.leaf == "network":
+        estimate = jnp.where(state.alive, jnp.clip(net_value, -1.0, 1.0), -1.0)
     else:
         estimate = jnp.where(state.alive, 0.0, -1.0)
     # ``done`` covers truncation too (living snakes get 0 there, as a draw).
     return jnp.where(state.done, exact, estimate).astype(jnp.float32)
 
 
+def _check_evaluator(config: MCTSConfig, evaluator: Evaluator | None) -> None:
+    if config.uses_evaluator and evaluator is None:
+        raise ValueError(
+            f"leaf={config.leaf!r}, prior={config.prior!r} needs an evaluator: "
+            "search(key, state, env, config, evaluator=fn)"
+        )
+    if evaluator is not None and not config.uses_evaluator:
+        raise ValueError(
+            "an evaluator was given but the config does not use it: set leaf='network' "
+            "and/or prior='network' (with selection='puct')"
+        )
+
+
+def _evaluate(
+    evaluator: Evaluator | None, state: State, game: GameConfig
+) -> tuple[jax.Array, jax.Array]:
+    """(value float32[N], prior logits float32[N, 4]) from the user's evaluator."""
+    if evaluator is None:
+        raise ValueError("this MCTSConfig needs an evaluator (leaf or prior is 'network')")
+    value, logits = evaluator(state)
+    value, logits = jnp.asarray(value, jnp.float32), jnp.asarray(logits, jnp.float32)
+    n = game.num_snakes
+    if value.shape != (n,) or logits.shape != (n, NUM_ACTIONS):
+        raise ValueError(
+            f"the evaluator must return (value f32[{n}], prior logits f32[{n}, {NUM_ACTIONS}]) "
+            f"for one unbatched state, got shapes {value.shape} and {logits.shape}"
+        )
+    return value, logits
+
+
 def _leaf_value(
-    key: jax.Array, state: State, mask: jax.Array, env: BattlesnakeEnv, config: MCTSConfig
-) -> jax.Array:
-    """float32[N] value of a newly expanded node (``mask`` is its ``env.action_mask``)."""
+    key: jax.Array,
+    state: State,
+    mask: jax.Array,
+    env: BattlesnakeEnv,
+    config: MCTSConfig,
+    evaluator: Evaluator | None = None,
+) -> tuple[jax.Array, jax.Array | None]:
+    """(float32[N] value, prior logits float32[N, 4] or None) of a newly expanded node.
+
+    ``mask`` is its ``env.action_mask``. The logits are the evaluator's (None if
+    the config does not call it).
+    """
+    net_value = logits = None
+    if config.uses_evaluator:
+        net_value, logits = _evaluate(evaluator, state, env.config)
     if config.rollout_steps > 0:
         state = _rollout(key, state, mask, env, config)
-    return _static_value(state, env, config)
+    return _static_value(state, env, config, net_value), logits
+
+
+def _node_prior(logits: jax.Array | None, legal: jax.Array, config: MCTSConfig) -> jax.Array:
+    """float32[N, 4] PUCT priors over the ``legal`` moves (exactly 0 elsewhere).
+
+    A masked softmax of the evaluator's logits (``prior="network"``) or uniform.
+    A forced row (one legal move) is 1 on that move either way.
+    """
+    if config.prior == "uniform":
+        return legal / jnp.sum(legal, axis=-1, keepdims=True)
+    return jax.nn.softmax(jnp.where(legal, logits, -jnp.inf), axis=-1)
+
+
+def _noisy_root_prior(
+    key: jax.Array, prior: jax.Array, legal: jax.Array, config: MCTSConfig
+) -> jax.Array:
+    """``(1 - frac) * prior + frac * Dirichlet(alpha)`` over each player's legal moves.
+
+    A Dirichlet over a subset of the moves is the normalized independent
+    ``Gamma(alpha)`` draws of that subset, so the noise is 0 on illegal moves and
+    a forced row keeps its 1.
+    """
+    g = jnp.where(legal, jax.random.gamma(key, config.root_dirichlet_alpha, prior.shape), 0.0)
+    total = jnp.sum(g, axis=-1, keepdims=True)
+    uniform = legal / jnp.sum(legal, axis=-1, keepdims=True)
+    noise = jnp.where(total > 0, g / jnp.maximum(total, 1e-30), uniform)  # all-underflow guard
+    return (1.0 - config.root_noise_frac) * prior + config.root_noise_frac * noise
 
 
 def _rollout(
@@ -462,6 +585,25 @@ def _duct_moves(tree: Tree, node: jax.Array, u: jax.Array, config: MCTSConfig) -
     return jnp.argmax(score, axis=-1).astype(jnp.int32)
 
 
+def _puct_moves(tree: Tree, node: jax.Array, u: jax.Array, config: MCTSConfig) -> jax.Array:
+    """int32[N] each player's decoupled PUCT move at ``node``; ``u`` is U(0,1)[N, 4].
+
+    ``argmax_a q01(a) + c_puct * P(a) * sqrt(max(N, 1)) / (1 + n_a) + tie_noise * u``
+    over the legal moves, where ``N`` is the player's visits at ``node`` and an
+    unvisited move's ``q01`` is the node's stored value minus ``fpu_reduction``
+    (first-play urgency), mapped to ``[0, 1]``. No unvisited-first rule: the
+    prior decides which moves are tried.
+    """
+    n = tree.visits[node]
+    nf = n.astype(jnp.float32)
+    q = tree.value_sum[node] / jnp.maximum(nf, 1.0)  # [-1, 1]
+    q = jnp.where(n > 0, q, tree.value[node][:, None] - config.fpu_reduction)
+    sqrt_n = jnp.sqrt(jnp.maximum(jnp.sum(nf, axis=-1, keepdims=True), 1.0))
+    bonus = config.c_puct * tree.prior[node] * sqrt_n / (1.0 + nf)
+    score = 0.5 * (q + 1.0) + bonus + config.tie_noise * u
+    return jnp.argmax(jnp.where(tree.legal[node], score, -jnp.inf), axis=-1).astype(jnp.int32)
+
+
 def _rm_joint(
     tree: Tree, node: jax.Array, u: jax.Array, config: MCTSConfig, digits: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
@@ -499,10 +641,21 @@ def _rm_joint(
 # --- Search ------------------------------------------------------------------------------
 
 
-def _init_tree(state: State, env: BattlesnakeEnv, config: MCTSConfig, num_nodes: int) -> Tree:
+def _init_tree(
+    state: State,
+    env: BattlesnakeEnv,
+    config: MCTSConfig,
+    num_nodes: int,
+    evaluator: Evaluator | None = None,
+    noise_key: jax.Array | None = None,
+) -> Tree:
+    """The tree with only the root; ``noise_key`` draws the root noise (if it is on)."""
     n = env.config.num_snakes
     j = NUM_ACTIONS**n
     mask = env.action_mask(state)
+    net_value = logits = None
+    if config.uses_evaluator:
+        net_value, logits = _evaluate(evaluator, state, env.config)
 
     def stack(x: jax.Array) -> jax.Array:
         x = jnp.asarray(x)
@@ -511,13 +664,21 @@ def _init_tree(state: State, env: BattlesnakeEnv, config: MCTSConfig, num_nodes:
     def zeros(*shape: int, dtype=jnp.float32) -> jax.Array:
         return jnp.zeros((num_nodes, *shape), dtype)
 
+    prior = None
+    if config.selection == "puct":
+        legal = _legal(state, mask, env.config)
+        prior = _node_prior(logits, legal, config)
+        if config.root_noise_frac > 0:
+            prior = _noisy_root_prior(noise_key, prior, legal, config)
+        prior = stack(prior.astype(jnp.float32))
+
     rm = config.selection == "rm"
     return Tree(
         state=jax.tree.map(stack, state),
         children=jnp.full((num_nodes, j), -1, jnp.int32),
         legal=stack(_legal(state, mask, env.config)),
         terminal=stack(state.done),
-        value=stack(_static_value(state, env, config)),
+        value=stack(_static_value(state, env, config, net_value)),
         visits=zeros(n, NUM_ACTIONS, dtype=jnp.int32),
         value_sum=zeros(n, NUM_ACTIONS),
         value_sq=zeros(n, NUM_ACTIONS) if config.ucb1_tuned else None,
@@ -525,6 +686,7 @@ def _init_tree(state: State, env: BattlesnakeEnv, config: MCTSConfig, num_nodes:
         strategy_sum=zeros(n, NUM_ACTIONS) if rm else None,
         joint_visits=zeros(j, dtype=jnp.int32) if rm else None,
         joint_value=zeros(j, n) if rm else None,
+        prior=prior,
     )
 
 
@@ -551,7 +713,8 @@ def _descend(
             for name, x in zip(names, per_node, strict=True):
                 rm_fields[name] = getattr(c, name).at[c.depth].set(x)
         else:
-            joint = jnp.sum(_duct_moves(tree, c.node, u_d, config) * powers)
+            select = _puct_moves if config.selection == "puct" else _duct_moves
+            joint = jnp.sum(select(tree, c.node, u_d, config) * powers)
         child = tree.children[c.node, joint]
         depth = c.depth + 1
         expand = child < 0
@@ -621,7 +784,11 @@ def _backup(
 
 
 def search(
-    key: jax.Array, state: State, env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG
+    key: jax.Array,
+    state: State,
+    env: BattlesnakeEnv,
+    config: MCTSConfig = DEFAULT_CONFIG,
+    evaluator: Evaluator | None = None,
 ) -> SearchOutput:
     """Run SM-MCTS from ``state`` (one unbatched game) for every player at once.
 
@@ -630,10 +797,22 @@ def search(
     finished ``state`` is handled: no simulation expands anything, every visit
     count is zero, ``value`` is the exact outcome and each player still gets a
     legal move.
+
+    ``evaluator(state) -> (value f32[N] in [-1, 1], prior_logits f32[N, 4])``
+    is required when ``config.leaf`` or ``config.prior`` is ``"network"`` (and
+    refused otherwise). It sees ONE unbatched state, like ``search`` itself: a
+    ``vmap`` of ``search`` over B games makes each call one batched network
+    evaluation over the B states. It is called once at the root and once per
+    simulation, on the simulation's new node (also when the simulation expands
+    nothing, since under ``vmap`` both branches would run anyway). It may close
+    over traced arrays, such as network parameters passed into the jitted
+    function, so new parameters need no recompilation. Its value is clipped to
+    ``[-1, 1]``; finished states keep their exact values and dead snakes -1.
     """
     game = env.config
     n = game.num_snakes
     _check_game(game)
+    _check_evaluator(config, evaluator)
     env = env if env.obs_fn is None else _search_env(game)
     num_sims = config.num_simulations
     max_depth = min(config.max_depth, num_sims)
@@ -652,7 +831,9 @@ def search(
         child, mask = _transition(
             jax.random.fold_in(k_spawn, slot), parent, digits[joint], env, config
         )
-        new_value = _leaf_value(jax.random.fold_in(k_roll, slot), child, mask, env, config)
+        new_value, new_logits = _leaf_value(
+            jax.random.fold_in(k_roll, slot), child, mask, env, config, evaluator
+        )
         # Reading ``tree.value[leaf]`` here instead would make XLA copy the array.
         value = jnp.where(path.expand, new_value, path.stored)
         tree = tree._replace(
@@ -664,12 +845,16 @@ def search(
             terminal=tree.terminal.at[slot].set(child.done),
             value=tree.value.at[slot].set(new_value),
         )
+        if tree.prior is not None:  # (XLA merges the repeated ``_legal``)
+            prior = _node_prior(new_logits, _legal(child, mask, game), config)
+            tree = tree._replace(prior=tree.prior.at[slot].set(prior.astype(jnp.float32)))
         tree = _backup(tree, path, value, config, digits)
         deepest = jnp.maximum(deepest, jnp.where(path.expand, path.depth, 0))
         return tree, deepest, expanded + path.expand.astype(jnp.int32)
 
     zero = jnp.zeros((), jnp.int32)
-    tree = _init_tree(state, env, config, num_sims + 1)
+    k_root = jax.random.fold_in(key, _ROOT_NOISE_STREAM) if config.root_noise_frac > 0 else None
+    tree = _init_tree(state, env, config, num_sims + 1, evaluator, k_root)
     tree, deepest, expanded = jax.lax.fori_loop(0, num_sims, simulate, (tree, zero, zero))
     return _output(k_final, tree, config, deepest, expanded)
 
@@ -703,6 +888,7 @@ def _output(
         value=value.astype(jnp.float32),
         nodes_used=expanded + 1,
         depth=deepest,
+        root_prior=(uniform if tree.prior is None else tree.prior[0]).astype(jnp.float32),
     )
 
 
@@ -710,10 +896,14 @@ def _output(
 
 
 def mcts_policy(
-    key: jax.Array, state: State, env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG
+    key: jax.Array,
+    state: State,
+    env: BattlesnakeEnv,
+    config: MCTSConfig = DEFAULT_CONFIG,
+    evaluator: Evaluator | None = None,
 ) -> jax.Array:
     """int32[N] every player's own search recommendation (one search serves all seats)."""
-    return search(key, state, env, config).action
+    return search(key, state, env, config, evaluator).action
 
 
 def mcts(env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG) -> Policy:
@@ -722,9 +912,17 @@ def mcts(env: BattlesnakeEnv, config: MCTSConfig = DEFAULT_CONFIG) -> Policy:
     Cached on ``(env, config)``, so repeated calls return the same object and
     hit ``play_match``'s jit cache. Observations are ignored. Raises
     ``ValueError`` here, not at trace time, for games with more than
-    :data:`MAX_SNAKES` snakes.
+    :data:`MAX_SNAKES` snakes, and for configs that need an evaluator: a
+    network's parameters cannot be part of a hashable cache key, so a
+    network-guided search builds its own ``Policy`` around
+    ``search(..., evaluator=...)``.
     """
     _check_game(env.config)
+    if config.uses_evaluator:
+        raise ValueError(
+            f"leaf={config.leaf!r}, prior={config.prior!r} needs an evaluator, which mcts() "
+            "cannot cache: call search(key, state, env, config, evaluator=fn) directly"
+        )
     return _mcts(env, config)
 
 

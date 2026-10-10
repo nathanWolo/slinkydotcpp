@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import re
 
@@ -14,22 +15,64 @@ from helpers import DUEL, board, both_seats, env_for, rollout_states
 from slinky import mcts as M
 from slinky.env import BattlesnakeEnv
 from slinky.evaluate import play_match, random_legal
+from slinky.observations import make_obs_fn
 from slinky.types import DOWN, LEFT, NUM_ACTIONS, RIGHT, UP, GameConfig, State
 
 DEFAULT = M.MCTSConfig(num_simulations=128)
 
 
 @functools.cache
-def batched_search(game: GameConfig, config: M.MCTSConfig):
+def batched_search(game: GameConfig, config: M.MCTSConfig, evaluator: M.Evaluator | None = None):
     """jit(vmap(search)) over keys, for one unbatched state."""
     env = env_for(game)
-    return jax.jit(jax.vmap(lambda k, s: M.search(k, s, env, config), in_axes=(0, None)))
+    return jax.jit(
+        jax.vmap(lambda k, s: M.search(k, s, env, config, evaluator), in_axes=(0, None))
+    )
 
 
-def run(state: State, config: M.MCTSConfig = DEFAULT, game: GameConfig = DUEL, n_keys: int = 4):
+def run(
+    state: State,
+    config: M.MCTSConfig = DEFAULT,
+    game: GameConfig = DUEL,
+    n_keys: int = 4,
+    evaluator: M.Evaluator | None = None,
+):
     """SearchOutput (numpy) with a leading axis of ``n_keys`` independent searches."""
     keys = jax.random.split(jax.random.key(0), n_keys)
-    return jax.tree.map(np.asarray, batched_search(game, config)(keys, state))
+    return jax.tree.map(np.asarray, batched_search(game, config, evaluator)(keys, state))
+
+
+@functools.cache
+def constant_evaluator(value: tuple[float, ...] = (0.3, -0.2), logits: tuple = ((0.0,) * 4,) * 2):
+    """An evaluator that ignores the state (cached, so ``batched_search`` compiles it once)."""
+
+    def evaluator(state: State) -> tuple[jax.Array, jax.Array]:
+        return jnp.asarray(value, jnp.float32), jnp.asarray(logits, jnp.float32)
+
+    return evaluator
+
+
+def tiny_params(key: jax.Array) -> dict[str, jax.Array]:
+    k_conv, k_value, k_policy = jax.random.split(key, 3)
+    return {
+        "conv": jax.random.normal(k_conv, (3, 3, 13, 8)) * 0.3,
+        "value": jax.random.normal(k_value, (8,)),
+        "policy": jax.random.normal(k_policy, (8, NUM_ACTIONS)),
+    }
+
+
+def tiny_network(params: dict[str, jax.Array]) -> M.Evaluator:
+    """A small network on egocentric observations, closing over (possibly traced) params."""
+    obs_fn = make_obs_fn(DUEL)
+
+    def evaluator(state: State) -> tuple[jax.Array, jax.Array]:
+        x = jax.lax.conv_general_dilated(
+            obs_fn(state), params["conv"], (2, 2), "SAME", dimension_numbers=("NHWC", "HWIO", "NHWC")
+        )
+        x = jnp.mean(jax.nn.relu(x), axis=(1, 2))  # [N, 8]
+        return jnp.tanh(x @ params["value"]), x @ params["policy"]
+
+    return evaluator
 
 
 @functools.cache
@@ -58,6 +101,15 @@ def test_config_validation_and_digits():
         dict(rm_gamma=1.5),
         dict(rm_gamma=-0.1),
         dict(draw_value=-2.0),
+        dict(prior="heuristic"),
+        dict(selection="puct", c_puct=-1.0),
+        dict(selection="puct", c_puct=float("nan")),
+        dict(selection="puct", fpu_reduction=float("nan")),
+        dict(selection="puct", root_noise_frac=1.5),
+        dict(selection="puct", root_dirichlet_alpha=0.0),
+        dict(prior="network"),  # priors and root noise need PUCT
+        dict(selection="rm", root_noise_frac=0.25),
+        dict(leaf="network", rollout_steps=10),
     ]:
         with pytest.raises(ValueError):
             M.MCTSConfig(**bad)
@@ -66,7 +118,7 @@ def test_config_validation_and_digits():
     assert d.shape == (16, 2) and d[3 + 4 * 2].tolist() == [3, 2]
 
 
-@pytest.mark.parametrize("selection", ["duct", "rm"])
+@pytest.mark.parametrize("selection", ["duct", "rm", "puct"])
 def test_root_statistics_are_consistent(selection):
     config = M.MCTSConfig(num_simulations=64, selection=selection)
     states = rollout_states(DUEL, batch=16)
@@ -99,8 +151,11 @@ def test_root_statistics_are_consistent(selection):
     np.testing.assert_array_equal(
         np.take_along_axis(q, action, -1)[..., 0], np.where(top, q, -np.inf).max(-1)
     )
-    if selection == "duct":  # the policy is the root visit distribution
+    if selection != "rm":  # the policy is the root visit distribution
         np.testing.assert_allclose(policy, out.visits[alive_root] / 64, rtol=1e-6)
+    # Without network priors or root noise, the root priors are uniform over the moves.
+    legal = np.asarray(jax.vmap(lambda s: M._legal(s, env.action_mask(s), DUEL))(states))
+    np.testing.assert_allclose(out.root_prior, legal / legal.sum(-1, keepdims=True), rtol=1e-6)
 
 
 def test_deterministic_given_key():
