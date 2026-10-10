@@ -22,6 +22,9 @@ python baselines/ppo.py              # default run, ~70 min on 3 cores
 python baselines/dqn.py --help       # every hyperparameter is a flag (same for ppo.py)
 python baselines/dqn.py --eval-only runs/dqn-<timestamp> --eval-games 5000
 python baselines/dqn.py --resume runs/dqn-<timestamp>   # continue an interrupted run
+python baselines/rainbow.py          # Rainbow DQN; same flags, plus its own
+python baselines/rainbow.py --n-step 1 --per-alpha 0    # ablate components
+python baselines/dashboard.py        # live training dashboard (see below)
 ```
 
 Each run writes to `runs/` (gitignored):
@@ -31,6 +34,31 @@ Each run writes to `runs/` (gitignored):
   for PPO) plus the evaluations;
 - `params.npz`, the latest network;
 - `runner.npz`, the full training state used by `--resume`.
+
+## Watching training live
+
+```bash
+python baselines/dashboard.py        # then open http://127.0.0.1:8050
+```
+
+`dashboard.py` serves a page that lists every run under `runs/` and
+`baselines/checkpoints/` (DQN and Rainbow alike) and re-reads its
+`metrics.jsonl` every 5 seconds, so a run in progress updates as it trains.
+
+- **Run cards** show live / finished / stopped, progress and an ETA, and the
+  latest score against `random_legal`. Click a card to add the run to the
+  charts or take it off (up to 8, each keeping its colour).
+- **Charts** (over env steps, one shared axis): score against `random_legal`
+  with its 95% interval, training loss (log scale; DQN's Huber loss and
+  Rainbow's KL are not comparable), mean Q of the moves taken, self-play game
+  length and draw rate, throughput, and ε or the noisy-net σ.
+- **Death causes**: the share of self-play eliminations by cause, per run.
+- Hover (or focus a chart and use ←/→) for exact values; every chart also has
+  a table view.
+
+It needs only the standard library. It binds to `127.0.0.1` and answers only
+requests addressed to localhost; `--host 0.0.0.0` serves it on the network,
+and `--port` or extra directory arguments change where it listens and looks.
 
 ## Opponent: `random_legal`
 
@@ -244,3 +272,104 @@ The final network from this run is kept in
 [`checkpoints/ppo-duel-seed0/`](checkpoints/ppo-duel-seed0/) (1.3 MB) as the
 default `ppo` agent:
 `python baselines/ppo.py --eval-only baselines/checkpoints/ppo-duel-seed0`.
+
+## Rainbow DQN (`rainbow.py`)
+
+All six extensions of Rainbow (Hessel et al., 2018) on top of the same
+self-play setup as `dqn.py`: one network for both snakes, egocentric
+observations, legal moves only, and compact game states in the replay
+buffer. Every component except the distributional head can be switched off
+from the command line, for ablations.
+
+- **Distributional (C51).** Each move's return is a categorical distribution
+  over 51 atoms. A snake's return in this game always lies in [−1, 1] (−1 for
+  dying, +1 for winning, nothing in between), so the support is exactly
+  [−1, 1] and no target is ever clipped. The loss is the KL divergence to the
+  projected target, which has the same gradient as the cross-entropy.
+- **Double Q-learning** (`--double`): the online network picks the bootstrap
+  move (on expected values, legal moves only); the target network supplies
+  its distribution.
+- **Dueling heads** (`--dueling`): value and mean-centred advantage streams,
+  per atom.
+- **3-step returns** (`--n-step`). The last `n` one-step transitions of every
+  game slot sit in a sliding window. Each step, the oldest becomes an `n`-step
+  transition. The window stops at the end of a game: the rules ending it
+  makes the return final, while a `max_turns` cut-off still bootstraps.
+  Each snake gets its own discount, 0 once it is dead.
+- **Prioritized replay** (`--per-alpha`, `--per-beta-*`): proportional, on the
+  KL loss, α = 0.5, with importance weights annealed from β = 0.4 to 1.
+  Sampling is a stratified draw from a cumulative sum over the buffer (about
+  1.7 ms per batch here, cheaper than maintaining a sum tree in JAX).
+  `--per-alpha 0` is uniform replay.
+- **Noisy nets** (`--noisy`): factorized Gaussian noise (σ₀ = 0.5) on the
+  dense layers instead of ε-greedy. Each snake draws its own noise when
+  acting. Learning draws one sample per batch per network evaluation;
+  per-sample noise there would cost about 40 ms per update. Evaluation plays
+  the mean weights.
+
+Other settings, mostly as `dqn.py`: the same convolutional trunk and dense
+256 layer (1.37M parameters, since noisy layers hold a σ per weight), Adam
+at 2.5e-4 with ε = 1.5e-4, gradient clipping at 10, γ = 0.99, a hard
+target-network copy every 250 updates, a 100k buffer, learning from 10k, and
+32 games with one update of 128 game transitions per step.
+
+### Results
+
+Default config, seed 0, the same budget as the DQN: 1.28M env steps, 39.7k
+updates. It took **81 minutes** on a 12-thread laptop CPU that was thermally
+throttled to about 2.2 GHz, at about 275 env-steps/s. Early in training,
+on the same machine, Rainbow ran at about 79% of the DQN's speed (358 vs 454
+env-steps/s).
+
+**Greedy Rainbow during training** (1,000 games each against `random_legal`;
+512 games each against the heuristic, played afterwards from saved
+checkpoints):
+
+| env steps | vs `random_legal` | vs heuristic |
+|--:|---|---|
+| 256k | 0.954 ± 0.012 | 0.026 ± 0.010 |
+| 512k | 0.967 ± 0.011 | 0.045 ± 0.017 |
+| 768k | 0.982 ± 0.008 | 0.051 ± 0.019 |
+| 1.02M | 0.981 ± 0.008 | 0.045 ± 0.018 |
+| 1.28M | 0.989 ± 0.006 | 0.087 ± 0.024 |
+
+**Final checkpoints compared** (same seeds for both agents):
+
+| match | games | Rainbow | DQN |
+|---|--:|---|---|
+| vs `random_legal` | 5,000 | 0.983 ± 0.003 (4896 / 33 / 71) | **0.992 ± 0.002** (4951 / 16 / 33) |
+| vs heuristic | 1,000 | **0.084 ± 0.017** (78 / 12 / 910) | 0.047 ± 0.013 (45 / 4 / 951) |
+| Rainbow vs DQN | 1,000 | 0.504 ± 0.031 (499 / 10 / 491) | |
+
+At the same budget, the two are level head to head. Rainbow is slightly
+weaker against the random snake but scores about 1.8× as much against the
+heuristic, and its score there was still rising at the end of training. Both
+gaps are outside the 95% intervals.
+
+**Self-play dynamics.**
+
+- **Better-calibrated values.** The mean Q of the moves taken peaks at
+  +0.10 and settles at about +0.04, against the DQN's +0.47 and +0.27. In a
+  symmetric zero-sum game it should be near 0.
+- **Longer games.** Self-play games last about 240 turns by the end, against
+  the DQN's 136. The share of head-to-head deaths falls from 72% at 256k
+  steps to about a third. Self-collisions rise to about 40%.
+- **New transitions are replayed a lot.** New transitions get the largest
+  priority seen so far, as in the prioritized-replay paper, and that maximum
+  grows to about 12 while typical priorities are below 0.1. Fresh data is
+  therefore oversampled for its first replays. Using the buffer's current
+  maximum instead is a variant worth trying.
+
+### Caveats and next steps
+
+- **One seed**, as for the DQN, and the default hyperparameters were not
+  tuned. A 320k-step pilot with the same settings scored 0.931–0.945
+  against `random_legal`.
+- **The heuristic score was still rising** at 1.28M steps. A longer run is
+  the obvious next experiment, followed by ablations of the six components
+  (the flags above).
+
+The final network is kept in
+[`checkpoints/rainbow-duel-seed0/`](checkpoints/rainbow-duel-seed0/) (5.5 MB)
+as the `rainbow` agent of `slinky.agents`:
+`python baselines/rainbow.py --eval-only baselines/checkpoints/rainbow-duel-seed0`.

@@ -135,6 +135,12 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
   After 67 minutes of training on 3 CPU cores, it beats the DQN 0.868 and
   `random_legal` 0.998, and scores 0.296 against the heuristic. It plays
   between MCTS with 4 and with 16 simulations, closer to 16.
+- **Rainbow DQN** (`baselines/rainbow.py`, see
+  [`baselines/README.md`](baselines/README.md#rainbow-dqn-rainbowpy)): all six
+  Rainbow extensions on the same self-play setup, with a distributional head
+  on the game's exact return range [−1, 1]. At the DQN's budget it ties the
+  DQN head to head (0.504 ± 0.031). It scores 0.983 against `random_legal` and
+  0.084 against the heuristic, against the DQN's 0.992 and 0.047.
 - **Heuristic** (`slinky.heuristic`): a hand-written snake.
   - It uses time-aware flood fills, Voronoi territory and food control.
   - It picks moves with a one-ply simultaneous-move search over the exact
@@ -167,10 +173,11 @@ python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --
 - **Agents** come from the registry in `slinky.agents` (shared with
   `benchmarks/strength.py`): `random_legal`, `random`, `heuristic`, `dqn`
   (the checkpoint in `baselines/checkpoints/`) or `dqn:<run dir>`, `ppo`
-  (greedy), `ppo-sample` or `ppo:<run dir>`, and `mcts-<simulations>` with
-  dash shorthands and/or `:field=value` overrides of `MCTSConfig`, e.g.
-  `mcts-256-rm`, `mcts-64-rollout` or `mcts-128:exploration=0.5`. Names are
-  shown in a canonical form that lists only non-default settings.
+  (greedy), `ppo-sample` or `ppo:<run dir>`, `rainbow` or `rainbow:<run dir>`,
+  and `mcts-<simulations>` with dash shorthands and/or `:field=value`
+  overrides of `MCTSConfig`, e.g. `mcts-256-rm`, `mcts-64-rollout` or
+  `mcts-128:exploration=0.5`. Names are shown in a canonical form that lists
+  only non-default settings.
 - **The viewer** shows the board (API coordinates, `(0, 0)` bottom-left),
   each snake's length and health, eliminations with the engine's cause, a
   health-by-turn strip that doubles as the scrubber, the match score and the
@@ -271,7 +278,8 @@ should scale much better with batch size.
    - official API JSON (`/move` request) conversion, so a trained policy can
      play on the real Battlesnake servers.
 3. **Baselines:**
-   - self-play DQN (done; see `baselines/`);
+   - self-play DQN and Rainbow DQN, with a live training dashboard (done; see
+     `baselines/`);
    - heuristic snake and simultaneous-move MCTS, with a strength-vs-simulations
      benchmark (done; see `benchmarks/README.md`);
    - self-play PPO (done; see `baselines/`);
@@ -286,7 +294,8 @@ src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   engine_json, policies, evaluate (matches between policies),
                   heuristic (hand-written snake), mcts (simultaneous-move MCTS),
                   agents (named-agent registry), replay (+ viewer.html)
-baselines/        RL baselines (self-play DQN and PPO) and their checkpoints
+baselines/        RL baselines (self-play DQN, PPO and Rainbow DQN), their checkpoints
+                  and a live training dashboard (dashboard.py)
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
 benchmarks/       throughput and strength benchmarks, results/ (strength sweep data)

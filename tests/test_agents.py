@@ -56,6 +56,10 @@ CANONICAL = {
     "dqn": "dqn",
     "dqn:baselines/checkpoints/dqn-duel-seed0": "dqn",
     "dqn:/nonexistent/run": "dqn:/nonexistent/run",
+    "rainbow": "rainbow",
+    # Absolute: a relative path is looked up in the repository only if it exists.
+    f"rainbow:{agents_mod.DEFAULT_RAINBOW_CHECKPOINT}": "rainbow",
+    "rainbow:/nonexistent/run": "rainbow:/nonexistent/run",
     "random_legal": "random_legal",
     "heuristic": "heuristic",
 }
@@ -147,6 +151,8 @@ def test_format_number():
         ("ppo-bogus", "unknown ppo mode 'bogus'"),
         ("ppo-greedy-sample", "unknown ppo mode 'greedy-sample'"),
         ("ppox", "unknown agent"),
+        ("rainbow:", "write rainbow:<run dir>"),
+        ("rainbow@seed0", "write rainbow:<run dir>"),
     ],
 )
 def test_bad_names(name, message):
@@ -274,6 +280,33 @@ def test_ppo_without_its_default_checkpoint(tmp_path, monkeypatch):
     assert spec.name == "ppo" and spec.checkpoint == (tmp_path / "missing").resolve()
     with pytest.raises(FileNotFoundError, match="no PPO checkpoint in .*missing"):
         make_agent("ppo", GameConfig(max_turns=7))  # a config no other test caches
+
+
+def test_rainbow_agent_plays_from_observations(tmp_path):
+    pytest.importorskip("optax")
+    rainbow = agents_mod.load_rainbow_module()
+    cfg = rainbow.RainbowConfig(conv_channels=(4,), conv_strides=(2,), hidden=16, num_atoms=11)
+    rainbow.save_config(str(tmp_path), cfg)
+    rainbow.save_checkpoint(str(tmp_path), rainbow.init_network(jax.random.key(0), cfg))
+    name = f"rainbow:{tmp_path}"
+    agent = make_agent(name, CONFIG)
+    assert agent.needs_obs and "Rainbow" in agent.description
+    assert parse_agent(name).kind == "rainbow"
+    info = agent_config(parse_agent(name))
+    assert info["type"] == "rainbow" and info["network"]["num_atoms"] == 11
+    with pytest.raises(ValueError, match="trained on 11x11"):
+        make_agent(name, GameConfig(width=7, height=7))
+    with pytest.raises(FileNotFoundError, match="no Rainbow checkpoint"):
+        make_agent("rainbow:/nonexistent/run", CONFIG)
+    if agents_mod.DEFAULT_DQN_CHECKPOINT.is_dir():  # a DQN run is not a Rainbow run
+        with pytest.raises(ValueError, match="not a Rainbow run"):
+            make_agent("rainbow:baselines/checkpoints/dqn-duel-seed0", CONFIG)
+    # ... and a Rainbow run is neither a DQN nor a PPO run: refused before anything is built.
+    for kind in ("dqn", "ppo"):
+        with pytest.raises(ValueError, match="is a rainbow run; write rainbow:<run dir>"):
+            check_game(parse_agent(f"{kind}:{tmp_path}"), CONFIG)
+    r = record_games(CONFIG, [name, "random_legal"], jax.random.key(0), 2, max_turns=6)
+    assert r["games"][0]["seats"][0] == parse_agent(name).name
 
 
 def test_mcts_agents():
