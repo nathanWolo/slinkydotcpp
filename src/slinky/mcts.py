@@ -546,8 +546,9 @@ def search(
 
     Works under ``jit`` and ``vmap`` (close over ``env`` and ``config``). Only
     ``env.config`` is used: transitions run on an observation-free env. A
-    finished ``state`` is handled: no simulation expands anything, and each
-    player gets a valid move (its first legal one) with zero visits.
+    finished ``state`` is handled: no simulation expands anything, every visit
+    count is zero, ``value`` is the exact outcome and each player still gets a
+    legal move.
     """
     game = env.config
     n = game.num_snakes

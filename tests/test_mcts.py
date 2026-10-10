@@ -123,7 +123,7 @@ def test_root_statistics_are_consistent(selection):
     np.testing.assert_allclose(out.policy.sum(-1), 1.0, rtol=1e-5)
     assert np.all(out.policy >= 0)
     assert np.all((out.nodes_used >= 1) & (out.nodes_used <= 65))
-    assert np.all(out.depth <= 64)
+    assert np.all(out.depth <= config.max_depth)
     # Moves never leave env.action_mask, and visits stay on the selectable moves.
     mask = np.asarray(jax.vmap(env.action_mask)(states))
     assert np.take_along_axis(mask, out.action[..., None], -1).all()
@@ -166,11 +166,12 @@ def test_truncation_inside_the_tree_is_a_draw(spawn_food):
     other = [(8, 8), (8, 7), (8, 6)]
     state = board([hero, other], game, turn=10)
     out = run(state, M.MCTSConfig(num_simulations=64, spawn_food=spawn_food), game)
-    # The hero's LEFT runs into the wall (masked, never visited); its other moves survive.
-    assert np.all(out.visits[:, 0, LEFT] == 0)
+    # The hero's LEFT (wall) and RIGHT (neck) are masked and never visited.
+    assert np.all(out.visits[:, 0, LEFT] == 0) and np.all(out.visits[:, 0, RIGHT] == 0)
     visited = out.visits > 0
     np.testing.assert_array_equal(out.q[visited], 0.0)
-    assert np.all(out.nodes_used <= 1 + 9)  # 3 x 3 joint moves, all terminal
+    np.testing.assert_array_equal(out.value, 0.0)
+    np.testing.assert_array_equal(out.nodes_used, 1 + 2 * 3)  # every joint move, all terminal
 
 
 @pytest.mark.parametrize("num_snakes", [1, 3, 4])
