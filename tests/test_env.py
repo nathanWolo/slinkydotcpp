@@ -116,7 +116,8 @@ def test_autoreset():
     assert int(nxt.turn) == 0 and not bool(nxt.done)
     assert bool(ts.alive.all()) and bool(ts.action_mask.all())
     fresh_obs = env.observe(nxt)
-    np.testing.assert_array_equal(ts.obs, fresh_obs)
+    # Jitted and eager float32 observations can differ in the last ulp across jax versions.
+    np.testing.assert_allclose(ts.obs, fresh_obs, rtol=1e-6, atol=1e-7)
 
 
 def test_vmap_scan_rollout_is_zero_sum():
@@ -160,8 +161,8 @@ def test_autoreset_keeps_final_obs():
     # final_obs is the observation of the truncated (turn 3) state.
     reached, _ = env.step(jax.random.key(2), prev, actions)
     assert int(reached.turn) == 3
-    np.testing.assert_array_equal(ts.final_obs, env.observe(reached))
-    np.testing.assert_array_equal(ts.obs, env.observe(state))
+    np.testing.assert_allclose(ts.final_obs, env.observe(reached), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(ts.obs, env.observe(state), rtol=1e-6, atol=1e-7)
 
 
 def test_huge_minimum_food_fills_the_board_without_crashing():
