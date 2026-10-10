@@ -84,33 +84,49 @@ by mean value. ``"sample"`` draws from the visit distribution (DUCT) or the
 average strategy (RM), which is what the convergence results are about.
 DUCT(max) beat DUCT(mix) 58% in Tron (Lanctot et al. 2013).
 
-**Defaults and why** (measured in the 11x11 duel against the heuristic snake
-of :mod:`slinky.heuristic`, with 95% confidence intervals; see
-:class:`MCTSConfig`):
+**Defaults and why.** Measured in the 11x11 duel against the heuristic snake
+(:func:`slinky.heuristic.heuristic`), with 95% confidence intervals. Unless
+noted, each line is 256 games at 64 simulations, on the same starting
+positions, against the final default's 0.594 +- 0.043:
 
-* DUCT with heuristic leaves and no rollouts, as the research recommends:
-  evaluation functions beat random playouts in Tron for every sampling method
-  (Bosansky et al. 2016).
+* Heuristic leaves, no rollouts, as the research recommends (evaluation
+  functions beat random playouts in Tron for every sampling method; Bosansky
+  et al. 2016). Ten random-rollout steps before the heuristic scored 0.113 +-
+  0.035 (0.102 +- 0.045 with ``C = 1.4``) at 3.3x the cost per simulation, and
+  pure random rollouts (``leaf="none"``, 30 steps) 0.029 +- 0.018, although
+  both still beat ``random_legal`` 0.99.
+* DUCT. Regret matching (``rm_gamma=0.2``) scored 0.551 +- 0.037 at 1.8x the
+  cost per simulation, and UCB1-Tuned 0.533 +- 0.044.
 * ``exploration=0.25`` rather than UCB1's ``sqrt(2)``. The heuristic's values
   are compressed (the median ``|value|`` over states of heuristic play is
   0.25, so 0.12 from the middle of UCB's ``[0, 1]`` scale), and a large ``C``
-  spreads the visits almost uniformly. At 64 simulations ``C = 1.4`` scored 0.49 +- 0.03
-  and ``C = 0.25`` 0.54 +- 0.03 (256 games each).
+  spreads the visits almost uniformly. With a draw worth 0, ``C = 1.4`` scored
+  0.490 +- 0.029 and ``C = 0.25`` 0.539 +- 0.030; with contempt, ``C = 0.1``
+  and 0.25 scored 0.59 and ``C = 0.5`` 0.525 +- 0.048.
 * ``draw_value=-0.5``, contempt for mutual eliminations. With a draw worth 0,
   as in ``env.win_loss_reward``, the search happily trades heads at equal
   length whenever its position looks slightly worse, and about 75% of games
   against the heuristic were draws. With contempt they are decided by play:
-  0.596 +- 0.034 rose to 0.700 +- 0.049 at 256 simulations (192 games), and
-  0.539 +- 0.030 to 0.590 +- 0.046 at 64. Against the DQN it made no
-  difference (0.961 and 0.969 +- 0.03 at 64). A draw still beats a loss, and
-  ``draw_value=0`` gives the pure win/loss objective.
+  0.539 +- 0.030 rose to 0.590 +- 0.046 at 64 simulations, and 0.596 +- 0.034
+  to 0.700 +- 0.049 at 256 (192 games). Against the DQN it made no
+  difference (0.961 and 0.969 +- 0.03 at 64, 128 games). A draw still beats a
+  loss, and ``draw_value=0`` gives the pure win/loss objective.
 * ``spawn_food=False``: the same strength per simulation as sampled spawns
-  (0.594 +- 0.043 against 0.590 +- 0.046 at 64 simulations) at about 1.5x the
-  simulations per second, since the spawn's random draw costs more than the
-  rest of the rules step.
-* ``final="max"`` (DUCT(max) beat DUCT(mix) 58% in Tron; Lanctot et al. 2013).
+  (0.594 +- 0.043 against 0.590 +- 0.046) at 1.4x the simulations per second,
+  because the spawn's random draw costs more than the rest of the rules step.
+* ``final="max"``. Sampling the move from the visit counts scored 0.127 +-
+  0.035 (from RM's average strategy, 0.365 +- 0.044): at small budgets every
+  move keeps a few exploratory visits, and over a hundred turns the sampled
+  blunders add up.
+* ``tie_noise=0.01``: without it, 0.561 +- 0.046 (within noise).
 * ``max_depth=32``: never reached in practice (the deepest node at 1024
-  simulations was 11 moves down), but it bounds the path buffer.
+  simulations was 10-11 moves down), but it bounds the path buffer.
+
+**Speed** (4-core CPU, ``jit(vmap(search))``, default config): about 6 us per
+simulation at a batch of 256 games (5.2 at 16 simulations, 6.9 at 256; 145k to
+190k simulations/s in all) and 7-10 us at a batch of 64. The heuristic leaf is
+about 2.6 us of that, and the tree takes 1.04 KB per node (0.27 MB per game at
+256 simulations).
 
 **Limits.** The children table has ``4**N`` entries per node, so ``N <= 4``
 (256 joint actions; more snakes raise ``ValueError``). The spec was written for

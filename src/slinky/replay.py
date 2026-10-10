@@ -73,7 +73,7 @@ from slinky.agents import Agent, make_agent, make_env
 from slinky.engine_json import countdown_to_body
 from slinky.env import BattlesnakeEnv
 from slinky.evaluate import Policy
-from slinky.types import CAUSE_TO_ENGINE, Cause, GameConfig, Ruleset
+from slinky.types import CAUSE_TO_ENGINE, Cause, GameConfig, Ruleset, State
 
 FORMAT = "slinky-replay/1"
 _DATA_TAG = '<script type="application/json" id="replay-data">null</script>'
@@ -109,7 +109,9 @@ def _seating(num_agents: int, num_snakes: int, num_games: int, rotate: bool | No
     if num_agents == 2 and rotate:
         return np.where(seats == games % num_snakes, 0, 1)  # A in seat g % N, as play_match
     if num_agents == num_snakes:
-        return (seats - games) % num_snakes if rotate else np.broadcast_to(seats, (num_games, num_snakes))
+        if rotate:
+            return (seats - games) % num_snakes
+        return np.broadcast_to(seats, (num_games, num_snakes))
     raise ValueError(
         f"give one agent per seat ({num_snakes}) or two agents to rotate across seats, "
         f"not {num_agents}"
@@ -195,6 +197,27 @@ def _points(mask: np.ndarray) -> list[list[int]]:
     return [[int(x), int(y)] for x, y in zip(xs, ys, strict=True)]
 
 
+def game_from_states(
+    states: Sequence[State],
+    config: GameConfig,
+    seats: Sequence[str] | None = None,
+    game_id: int = 0,
+) -> dict[str, Any]:
+    """One replay game (``{"id", "seats", "result", "frames"}``) from your own game loop.
+
+    Args:
+      states: the unbatched states of one game, one per turn, consecutive
+        (usually turn 0 first). Frames stop at the first finished state.
+      seats: agent name per seat (default ``"seat 0"``, ``"seat 1"``, ...).
+    """
+    if not states:
+        raise ValueError("no states")
+    host = jax.device_get([{f: getattr(s, f) for f in _RECORDED} for s in states])
+    arrays = {f: np.stack([np.asarray(h[f]) for h in host]) for f in _RECORDED}
+    seats = list(seats) if seats is not None else [f"seat {i}" for i in range(config.num_snakes)]
+    return {"id": game_id, "seats": seats, **_game_record(arrays, config)}
+
+
 def _game_record(a: dict[str, np.ndarray], config: GameConfig) -> dict[str, Any]:
     """``{"result", "frames"}`` for one game from its per-turn arrays (leading axis = turn)."""
     done = np.nonzero(a["done"])[0]
@@ -203,6 +226,7 @@ def _game_record(a: dict[str, np.ndarray], config: GameConfig) -> dict[str, Any]
     prev_body: list[list[list[int]]] = [[] for _ in range(n)]
     frames = []
     for t in range(end + 1):
+        turn = int(a["turn"][t])
         snakes = []
         for i in range(n):
             length, head = int(a["length"][t, i]), a["head"][t, i]
@@ -213,7 +237,7 @@ def _game_record(a: dict[str, np.ndarray], config: GameConfig) -> dict[str, Any]
                 entry.update(body=body, alive=True, length=length)
             else:
                 cause = CAUSE_TO_ENGINE[Cause(int(a["elim_cause"][t, i]))]
-                if int(a["elim_turn"][t, i]) == t and prev_body[i]:
+                if int(a["elim_turn"][t, i]) == turn and prev_body[i]:
                     # The engine moves every snake before eliminating any: the
                     # body after the fatal move (tail popped; grown if it ate).
                     body = [[int(head[0]), int(head[1])], *prev_body[i][:-1]]
@@ -222,7 +246,9 @@ def _game_record(a: dict[str, np.ndarray], config: GameConfig) -> dict[str, Any]
                 entry.update(alive=False, length=length, cause=cause)
             snakes.append(entry)
         hazards = [[x, y, int(a["hazard"][t, y, x])] for x, y in _points(a["hazard"][t] > 0)]
-        frames.append({"turn": t, "snakes": snakes, "food": _points(a["food"][t]), "hazards": hazards})
+        frames.append(
+            {"turn": turn, "snakes": snakes, "food": _points(a["food"][t]), "hazards": hazards}
+        )
 
     alive = a["alive"][end]
     remaining = int(alive.sum())
@@ -237,7 +263,7 @@ def _game_record(a: dict[str, np.ndarray], config: GameConfig) -> dict[str, Any]
         "winner": int(np.argmax(alive)) if not solo and not truncated and remaining == 1 else None,
         "draw": bool(not solo and remaining == 0),
         "truncated": bool(truncated),
-        "turns": end,
+        "turns": int(a["turn"][end]),
         "elims": [{"seat": i, "cause": c, "turn": t} for t, i, c in elims],
     }
     return {"result": result, "frames": frames}
@@ -302,9 +328,8 @@ def describe_game(game: dict[str, Any]) -> str:
     else:
         outcome = "over"
     elims = ", ".join(f"seat {e['seat']} {e['cause']} t{e['turn']}" for e in r["elims"])
-    return (
-        f"game {game['id']:>3}  {' vs '.join(seats)}  {outcome} after {r['turns']} turns"
-        + (f"  [{elims}]" if elims else "")
+    return f"game {game['id']:>3}  {' vs '.join(seats)}  {outcome} after {r['turns']} turns" + (
+        f"  [{elims}]" if elims else ""
     )
 
 

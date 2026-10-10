@@ -260,7 +260,15 @@ button, input, select { font: inherit; color: inherit; }
 /* --- Match & games ------------------------------------------------------------ */
 .score { margin: 6px 0 2px; font: 800 30px/1 var(--font-display); text-transform: uppercase; letter-spacing: 0.01em; overflow-wrap: anywhere; }
 .score .pts { font-variant-numeric: tabular-nums; }
-.score .unit { white-space: nowrap; }
+.score .line { display: block; }
+.score.lines { font-size: 24px; display: grid; gap: 6px; }
+.score .n { margin-left: 10px; font: 400 12px/1 var(--font-ui); letter-spacing: 0; text-transform: none; color: var(--ink-3); white-space: nowrap; }
+.score.multi {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 0;
+  margin-block: 10px 8px; font: 500 14px/1.3 var(--font-ui); text-transform: none; letter-spacing: 0;
+}
+.score.multi .nm { overflow-wrap: anywhere; padding-block-end: 4px; padding-inline-end: 16px; border-bottom: 1px solid var(--rule); }
+.score.multi .pts { font: 800 24px/1 var(--font-display); text-align: right; padding-block-end: 4px; border-bottom: 1px solid var(--rule); }
 .score .dash { color: var(--ink-3); font-weight: 600; padding-inline: 0.15em; }
 .score-sub { margin: 0 0 10px; font-size: 12px; color: var(--ink-2); }
 .game-row {
@@ -667,24 +675,28 @@ button, input, select { font: inherit; color: inherit; }
       if (!stacked) {
         // Taper the final segment toward the tail tip.
         const a = pts[lastSeg - 1];
-        const [ax, ay] = P(a);
         const [dx, dy] = dirOf(a, tailEnd);
-        const len = cell;
-        const bx = ax + dx * len, by = ay + dy * len;
         const w0 = base / 2, w1 = base * 0.26;
+        let [sx, sy] = P(a);
+        let len = cell;
+        ctx.beginPath(); ctx.arc(sx, sy, w0, 0, Math.PI * 2); ctx.fill();
+        if (!adjacent(a, tailEnd)) {
+          // The tail wrapped: a full-width stub to this edge, the taper from the far edge.
+          ctx.lineWidth = base; ctx.lineCap = "butt";
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + dx * cell * 0.5, sy + dy * cell * 0.5); ctx.stroke();
+          ctx.lineCap = "round";
+          const [tx, ty] = P(tailEnd);
+          sx = tx - dx * cell * 0.5; sy = ty - dy * cell * 0.5; len = cell * 0.5;
+        }
+        const bx = sx + dx * len, by = sy + dy * len;
         const nx = -dy, ny = dx;
         ctx.beginPath();
-        ctx.moveTo(ax + nx * w0, ay + ny * w0);
+        ctx.moveTo(sx + nx * w0, sy + ny * w0);
         ctx.lineTo(bx + nx * w1, by + ny * w1);
         ctx.arc(bx, by, w1, Math.atan2(ny, nx), Math.atan2(-ny, -nx), false);
-        ctx.lineTo(ax - nx * w0, ay - ny * w0);
+        ctx.lineTo(sx - nx * w0, sy - ny * w0);
         ctx.closePath();
         ctx.fill();
-        ctx.beginPath(); ctx.arc(ax, ay, w0, 0, Math.PI * 2); ctx.fill();
-        if (!adjacent(a, tailEnd)) {   // tail wrapped to the far edge
-          const [tx, ty] = P(tailEnd);
-          ctx.beginPath(); ctx.arc(tx, ty, w1 * 1.6, 0, Math.PI * 2); ctx.fill();
-        }
       } else {
         // Stacked tail: the snake ate, so its tail stays put next turn. Mark it with a ring.
         const [tx, ty] = P(tailEnd);
@@ -840,18 +852,32 @@ button, input, select { font: inherit; color: inherit; }
       if (g.result.truncated) cut++;
       turns += g.result.turns;
     }
+    // One scoreline per pairing ("heuristic 3 – 1 dqn"); a wins table for games of 3+ agents.
+    const groups = new Map();
+    for (const g of r.games) {
+      const names = r.agents.filter((a) => g.seats.includes(a));
+      const key = names.join("\u0000");
+      if (!groups.has(key)) groups.set(key, { names, games: 0, wins: new Map(names.map((a) => [a, 0])) });
+      const grp = groups.get(key);
+      grp.games++;
+      const w = g.result.winner;
+      if (w !== null && w !== undefined) grp.wins.set(g.seats[w], grp.wins.get(g.seats[w]) + 1);
+    }
+    const pairings = [...groups.values()];
+    const duels = pairings.every((p) => p.names.length === 2);
     el.score.textContent = "";
-    const entries = [...wins.entries()];
-    if (entries.length === 2) {
-      const [[a, wa], [b, wb]] = entries;
-      el.score.append(a + " ", span("pts", String(wa)), span("dash", "–"), span("pts", String(wb)), " " + b);
+    el.score.classList.toggle("multi", !duels);
+    el.score.classList.toggle("lines", duels && pairings.length > 1);
+    if (duels) {
+      for (const p of pairings) {
+        const [a, b] = p.names;
+        const line = span("line", "");
+        line.append(a + " ", span("pts", String(p.wins.get(a))), span("dash", "–"), span("pts", String(p.wins.get(b))), " " + b);
+        if (pairings.length > 1) line.append(span("n", `${p.games} game${p.games === 1 ? "" : "s"}`));
+        el.score.append(line);
+      }
     } else {
-      entries.forEach(([a, w], i) => {
-        const unit = span("unit", a + " ");
-        unit.append(span("pts", String(w)));
-        if (i) el.score.append(span("dash", " · "));
-        el.score.append(unit);
-      });
+      for (const [a, w] of wins) el.score.append(span("nm", a), span("pts", String(w)));
     }
     const n = r.games.length;
     el.scoreSub.textContent = `wins over ${n} game${n === 1 ? "" : "s"} · ${draws} draw${draws === 1 ? "" : "s"} · ${cut} cut off · ${Math.round(turns / n)} turns on average`;
