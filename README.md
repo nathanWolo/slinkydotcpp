@@ -120,13 +120,30 @@ own core, which is the fast path on a 4-core machine.
 
 ## Baselines
 
-[`baselines/`](baselines/) has single-file RL baselines trained by self-play.
-See [`baselines/README.md`](baselines/README.md) for results.
+Reference opponents for the 1v1 duel, from weakest to strongest. Full results
+and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
 
-- **DQN** (`baselines/dqn.py`): Double DQN with one shared network playing
-  both snakes in the 1v1 duel. After 31 minutes of training on a 4-core CPU,
-  it scores 0.993 ± 0.002 against `random_legal` (99.2% wins over 5,000
-  games).
+- **`random_legal`** (`slinky.evaluate`): uniformly random among the moves
+  that don't certainly die next turn.
+- **DQN** (`baselines/dqn.py`, see [`baselines/README.md`](baselines/README.md)):
+  self-play Double DQN with one shared network playing both snakes. After 31
+  minutes of training on a 4-core CPU, it scores 0.993 ± 0.002 against
+  `random_legal` (99.2% wins over 5,000 games). It plays between MCTS with 4
+  and with 16 simulations.
+- **Heuristic** (`slinky.heuristic`): a hand-written snake.
+  - It uses time-aware flood fills, Voronoi territory and food control.
+  - It picks moves with a one-ply simultaneous-move search over the exact
+    rules, after safety tiers.
+  - It scores 0.988 against `random_legal` and 0.947 against the DQN, at about
+    0.05 ms per move.
+  - It plays like MCTS with about 32 simulations.
+- **MCTS** (`slinky.mcts`): simultaneous-move MCTS (decoupled UCT, with the
+  heuristic's evaluation at the leaves).
+  - Against the heuristic it scores 0.53 at 32 simulations, 0.78 at 1024 and
+    0.85 at 2048. It levels off there, held back by opening head-on draws.
+  - It costs about 3.5–6 µs per simulation per CPU core.
+
+![MCTS score against random_legal, the DQN and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 
 ## Watching games
 
@@ -245,22 +262,27 @@ should scale much better with batch size.
    - royale, hazard maps and healing pools;
    - official API JSON (`/move` request) conversion, so a trained policy can
      play on the real Battlesnake servers.
-3. **RL baselines:**
+3. **Baselines:**
    - self-play DQN (done; see `baselines/`);
+   - heuristic snake and simultaneous-move MCTS, with a strength-vs-simulations
+     benchmark (done; see `benchmarks/README.md`);
    - independent PPO with self-play;
    - population or league training;
-   - search-based agents (MCTS/AlphaZero via `mctx`, adapted to
-     simultaneous moves).
+   - AlphaZero-style search with a learned value and policy, on top of
+     `slinky.mcts`.
 
 ## Layout
 
 ```
 src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
-                  engine_json, policies, evaluate (matches between policies)
-baselines/        RL baselines (self-play DQN)
+                  engine_json, policies, evaluate (matches between policies),
+                  heuristic (hand-written snake), mcts (simultaneous-move MCTS),
+                  agents (named-agent registry), replay (+ viewer.html)
+baselines/        RL baselines (self-play DQN) and its checkpoint
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
-benchmarks/       throughput benchmark
+benchmarks/       throughput and strength benchmarks, results/ (strength sweep data)
+docs/research/    literature notes: simultaneous-move MCTS, Battlesnake heuristics
 docs/battlesnake/ official rules/API docs (MIT) + ENGINE_RULES.md
 legacy/           the original C++ prototype
 ```

@@ -106,11 +106,15 @@ I did not inspect replays.
 
 - **One seed.** This is a single training run, not a seed sweep.
 - **The opponent is weak.** `random_legal` is a sanity-check opponent, and
-  this benchmark is now saturated. More informative comparisons would be:
-  - heuristic snakes (food-seeking, flood-fill space control);
-  - past checkpoints and other algorithms, via `play_match` or Elo/TrueSkill
-    over a population;
-  - PPO self-play on the same setup.
+  this benchmark is now saturated. Against stronger reference agents
+  ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 or 512 games
+  each):
+  - the hand-written heuristic beats this DQN 0.947 (967 / 6 / 51);
+  - on the MCTS scale, the DQN beats MCTS with 4 simulations (MCTS scores
+    0.427) and loses to MCTS with 16 (0.947).
+
+  Still to try: past checkpoints and other algorithms (Elo or TrueSkill over
+  a population), and PPO self-play on the same setup.
 
 The final network from this run is kept in
 [`checkpoints/dqn-duel-seed0/`](checkpoints/dqn-duel-seed0/) (2.6 MB) as a
