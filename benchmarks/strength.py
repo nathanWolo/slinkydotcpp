@@ -278,7 +278,16 @@ def git_info() -> tuple[str, bool]:
         return out.stdout.strip()
 
     try:
-        status = run("status", "--porcelain", "--", "src", "baselines", "benchmarks")
+        # The results files are not code: leave them out, or a sweep would mark itself dirty.
+        status = run(
+            "status",
+            "--porcelain",
+            "--",
+            "src",
+            "baselines",
+            "benchmarks",
+            ":(exclude)benchmarks/results",
+        )
         return run("rev-parse", "HEAD"), bool(status)
     except (OSError, subprocess.SubprocessError):
         return "unknown", False
