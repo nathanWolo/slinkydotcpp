@@ -18,6 +18,13 @@ Names:
   trained on (11x11, not wrapped). ``baselines/`` is not part of the installed
   package: this agent needs a checkout of the repository. A relative run dir
   is looked up in the working directory, then in the repository.
+* ``ppo`` or ``ppo:<run dir>``: the self-play PPO baseline (``baselines/ppo.py``),
+  default checkpoint ``baselines/checkpoints/ppo-duel-seed0``, otherwise like
+  ``dqn``. It plays in mode :data:`PPO_DEFAULT_MODE`; ``ppo-greedy`` (the legal
+  argmax of the policy logits) and ``ppo-sample`` (a move sampled from the
+  policy over the legal moves, with the match's random keys) choose the mode
+  explicitly, also with ``:<run dir>``. The canonical name leaves the default
+  mode out.
 * ``mcts-<n>``: simultaneous-move MCTS (:func:`slinky.mcts.mcts`) with ``n``
   simulations per move and the default :class:`slinky.mcts.MCTSConfig`. Other
   fields are set with dash-separated shorthands (``mcts-256-rm-c0.5``; the list
@@ -70,9 +77,15 @@ from slinky.types import GameConfig, State, TimeStep
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DQN_SCRIPT = REPO_ROOT / "baselines" / "dqn.py"
 DEFAULT_DQN_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "dqn-duel-seed0"
+PPO_SCRIPT = REPO_ROOT / "baselines" / "ppo.py"
+DEFAULT_PPO_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "ppo-duel-seed0"
+# How ``ppo`` plays: "greedy" (legal argmax of the logits) or "sample" (from the policy).
+PPO_MODES = ("greedy", "sample")
+PPO_DEFAULT_MODE = "greedy"
 
 AGENT_NAMES = (
     "random_legal", "random", "heuristic", "dqn", "dqn:<run dir>",
+    "ppo[-greedy|-sample]", "ppo[-greedy|-sample]:<run dir>",
     "mcts-<n>[-shorthand...][:field=value...]",
 )  # fmt: skip
 SIMPLE_AGENTS = ("random_legal", "random", "heuristic")
@@ -103,15 +116,19 @@ class AgentSpec:
 
     Attributes:
       name: the canonical name (see the module docstring).
-      kind: ``"random_legal"``, ``"random"``, ``"heuristic"``, ``"dqn"`` or ``"mcts"``.
+      kind: ``"random_legal"``, ``"random"``, ``"heuristic"``, ``"dqn"``, ``"ppo"`` or
+        ``"mcts"``.
       mcts: the search settings of an ``mcts`` agent.
-      checkpoint: the resolved run directory of a ``dqn`` agent.
+      checkpoint: the resolved run directory of a ``dqn`` or ``ppo`` agent.
+      greedy: how a ``ppo`` agent plays: the legal argmax of its logits (True) or a
+        move sampled from its policy (False). None for other agents.
     """
 
     name: str
     kind: str
     mcts: Any = None  # slinky.mcts.MCTSConfig (imported lazily)
     checkpoint: Path | None = None
+    greedy: bool | None = None
 
     @property
     def sims(self) -> int:
@@ -132,6 +149,8 @@ def parse_agent(name: str) -> AgentSpec:
         return _parse_dqn(name)
     if name.startswith("dqn@"):
         raise ValueError(f"{name!r}: write dqn:<run dir>")
+    if name == "ppo" or name.startswith(("ppo:", "ppo-", "ppo@")):
+        return _parse_ppo(name)
     if name.startswith("mcts-"):
         return _parse_mcts(name)
     raise ValueError(f"unknown agent {name!r}; known agents: {', '.join(AGENT_NAMES)}")
@@ -147,7 +166,8 @@ def make_agent(name: str | AgentSpec, config: GameConfig | None = None) -> Agent
 
     Raises:
       ValueError: unknown name, bad ``mcts`` setting, or a game the agent can't play.
-      FileNotFoundError: ``dqn`` without ``baselines/dqn.py`` or its checkpoint.
+      FileNotFoundError: ``dqn`` or ``ppo`` without its script in ``baselines/`` or its
+        checkpoint.
     """
     config = config or GameConfig()
     spec = parse_agent(name) if isinstance(name, str) else name
@@ -170,14 +190,14 @@ def make_env(config: GameConfig, obs: bool) -> BattlesnakeEnv:
 def check_game(spec: AgentSpec, config: GameConfig) -> None:
     """Raise ``ValueError`` if the agent can't play games with ``config``.
 
-    Raises ``FileNotFoundError`` for a ``dqn`` agent without its checkpoint.
+    Raises ``FileNotFoundError`` for a ``dqn`` or ``ppo`` agent without its checkpoint.
     """
     if spec.kind == "mcts":
         mcts = importlib.import_module("slinky.mcts")
         if config.num_snakes > mcts.MAX_SNAKES:
             raise ValueError(f"{spec.name}: MCTS supports at most {mcts.MAX_SNAKES} snakes")
-    elif spec.kind == "dqn":
-        trained = _dqn_config(spec.checkpoint).game
+    elif spec.kind in BASELINES:
+        trained = _run_config(spec).game
         if (config.width, config.height) != (trained.width, trained.height) or (
             config.ruleset.wrapped != trained.ruleset.wrapped
         ):
@@ -192,23 +212,24 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
     """Everything that defines the agent's play, as plain JSON data.
 
     The full config, not only the non-default settings: every ``MCTSConfig``
-    field, the heuristic weights, a DQN's network config and a hash of its
-    parameters. Benchmarks hash it to tell results of different agents apart.
+    field, the heuristic weights, a DQN's or PPO's run config (network
+    included), how it picks moves and a hash of its parameters. Benchmarks
+    hash it to tell results of different agents apart.
     """
     if spec.kind in ("random_legal", "random"):
         config: dict[str, Any] = {"type": spec.kind}
     elif spec.kind == "heuristic":
         heuristic = importlib.import_module("slinky.heuristic")
         config = {"type": "heuristic", "weights": heuristic.DEFAULT_WEIGHTS._asdict()}
-    elif spec.kind == "dqn":
+    elif spec.kind in BASELINES:
         path = spec.checkpoint
-        params = _checkpoint_files(path)[0]
+        params = _checkpoint_files(spec)[0]
         config = {
-            "type": "dqn",
+            "type": spec.kind,
             "checkpoint": _display_path(path),
-            "greedy": True,
+            "greedy": spec.greedy is not False,  # the DQN is always greedy
             "params_sha256": hashlib.sha256(params.read_bytes()).hexdigest()[:16],
-            "network": dataclasses.asdict(_dqn_config(path)),
+            "network": dataclasses.asdict(_run_config(spec)),
         }
     else:
         fields = {f.name: getattr(spec.mcts, f.name) for f in dataclasses.fields(spec.mcts)}
@@ -232,6 +253,8 @@ def _build(spec: AgentSpec, config: GameConfig) -> Agent:
         return Agent(spec.name, heuristic(env), False, desc)
     if spec.kind == "dqn":
         return _dqn_agent(spec)
+    if spec.kind == "ppo":
+        return _ppo_agent(spec)
     return _mcts_agent(spec, env)
 
 
@@ -243,20 +266,27 @@ def _random(env: BattlesnakeEnv) -> Policy:
     return policy
 
 
-# --- DQN -------------------------------------------------------------------------
+# --- Trained baselines (DQN, PPO) ------------------------------------------------
+
+# kind -> (script in baselines/, module name it is imported as, default checkpoint)
+BASELINES = {
+    "dqn": (DQN_SCRIPT, "baselines_dqn", DEFAULT_DQN_CHECKPOINT),
+    "ppo": (PPO_SCRIPT, "baselines_ppo", DEFAULT_PPO_CHECKPOINT),
+}
 
 
-@functools.lru_cache(maxsize=1)
-def load_dqn_module() -> ModuleType:
-    """Import ``baselines/dqn.py`` from the repository (``baselines/`` is not a package)."""
-    if "baselines_dqn" in sys.modules:  # already imported, e.g. by tests/test_dqn.py
-        return sys.modules["baselines_dqn"]
-    if not DQN_SCRIPT.is_file():
+@functools.cache
+def load_baseline_module(kind: str) -> ModuleType:
+    """Import ``baselines/<kind>.py`` from the repository (``baselines/`` is not a package)."""
+    script, module_name, _ = BASELINES[kind]
+    if module_name in sys.modules:  # already imported, e.g. by tests/test_dqn.py
+        return sys.modules[module_name]
+    if not script.is_file():
         raise FileNotFoundError(
-            f"the dqn agent needs baselines/dqn.py from a checkout of the slinky repository "
-            f"(looked for {DQN_SCRIPT}); it is not part of the installed package"
+            f"the {kind} agent needs baselines/{script.name} from a checkout of the slinky "
+            f"repository (looked for {script}); it is not part of the installed package"
         )
-    spec = importlib.util.spec_from_file_location("baselines_dqn", DQN_SCRIPT)
+    spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module  # dataclasses look their module up by name
@@ -268,17 +298,57 @@ def load_dqn_module() -> ModuleType:
     return module
 
 
-def _parse_dqn(name: str) -> AgentSpec:
-    _, sep, text = name.partition(":")
-    if sep and not text.strip():
-        raise ValueError("write dqn:<run dir>, e.g. dqn:baselines/checkpoints/dqn-duel-seed0")
-    path = Path(text.strip()).expanduser() if sep else DEFAULT_DQN_CHECKPOINT
+def load_dqn_module() -> ModuleType:
+    """Import ``baselines/dqn.py`` from the repository."""
+    return load_baseline_module("dqn")
+
+
+def load_ppo_module() -> ModuleType:
+    """Import ``baselines/ppo.py`` from the repository."""
+    return load_baseline_module("ppo")
+
+
+def _run_dir(kind: str, text: str | None) -> Path:
+    """The resolved run directory named by ``text`` (None: the default checkpoint)."""
+    if text is None:
+        return BASELINES[kind][2].resolve()
+    if not text.strip():
+        raise ValueError(
+            f"write {kind}:<run dir>, e.g. {kind}:baselines/checkpoints/{kind}-duel-seed0"
+        )
+    path = Path(text.strip()).expanduser()
     if not path.is_absolute() and not path.exists() and (REPO_ROOT / path).exists():
         path = REPO_ROOT / path
-    path = path.resolve()
-    if path == DEFAULT_DQN_CHECKPOINT.resolve():
-        return AgentSpec("dqn", "dqn", checkpoint=path)
-    return AgentSpec(f"dqn:{_display_path(path)}", "dqn", checkpoint=path)
+    return path.resolve()
+
+
+def _with_run_dir(base: str, kind: str, path: Path) -> str:
+    """``base`` for the default checkpoint, else ``base:<run dir>``."""
+    return base if path == BASELINES[kind][2].resolve() else f"{base}:{_display_path(path)}"
+
+
+def _parse_dqn(name: str) -> AgentSpec:
+    _, sep, text = name.partition(":")
+    path = _run_dir("dqn", text if sep else None)
+    return AgentSpec(_with_run_dir("dqn", "dqn", path), "dqn", checkpoint=path)
+
+
+def _parse_ppo(name: str) -> AgentSpec:
+    head, sep, text = name.partition(":")
+    if head.startswith("ppo@"):
+        raise ValueError(f"{name!r}: write ppo:<run dir>")
+    mode = PPO_DEFAULT_MODE
+    if head != "ppo":
+        mode = head.removeprefix("ppo-")
+        if mode not in PPO_MODES:
+            raise ValueError(
+                f"{name!r}: unknown ppo mode {mode!r}; write ppo[-greedy|-sample][:<run dir>]"
+            )
+    path = _run_dir("ppo", text if sep else None)
+    base = "ppo" if mode == PPO_DEFAULT_MODE else f"ppo-{mode}"
+    return AgentSpec(
+        _with_run_dir(base, "ppo", path), "ppo", checkpoint=path, greedy=mode == "greedy"
+    )
 
 
 def _display_path(path: Path) -> str:
@@ -286,23 +356,26 @@ def _display_path(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else str(path)
 
 
-def _checkpoint_files(path: Path) -> tuple[Path, Path]:
+def _checkpoint_files(spec: AgentSpec) -> tuple[Path, Path]:
+    path = spec.checkpoint
     params, config = path / "params.npz", path / "config.json"
     if not params.is_file() or not config.is_file():
         raise FileNotFoundError(
-            f"no DQN checkpoint in {path} (expected params.npz and config.json there)"
+            f"no {spec.kind.upper()} checkpoint in {path} (expected params.npz and config.json "
+            "there)"
         )
     return params, config
 
 
-def _dqn_config(path: Path) -> Any:
-    _checkpoint_files(path)
-    return load_dqn_module().load_config(str(path))
+def _run_config(spec: AgentSpec) -> Any:
+    """The training config saved with a ``dqn`` or ``ppo`` agent's checkpoint."""
+    _checkpoint_files(spec)
+    return load_baseline_module(spec.kind).load_config(str(spec.checkpoint))
 
 
 def _dqn_agent(spec: AgentSpec) -> Agent:
     dqn = load_dqn_module()
-    cfg = _dqn_config(spec.checkpoint)
+    cfg = _run_config(spec)
     params = dqn.load_params(str(spec.checkpoint), cfg)
 
     def q_fn(obs: jax.Array) -> jax.Array:
@@ -310,6 +383,15 @@ def _dqn_agent(spec: AgentSpec) -> Agent:
 
     desc = f"greedy self-play DQN ({spec.checkpoint.name})"
     return Agent(spec.name, greedy_from_q(q_fn), True, desc)
+
+
+def _ppo_agent(spec: AgentSpec) -> Agent:
+    ppo = load_ppo_module()
+    cfg = _run_config(spec)
+    params = ppo.load_params(str(spec.checkpoint), cfg)
+    how = "greedy" if spec.greedy else "sampled"
+    desc = f"{how} self-play PPO ({spec.checkpoint.name})"
+    return Agent(spec.name, ppo.make_policy(params, cfg, bool(spec.greedy)), True, desc)
 
 
 # --- MCTS ------------------------------------------------------------------------

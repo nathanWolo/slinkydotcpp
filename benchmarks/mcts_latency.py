@@ -8,6 +8,14 @@ state; the clock covers dispatch, the search and waiting for the result, and exc
 compilation (untimed warmup calls). Its distribution is reported per ``n``: median,
 p90 and max over ``--repeats`` searches (fresh keys) of every position.
 
+``--batch B`` (``B >= 2``) measures ``jax.jit(jax.vmap(search))`` on ``B`` copies of the
+position instead, i.e. the latency of a ``B``-game call. With the current ``mcts.py``
+this matters: XLA compiles the unbatched search (and ``B = 1``) with a full copy of the
+tree's state arrays on every simulation, so its cost per simulation grows linearly with
+``n`` (quadratic total), while for ``B >= 2`` the updates are in place. The cheapest
+way to serve one game on the current code is therefore ``--batch 2`` (the second search
+is wasted work, which the latency includes).
+
 Positions come from real games, so the cost is not that of a lucky opening: a batch of
 ``--games`` games of MCTS (``--player``, a cheap ``mcts-<n>``) against the heuristic is
 played, and for each game phase (``--phases name:turn,...``) up to ``--states-per-phase``
@@ -43,7 +51,6 @@ import resource
 import sys
 import time
 from collections.abc import Callable
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -56,7 +63,7 @@ from slinky.types import GameConfig, State
 DEFAULT_SIMS = (1024, 4096, 16384, 65536)
 DEFAULT_BUDGETS_MS = (500.0, 400.0)  # the time control; and what is left after the network
 DEFAULT_PHASES = "early:8,mid:50,late:150"  # name:turn of the positions (turn = engine turn)
-MAX_LOWERINGS = 6  # calibration lowers n by --round at most this often before giving up
+MAX_PROBES = 6  # calibration measures at most this many extra values of n per budget
 GAME_TURNS = 200  # turns the position-collecting games are played for
 
 
@@ -126,9 +133,19 @@ def tree_bytes(env: BattlesnakeEnv, state: State, config: mcts.MCTSConfig) -> in
     """Bytes of one search's tree (``num_simulations + 1`` nodes) plus its pre-drawn noise."""
     n = config.num_simulations
     tree = jax.eval_shape(lambda s: mcts._init_tree(s, env, config, n + 1), state)
-    leaves = jax.tree.leaves(tree)
     noise = n * env.config.num_snakes * 4 * 4  # uint32[n, N, 4]
-    return sum(math.prod(x.shape) * x.dtype.itemsize for x in leaves) + noise
+    return sum(math.prod(x.shape) * x.dtype.itemsize for x in jax.tree.leaves(tree)) + noise
+
+
+def make_program(env: BattlesnakeEnv, config: mcts.MCTSConfig, batch: int) -> Callable:
+    """``program(key, state) -> SearchOutput``: one search, or ``batch`` copies under vmap."""
+
+    def search(key, state):
+        return mcts.search(key, state, env, config)
+
+    if batch == 1:
+        return jax.jit(search)
+    return jax.jit(jax.vmap(search))
 
 
 def measure(
@@ -136,32 +153,44 @@ def measure(
 ) -> Row:
     """Latency of ``n``-simulation searches: ``repeats`` per position, positions interleaved."""
     config = mcts.MCTSConfig(num_simulations=n)
-    search = jax.jit(lambda key, state: mcts.search(key, state, env, config))
+    program = make_program(env, config, args.batch)
     base = jax.random.key(args.seed + 1)
-    keys = [
-        [jax.block_until_ready(jax.random.fold_in(base, 1000 * p + r)) for r in range(args.repeats)]
-        for p in range(len(states))
-    ]
+    if args.batch == 1:
+        inputs = states
+        keys = [
+            [jax.random.fold_in(base, 1000 * p + r) for r in range(args.repeats)]
+            for p in range(len(states))
+        ]
+    else:  # the position repeated ``batch`` times, each copy searched with its own key
+        inputs = [jax.tree.map(lambda x: jnp.stack([x] * args.batch), s) for s in states]
+        keys = [
+            [
+                jax.random.split(jax.random.fold_in(base, 1000 * p + r), args.batch)
+                for r in range(args.repeats)
+            ]
+            for p in range(len(states))
+        ]
+    jax.block_until_ready((inputs, keys))  # inputs are ready before the clock starts
     t0 = time.perf_counter()
-    jax.block_until_ready(search(keys[0][0], states[0]))  # compile + first run
+    jax.block_until_ready(program(keys[0][0], inputs[0]))  # compile + first run
     compile_s = time.perf_counter() - t0
-    jax.block_until_ready(search(keys[0][-1], states[0]))  # first run's page faults etc.
+    jax.block_until_ready(program(keys[0][-1], inputs[0]))  # first run's page faults etc.
     ms = np.zeros((len(states), args.repeats))
     depth = np.zeros(ms.shape, int)
     nodes = np.zeros(ms.shape, int)
     for r in range(args.repeats):
-        for p, state in enumerate(states):
+        for p in range(len(states)):
             t0 = time.perf_counter()
-            out = jax.block_until_ready(search(keys[p][r], state))
+            out = jax.block_until_ready(program(keys[p][r], inputs[p]))
             ms[p, r] = 1e3 * (time.perf_counter() - t0)
-            depth[p, r], nodes[p, r] = int(out.depth), int(out.nodes_used)
+            depth[p, r], nodes[p, r] = int(np.max(out.depth)), int(np.max(out.nodes_used))
     row = Row(
         n=n,
         ms=ms,
         phase=names,
         depth=depth,
         nodes=nodes,
-        tree_bytes=tree_bytes(env, states[0], config),
+        tree_bytes=args.batch * tree_bytes(env, states[0], config),
         compile_s=compile_s,
         rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,  # KiB on Linux
     )
@@ -174,7 +203,7 @@ def measure(
 
 
 def estimate_n(points: list[tuple[int, float]], budget: float) -> float:
-    """The ``n`` at which a line through the nearest measured (n, latency) points hits the budget."""
+    """The ``n`` at which the line through the two nearest (n, latency) points meets ``budget``."""
     points = sorted(points)
     for lo, hi in zip(points, points[1:], strict=False):
         if lo[1] <= budget < hi[1]:
@@ -188,26 +217,37 @@ def estimate_n(points: list[tuple[int, float]], budget: float) -> float:
 def calibrate(
     budget: float, rows: dict[int, Row], run: Callable[[int], Row], args: argparse.Namespace
 ) -> Row | None:
-    """The row of the largest multiple of ``--round`` found to fit ``budget`` ms (or None).
+    """The row of the largest multiple of ``--round`` measured to fit ``budget`` ms (or None).
 
-    Starts at the interpolated ``n`` rounded down, measures it, and lowers it by one
-    ``--round`` until the ``--stat`` latency is within the budget. It does not try larger
-    values, so the answer errs on the safe side by up to one ``--round``.
+    Latency grows with ``n``, so a measured ``n`` over the budget rules out every larger
+    multiple, and a fit is only trusted where it was measured. With ``lo`` and ``hi`` the
+    bounds on ``n / round``, each probe is the interpolated ``n`` (from all measurements,
+    rounded down and kept strictly between the bounds) and moves one of them. It stops
+    when they are adjacent, so the answer errs low by less than one ``--round`` (and by
+    noise), or after ``MAX_PROBES`` probes.
     """
-    points = [(n, r.stat(args.stat)) for n, r in rows.items()]
-    if len(points) < 2:
+    unit = args.round
+    if len(rows) < 2:
         log("calibration needs at least two --sims values")
         return None
-    n = int(estimate_n(points, budget) // args.round) * args.round
-    for _ in range(MAX_LOWERINGS):
-        if n < max(args.round, 1):
-            return None
-        row = rows.get(n) or run(n)
-        rows[n] = row
-        if row.stat(args.stat) <= budget:
-            return row
-        n -= args.round
-    return None
+
+    def bounds() -> tuple[int, int | None]:
+        lo = max((n // unit for n, r in rows.items() if n % unit == 0 and fits(r)), default=0)
+        over = [-(-n // unit) for n, r in rows.items() if not fits(r)]  # first multiple >= n
+        return lo, min(over, default=None)
+
+    def fits(r: Row) -> bool:
+        return r.stat(args.stat) <= budget
+
+    for _ in range(MAX_PROBES):
+        lo, hi = bounds()
+        if hi is not None and hi - lo <= 1:
+            break
+        guess = int(estimate_n([(n, r.stat(args.stat)) for n, r in rows.items()], budget) // unit)
+        k = max(guess, lo + 1) if hi is None else min(max(guess, lo + 1), hi - 1)
+        rows[k * unit] = run(k * unit)
+    lo, _ = bounds()
+    return rows.get(lo * unit)
 
 
 # --- Reporting --------------------------------------------------------------------------
@@ -308,6 +348,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--games", type=int, default=64, help="games played to find positions")
     p.add_argument("--player", default="mcts-32", help="agent for seat 0 in those games")
+    p.add_argument(
+        "--batch",
+        type=int,
+        default=1,
+        help="1: jit(search) of one game (default); B >= 2: jit(vmap(search)) of B copies",
+    )
     p.add_argument("--core", type=int, default=None, help="pin this process to one CPU core")
     p.add_argument(
         "--quick", action="store_true", help="smoke test: 1 repeat, 2 positions per phase"
@@ -318,8 +364,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.quick:
         args.repeats, args.states_per_phase = 1, 2
     args.budget_ms = args.budget_ms or []
-    if args.round < 1 or args.repeats < 1 or args.states_per_phase < 1:
-        p.error("--round, --repeats and --states-per-phase must be >= 1")
+    if min(args.round, args.repeats, args.states_per_phase, args.batch) < 1:
+        p.error("--round, --repeats, --states-per-phase and --batch must be >= 1")
     try:
         args.phases = {k: int(v) for k, v in (kv.split(":") for kv in _csv(args.phases))}
     except ValueError:
@@ -352,7 +398,10 @@ def main(argv: list[str] | None = None) -> None:
         rows[n] = run(n)
     fits = {b: calibrate(b, rows, run, args) for b in args.budget_ms}
 
-    print("# slinky MCTS latency (one unbatched game, default MCTSConfig)\n")
+    program = (
+        "jit(search), one game" if args.batch == 1 else f"jit(vmap(search)), {args.batch} copies"
+    )
+    print(f"# slinky MCTS latency ({program}; default MCTSConfig)\n")
     print("\n".join(device_info()))
     print(
         f"- positions: {len(states)} from {args.player} vs heuristic games "

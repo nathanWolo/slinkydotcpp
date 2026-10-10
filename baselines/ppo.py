@@ -583,7 +583,7 @@ def make_train_chunk(
         (_, parts), grads = loss_and_grad(params, mb)
         step, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, step)
-        return (params, opt_state), {**parts, "grad_norm": optax.global_norm(grads)}
+        return (params, opt_state), {**parts, "grad_norm": optax.tree.norm(grads)}
 
     def epoch(batch, carry, key):
         perm = jax.random.permutation(key, num_samples)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 
 import jax
 import pytest
@@ -140,6 +141,12 @@ def test_format_number():
         ("mcts-16-depth16", "caps the depth"),
         ("dqn:", "write dqn:<run dir>"),
         ("dqn@seed0", "write dqn:<run dir>"),
+        ("ppo:", "write ppo:<run dir>"),
+        ("ppo-sample: ", "write ppo:<run dir>"),
+        ("ppo@seed0", "write ppo:<run dir>"),
+        ("ppo-bogus", "unknown ppo mode 'bogus'"),
+        ("ppo-greedy-sample", "unknown ppo mode 'greedy-sample'"),
+        ("ppox", "unknown agent"),
     ],
 )
 def test_bad_names(name, message):
@@ -156,6 +163,8 @@ def test_agent_configs_are_complete_json():
     assert set(agent_config(parse_agent("heuristic"))["weights"]) >= {"territory", "contempt"}
     with pytest.raises(FileNotFoundError, match="no DQN checkpoint"):
         agent_config(parse_agent("dqn:/nonexistent/run"))
+    with pytest.raises(FileNotFoundError, match="no PPO checkpoint"):
+        agent_config(parse_agent("ppo-sample:/nonexistent/run"))
 
 
 def test_agents_registry():
@@ -171,6 +180,8 @@ def test_agents_registry():
         make_agent("alphasnake", CONFIG)
     with pytest.raises(FileNotFoundError, match="no DQN checkpoint"):
         make_agent("dqn:/nonexistent/run", CONFIG)
+    with pytest.raises(FileNotFoundError, match="no PPO checkpoint"):
+        make_agent("ppo:/nonexistent/run", CONFIG)
     with pytest.raises(ValueError, match="at most 4 snakes"):
         check_game(parse_agent("mcts-8"), GameConfig(num_snakes=5))
 
@@ -189,6 +200,80 @@ def test_dqn_agent_plays_from_observations():
     assert len(cfg["params_sha256"]) == 16 and cfg["network"]
     r = record_games(CONFIG, ["dqn", "random_legal"], jax.random.key(0), 2, max_turns=6)
     assert [g["seats"][0] for g in r["games"]] == ["dqn", "random_legal"]
+
+
+def test_ppo_names():
+    default = agents_mod.PPO_DEFAULT_MODE
+    (other,) = set(agents_mod.PPO_MODES) - {default}
+    checkpoint = agents_mod.DEFAULT_PPO_CHECKPOINT.resolve()
+    spec = parse_agent("ppo")
+    assert (spec.name, spec.kind, spec.checkpoint) == ("ppo", "ppo", checkpoint)
+    assert spec.greedy == (default == "greedy")
+    # The default mode and the default checkpoint are left out of the canonical name.
+    assert parse_agent(f"ppo-{default}") == spec
+    assert parse_agent(f"ppo-{default}:{checkpoint}") == spec
+    assert parse_agent(f" ppo:{checkpoint} ") == spec
+    explicit = parse_agent(f"ppo-{other}")
+    assert explicit.name == f"ppo-{other}" and explicit.greedy == (other == "greedy")
+    assert parse_agent(f"ppo-{other}:{checkpoint}") == explicit
+    run = parse_agent(f"ppo-{other}:/nonexistent/run")
+    assert run.name == f"ppo-{other}:/nonexistent/run"
+    assert run.checkpoint == Path("/nonexistent/run")
+    assert parse_agent("ppo:/nonexistent/run").name == "ppo:/nonexistent/run"
+    for s in (spec, explicit, run):
+        assert parse_agent(s.name) == s  # canonical names read back as the same agent
+
+
+def _tiny_ppo_checkpoint(run_dir: Path) -> Path:
+    ppo = agents_mod.load_ppo_module()
+    cfg = ppo.PPOConfig(conv_channels=(4,), conv_strides=(2,), hidden=16)
+    run_dir.mkdir()
+    ppo.save_config(str(run_dir), cfg)
+    ppo.save_checkpoint(str(run_dir), ppo.init_network(jax.random.key(0), cfg))
+    return run_dir
+
+
+def test_ppo_agents_play_greedy_or_sampled(tmp_path):
+    pytest.importorskip("optax")
+    run = _tiny_ppo_checkpoint(tmp_path / "ppo-run")
+    greedy = make_agent(f"ppo-greedy:{run}", CONFIG)
+    sample = make_agent(f"ppo-sample:{run}", CONFIG)
+    default = greedy if agents_mod.PPO_DEFAULT_MODE == "greedy" else sample
+    assert make_agent(f"ppo:{run}", CONFIG) is default
+    assert default.name == f"ppo:{run}"
+    assert greedy.needs_obs and sample.needs_obs and greedy.policy is not sample.policy
+    assert "greedy self-play PPO" in greedy.description
+    assert "sampled self-play PPO" in sample.description
+    cfg_g, cfg_s = agent_config(parse_agent(greedy.name)), agent_config(parse_agent(sample.name))
+    assert cfg_g["type"] == "ppo" and cfg_g["greedy"] and not cfg_s["greedy"]
+    assert cfg_g["params_sha256"] == cfg_s["params_sha256"] and cfg_g["network"]["hidden"] == 16
+    with pytest.raises(ValueError, match="trained on 11x11"):
+        make_agent(f"ppo-sample:{run}", GameConfig(width=7, height=7))
+
+    # Sampled play follows the match's keys; greedy play doesn't depend on them.
+    env = agents_mod.make_env(CONFIG, True)
+    state, ts = env.reset(jax.random.key(0))
+    keys = jax.random.split(jax.random.key(1), 32)
+    moves = {
+        name: jax.vmap(agent.policy, in_axes=(0, None, None))(keys, state, ts)
+        for name, agent in (("greedy", greedy), ("sample", sample))
+    }
+    assert len({tuple(m) for m in moves["greedy"].tolist()}) == 1
+    assert len({tuple(m) for m in moves["sample"].tolist()}) > 1
+    for m in moves.values():
+        assert bool(jax.numpy.take_along_axis(ts.action_mask[None], m[..., None], -1).all())
+
+    r = record_games(CONFIG, [sample, "random_legal"], jax.random.key(0), 2, max_turns=6)
+    assert r["agents"] == [sample.name, "random_legal"]
+
+
+def test_ppo_without_its_default_checkpoint(tmp_path, monkeypatch):
+    script, module, _ = agents_mod.BASELINES["ppo"]
+    monkeypatch.setitem(agents_mod.BASELINES, "ppo", (script, module, tmp_path / "missing"))
+    spec = parse_agent("ppo")
+    assert spec.name == "ppo" and spec.checkpoint == (tmp_path / "missing").resolve()
+    with pytest.raises(FileNotFoundError, match="no PPO checkpoint in .*missing"):
+        make_agent("ppo", GameConfig(max_turns=7))  # a config no other test caches
 
 
 def test_mcts_agents():
