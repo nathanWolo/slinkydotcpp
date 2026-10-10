@@ -106,11 +106,12 @@ a duel; ``None`` under DUCT and RM, which are unchanged), set when it is
 expanded: uniform over the legal moves (``prior="uniform"``) or a softmax of
 the evaluator's logits over them (``prior="network"``; logits are clipped to
 ``+-1e30`` first, so a row whose legal logits are all ``-inf`` is uniform, not
-NaN). A forced row (dead or starving snake) is 1 on its move. The evaluator is passed to
-:func:`search` as ``evaluator(state) -> (value f32[N], logits f32[N, 4])``
-and called on ONE unbatched state, at the root and once per simulation on
-its new node; a ``vmap`` of the search over B games makes each call one
-network evaluation over B states (2B observations in a duel). It is a
+NaN). A forced row (dead or starving snake) is 1 on its move. The evaluator
+is passed to :func:`search` as
+``evaluator(state) -> (value f32[N], logits f32[N, 4])`` and called on ONE
+unbatched state, at the root and once per simulation on its new node; a
+``vmap`` of the search over B games makes each call one network evaluation
+over B states (2B observations in a duel). It is a
 closure, so the network's parameters can be traced arguments of the jitted
 self-play step, and new parameters need no recompilation. They cannot live
 in the hashable ``MCTSConfig``, which is also why :func:`mcts` refuses
