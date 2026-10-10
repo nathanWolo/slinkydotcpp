@@ -74,11 +74,18 @@ baselines, one process on cores 0-3, PPO's network:
 * ``num_simulations=64``. The network is about 95% of the cost of a search
   (85-89 us per simulation against DUCT's 4.9; ``slinky.mcts``), so the budget
   per move is the main price of self-play. The design study recommended 64;
-  fewer gives noisier targets (visit counts are coarse below about 16).
-  Self-play alone runs at about 390 env steps/s, and 310-330 with the default
+  fewer is faster but gives coarser visit-count targets.
+  Self-play alone runs at about 390 env steps/s, and 315-345 with the default
   learning (16 gradient steps of 1024 samples per 2048 env steps, about 20% of
-  the time). The teacher phase at 256 simulations runs at about 430 env steps/s
-  with learning (510-530 without). The SMOKE line below has a short run.
+  the time). The teacher phase at 256 simulations runs at 380-430 env steps/s
+  with learning (510-530 without). A 14-minute pilot with defaults otherwise
+  (65,536 teacher env steps, then 131,072 network env steps, a 262,144-position
+  buffer, 828 s with the evaluation) took the policy loss from 0.84 to 0.78
+  and the value loss from 0.97 to 0.80 in the teacher phase; the network
+  phase's broader targets (entropy 0.65 to 0.73) held them at 0.80 and 0.84.
+  The raw network then scored 0.266 against the heuristic (PPO's 5.2M-step
+  baseline: 0.296) and ``az-64`` 0.391, 0.328 against PPO and 0.305 against
+  ``mcts-64`` (64 games each).
 * ``c_puct=0.5``, ``fpu_reduction=0.2``: ``slinky.mcts``'s PUCT defaults. The
   search maps values to ``[0, 1]``, so 0.5 here is AlphaZero's 1.0 on its
   ``[-1, 1]`` scale (it used 1.25). Untuned with network priors.
@@ -99,10 +106,13 @@ baselines, one process on cores 0-3, PPO's network:
 * ``lr=1e-3`` decaying to 1e-4, as PPO's 1e-3; ``weight_decay=1e-4`` (AdamW,
   scaled by the learning rate: mild); ``max_grad_norm=1``; ``value_coef=1``
   (AlphaZero's equal weights).
-* ``total_env_steps=4_194_304``: about 3.7 hours at the default settings, the
-  scale of the PPO baseline's 5.2M env steps.
-* ``eval_games=128`` per opponent and mode every 524,288 env steps: a search
-  evaluation costs about a 64-simulation search per move, ~SMOKE_EVAL.
+* ``total_env_steps=4_194_304``: about 4 hours with the evaluations at the
+  default settings, the scale of the PPO baseline's 5.2M env steps.
+* ``eval_games=128`` per opponent and mode every 1,048,576 env steps (about
+  55 minutes): in the pilot, 64 games of ``az-64`` took 18 s against
+  ``random_legal``, 59 against the heuristic, 66 against PPO and 80 against
+  ``mcts-64`` (the raw network 3-13 s), so a default evaluation takes about
+  8 minutes, 13% of the run.
 
 On a GPU the same code runs unchanged; raise ``num_envs`` (the network's batch
 is ``2 * num_envs`` observations per simulation) and keep ``replay_ratio``.
@@ -215,7 +225,7 @@ class AZConfig:
     # Logging, evaluation and checkpoints.
     seed: int = 0
     log_every: int = 32_768  # env steps per jitted chunk (one log line), whole iterations
-    eval_every: int = 524_288  # env steps between evaluations (and checkpoints)
+    eval_every: int = 1_048_576  # env steps between evaluations (and checkpoints)
     eval_games: int = 128  # per opponent and mode
     eval_opponents: tuple[str, ...] = ("random_legal", "heuristic", "ppo", "mcts-64")
     eval_modes: tuple[str, ...] = EVAL_MODES
