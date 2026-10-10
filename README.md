@@ -115,6 +115,31 @@ See [`baselines/README.md`](baselines/README.md) for results.
   it scores 0.993 ± 0.002 against `random_legal` (99.2% wins over 5,000
   games).
 
+## Watching games
+
+`slinky.replay` records games between named agents and writes a
+self-contained HTML viewer (no server; open the file in a browser):
+
+```bash
+python -m slinky.replay --a heuristic --b dqn --games 8 --html replays/heuristic-vs-dqn.html
+python -m slinky.replay --a mcts-256 --b heuristic --games 4 --out replays/mcts.json   # JSON only
+python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --html replays/four.html   # 4 snakes
+```
+
+- **Agents** come from the registry in `slinky.agents`: `random_legal`,
+  `random`, `heuristic`, `dqn` (the checkpoint in `baselines/checkpoints/`)
+  or `dqn:<run dir>`, and `mcts-<simulations>[:field=value...]`, e.g.
+  `mcts-128:exploration=1.0`.
+- **The viewer** shows the board (API coordinates, `(0, 0)` bottom-left),
+  each snake's length and health, eliminations with the engine's cause, a
+  health-by-turn strip that doubles as the scrubber, the match score and the
+  game list. Keys: Space play/pause, ←/→ step, Home/End, `[`/`]` previous or
+  next game. Another replay JSON can be opened from the page or dropped on it.
+- **The format** (`slinky-replay/1`) is documented in `src/slinky/replay.py`:
+  one frame per turn with head-first bodies, health, food and hazards, about
+  250 bytes per turn in a duel. `replay.game_from_states` turns a sequence of
+  states from your own loop into a game record.
+
 ## How it works
 
 Each snake is stored as a **countdown grid**. For snake `i`,
