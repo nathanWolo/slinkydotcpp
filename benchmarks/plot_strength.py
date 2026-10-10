@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 SERIES_STYLE = {  # opponent -> (label, colour)
     "random_legal": ("vs random_legal", "#8a8f98"),
     "dqn": ("vs DQN (self-play)", "#2563c9"),
+    "ppo": ("vs PPO (self-play)", "#15924f"),
     "heuristic": ("vs heuristic", "#d4580f"),
 }
 W, H = 760, 430
@@ -128,7 +129,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--results", type=Path, default=HERE / "results" / "strength.jsonl")
     p.add_argument("--out", type=Path, default=HERE / "results" / "strength.svg")
-    p.add_argument("--opponents", default="random_legal,dqn,heuristic")
+    p.add_argument("--opponents", default="random_legal,dqn,ppo,heuristic")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
     series = load(args.results, args.opponents.split(","), args.seed)
