@@ -158,13 +158,14 @@ def test_finished_game_returns_valid_moves():
     assert acts.shape == (2,) and np.all(np.asarray(acts) >= 0)
 
 
-def test_truncation_inside_the_tree_is_a_draw():
+@pytest.mark.parametrize("spawn_food", [True, False])
+def test_truncation_inside_the_tree_is_a_draw(spawn_food):
     # One turn before max_turns every child ends the game: surviving is worth exactly 0.
     game = GameConfig(max_turns=11)
     hero = [(0, 5), (1, 5), (2, 5)]
     other = [(8, 8), (8, 7), (8, 6)]
     state = board([hero, other], game, turn=10)
-    out = run(state, M.MCTSConfig(num_simulations=64), game)
+    out = run(state, M.MCTSConfig(num_simulations=64, spawn_food=spawn_food), game)
     # The hero's LEFT runs into the wall (masked, never visited); its other moves survive.
     assert np.all(out.visits[:, 0, LEFT] == 0)
     visited = out.visits > 0
@@ -202,12 +203,12 @@ def test_too_many_snakes():
 
 
 def test_variants_run():
-    """RM, UCB1-Tuned, sampled final moves and rollouts (random and heuristic) all run."""
+    """RM, UCB1-Tuned, sampled final moves, rollouts and the spawn-free model all run."""
     state = jax.tree.map(lambda x: x[0], rollout_states(DUEL, batch=1))
     for config in [
         M.MCTSConfig(num_simulations=32, ucb1_tuned=True, final="sample"),
         M.MCTSConfig(num_simulations=32, selection="rm", final="sample"),
-        M.MCTSConfig(num_simulations=16, rollout_steps=10, leaf="none"),
+        M.MCTSConfig(num_simulations=16, rollout_steps=10, leaf="none", spawn_food=False),
         M.MCTSConfig(num_simulations=8, rollout_steps=2, rollout_policy="heuristic"),
     ]:
         out = run(state, config, n_keys=2)
