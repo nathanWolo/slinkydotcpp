@@ -140,7 +140,10 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
   Rainbow extensions on the same self-play setup, with a distributional head
   on the game's exact return range [−1, 1]. At the DQN's budget it ties the
   DQN head to head (0.504 ± 0.031). It scores 0.983 against `random_legal` and
-  0.084 against the heuristic, against the DQN's 0.992 and 0.047.
+  0.084 against the heuristic, against the DQN's 0.992 and 0.047. PPO, trained
+  on 4 times the env steps, beats it 0.753 ± 0.027 (and the DQN 0.873 ±
+  0.021 in the same harness); see
+  [the three compared](baselines/README.md#the-three-compared).
 - **Heuristic** (`slinky.heuristic`): a hand-written snake.
   - It uses time-aware flood fills, Voronoi territory and food control.
   - It picks moves with a one-ply simultaneous-move search over the exact

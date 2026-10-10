@@ -145,7 +145,7 @@ th:first-child, td:first-child { text-align: left; }
   </header>
   <p class="error" id="error" hidden></p>
   <section class="runs" id="runs" aria-label="Runs (select to plot)"></section>
-  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence.</p>
+  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence; PPO's value loss and policy entropy have their own charts.</p>
   <h2>Training curves</h2>
   <section class="charts" id="charts"></section>
   <h2>How snakes die in self-play</h2>
@@ -230,11 +230,10 @@ th:first-child, td:first-child { text-align: left; }
       saved.filter((id) => ids.has(id)).forEach(select);
       return;
     }
-    // Default: live runs (else the latest run), plus the committed DQN as a reference.
+    // Default: live runs (else the latest run), plus the committed baselines as references.
     const live = state.runs.filter((r) => r.live);
     (live.length ? live : state.runs.slice(0, 1)).forEach((r) => select(r.id));
-    const ref = state.runs.find((r) => r.id.startsWith("baselines/checkpoints/") && r.algorithm === "dqn");
-    if (ref) select(ref.id);
+    state.runs.filter((r) => r.id.startsWith("baselines/checkpoints/")).forEach((r) => select(r.id));
     saveSelection();
   }
   const color = (id) => css(SLOTS[state.colors.get(id)]);
@@ -354,14 +353,34 @@ th:first-child, td:first-child { text-align: left; }
   }
 
   // --- Charts -------------------------------------------------------------------------
+  // Greedy-policy evals by opponent. DQN and Rainbow evaluate only against
+  // random_legal and log no opponent or mode; PPO also plays the heuristic and the
+  // DQN, greedy and sampled.
+  const isPPO = (d) => d.algorithm === "ppo";
+  const evalChart = (opponent, sub) => {
+    const match = (r) => (r.opponent ?? "random_legal") === opponent && (r.mode ?? "greedy") === "greedy";
+    return {
+      id: `eval-${opponent}`, title: `Score vs ${opponent}`, sub, source: "evals",
+      y: (r) => (match(r) ? r.score : null),
+      band: (r) => [r.score - r.score_ci95, r.score + r.score_ci95],
+      fmt: (v) => v.toFixed(3), markers: true, yMax: 1,
+      // Every run evaluates against random_legal (a new run shows an empty chart until
+      // its first eval); only runs that play this opponent join the others.
+      applies: (d) => opponent === "random_legal" || d.evals.some(match),
+    };
+  };
   const CHARTS = [
-    { id: "eval", title: "Score vs random_legal", sub: "Greedy policy; win = 1, draw = ½. Band: 95% confidence interval.",
-      source: "evals", y: (r) => r.score, band: (r) => [r.score - r.score_ci95, r.score + r.score_ci95],
-      fmt: (v) => v.toFixed(3), markers: true, yMax: 1 },
-    { id: "loss", title: "Training loss", sub: "Mean over the updates in each chunk (log scale).",
-      source: "train", y: (r) => r.loss, log: true, fmt: (v) => v.toPrecision(3) },
-    { id: "q", title: "Mean Q of the moves taken", sub: "Expected return; an unbiased value in this symmetric zero-sum game is near 0.",
-      source: "train", y: (r) => r.mean_q, fmt: (v) => (v >= 0 ? "+" : "") + v.toFixed(3), zero: true },
+    evalChart("random_legal", "Greedy policy; win = 1, draw = ½. Band: 95% confidence interval."),
+    evalChart("heuristic", "PPO runs; greedy policy. Band: 95% confidence interval."),
+    evalChart("dqn", "PPO runs, against the committed DQN; greedy policy. Band: 95% confidence interval."),
+    { id: "loss", title: "Training loss", sub: "DQN and Rainbow: mean over the updates in each chunk (log scale).",
+      source: "train", y: (r) => r.loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => !isPPO(d) },
+    { id: "vloss", title: "Value loss", sub: "PPO runs: the critic's squared error, mean over each chunk (log scale).",
+      source: "train", y: (r) => r.v_loss, log: true, fmt: (v) => v.toPrecision(3), applies: isPPO },
+    { id: "q", title: "Value estimate", sub: "Mean Q of the moves taken (DQN, Rainbow) or mean critic value (PPO). An unbiased value in this symmetric zero-sum game is near 0.",
+      source: "train", y: (r) => r.mean_q ?? r.value_mean, fmt: (v) => (v >= 0 ? "+" : "") + v.toFixed(3), zero: true },
+    { id: "entropy", title: "Policy entropy", sub: "PPO runs: mean entropy of the move distribution, in nats (ln 4 ≈ 1.386 is uniform).",
+      source: "train", y: (r) => r.entropy, fmt: (v) => v.toFixed(3), zeroBase: true, applies: isPPO },
     { id: "len", title: "Self-play game length", sub: "Mean turns of the games that finished in each chunk.",
       source: "train", y: (r) => r.mean_game_len, fmt: (v) => v.toFixed(0), zeroBase: true },
     { id: "draws", title: "Self-play draw rate", sub: "Share of finished games that were draws (both snakes out on the same turn).",
@@ -369,7 +388,7 @@ th:first-child, td:first-child { text-align: left; }
     { id: "speed", title: "Throughput", sub: "Env steps per second (one game advancing one turn), evaluations excluded.",
       source: "train", y: (r) => r.env_steps_per_s, fmt: (v) => compact(Math.round(v)), zeroBase: true },
     { id: "eps", title: "Exploration rate ε", sub: "Epsilon-greedy runs.", source: "train", y: (r) => r.eps,
-      fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => d.config.noisy !== true },
+      fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => "eps_start" in d.config && d.config.noisy !== true },
     { id: "sigma", title: "Noise scale σ", sub: "Noisy-net runs: mean |σ| of the noisy hidden layer.",
       source: "train", y: (r) => r.noise_sigma, fmt: (v) => v.toFixed(4), zeroBase: true, applies: (d) => d.config.noisy === true },
   ];

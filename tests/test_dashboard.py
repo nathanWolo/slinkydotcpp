@@ -49,6 +49,17 @@ def runs(tmp_path):
     dqn = {"total_env_steps": 600, "log_every": 300, "num_envs": 4}  # no "algorithm": dqn.py
     evals = json.dumps({"type": "eval", "env_steps": 600, "score": 0.9, "score_ci95": 0.01})
     write_run(tmp_path, "group/dqn-b", dqn, [train(300), train(600, loss=float("nan")), evals])
+    ppo = {"total_env_steps": 40_000, "log_every": 32_768, "num_envs": 64, "num_steps": 128}
+    ppo_evals = [
+        {"opponent": "random_legal", "mode": "greedy", "score": 0.99},
+        {"opponent": "random_legal", "mode": "sample", "score": 0.98},
+        {"opponent": "heuristic", "mode": "greedy", "score": 0.3},
+    ]
+    ppo_lines = [
+        json.dumps({"type": "eval", "env_steps": 32_768, "score_ci95": 0.01, **e})
+        for e in ppo_evals
+    ]
+    write_run(tmp_path, "ppo-c", {**ppo, "gae_lambda": 0.95}, [train(32_768), *ppo_lines])
     (tmp_path / "not-a-run").mkdir()
     return tmp_path
 
@@ -59,12 +70,16 @@ def test_total_steps_rounds_up_to_whole_chunks():
     assert dash.total_steps(
         {"total_env_steps": 1_280_000, "log_every": 16_000, "num_envs": 32}
     ) == (1_280_000)
+    # PPO: chunks of whole iterations (64 envs x 128 steps = 8192 env steps).
+    ppo = {"total_env_steps": 40_000, "log_every": 32_768, "num_envs": 64, "num_steps": 128}
+    assert dash.total_steps(ppo) == 65_536
+    assert dash.total_steps({**ppo, "log_every": 1000}) == 40_960
     assert dash.total_steps({}) is None
 
 
 def test_find_runs_and_summaries(runs):
     found = dash.find_runs([runs])
-    assert sorted(p.name for p in found.values()) == ["dqn-b", "rainbow-a"]
+    assert sorted(p.name for p in found.values()) == ["dqn-b", "ppo-c", "rainbow-a"]
     by_name = {p.name: dash.run_summary(i, p) for i, p in found.items()}
     a, b = by_name["rainbow-a"], by_name["dqn-b"]
     assert a["algorithm"] == "rainbow" and b["algorithm"] == "dqn"
@@ -72,6 +87,10 @@ def test_find_runs_and_summaries(runs):
     assert a["env_steps"] == 600 and a["total_steps"] == 1200 and not a["finished"]
     assert a["live"] and a["last_eval"] is None
     assert b["finished"] and b["last_eval"]["score"] == 0.9
+    # PPO: recognised by its config; the run card shows the greedy eval vs random_legal.
+    c = by_name["ppo-c"]
+    assert c["algorithm"] == "ppo" and c["total_steps"] == 65_536
+    assert c["last_eval"]["score"] == 0.99
 
     # The version changes with every append (the page refetches on it).
     run = found[a["id"]]
@@ -109,7 +128,7 @@ def test_http_api(runs):
         assert status == 200 and kind.startswith("text/html") and b"Training runs" in body
         _, _, body = get("/api/runs")
         listed = {r["name"]: r for r in json.loads(body)}
-        assert set(listed) == {"rainbow-a", "dqn-b"}
+        assert set(listed) == {"rainbow-a", "dqn-b", "ppo-c"}
         run_id = listed["dqn-b"]["id"]
         _, kind, body = get(f"/api/metrics?run={urllib.request.quote(run_id)}")
         data = json.loads(body)  # strict JSON: the NaN loss is sent as null

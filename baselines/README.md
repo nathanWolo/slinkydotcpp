@@ -7,13 +7,52 @@ standard rules), trained by self-play on slinky.
 |---|---|---|---|---|---|
 | Double DQN | `dqn.py` | 31 min, 1.28M env steps | 0.998 | 0.053 | `checkpoints/dqn-duel-seed0/` |
 | PPO | `ppo.py` | 67 min, 5.24M env steps | 0.998 | 0.296 | `checkpoints/ppo-duel-seed0/` |
+| Rainbow DQN | `rainbow.py` | 81 min, 1.28M env steps | 0.983 | 0.084 | `checkpoints/rainbow-duel-seed0/` |
 
-- **Hardware:** both trained on a 4-core cloud CPU, with no GPU.
+- **Hardware:** the DQN and PPO trained on a 4-core cloud CPU (PPO pinned to
+  3 cores), Rainbow on a thermally throttled laptop CPU; no GPU.
 - **Head-to-head:** PPO beats the DQN 0.868 over 1,024 games (888 / 2 / 134).
-- **Sources:** the scores are from the strength benchmark
-  ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games each). In
-  its own 5,000-game evaluation below, the DQN scores 0.993 against
+  See [the three compared](#the-three-compared) for all the pairings.
+- **Sources:** the DQN and PPO scores are from the strength benchmark
+  ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games each).
+  Rainbow is not in that benchmark; its scores are from its own evaluation
+  (5,000 games against `random_legal`, 1,000 against the heuristic). In its
+  own 5,000-game evaluation below, the DQN scores 0.993 against
   `random_legal`.
+
+### The three compared
+
+The three committed checkpoints in one harness (`slinky.evaluate.play_match`:
+seats alternate, greedy play, the same seed 2026 for every match; score is
+win + ½ draw with its 95% interval):
+
+| match | games | W / D / L | score |
+|---|--:|---|---|
+| PPO vs DQN | 1,000 | 872 / 1 / 127 | 0.873 ± 0.021 |
+| PPO vs Rainbow | 1,000 | 751 / 5 / 244 | 0.753 ± 0.027 |
+| Rainbow vs DQN | 1,000 | 499 / 10 / 491 | 0.504 ± 0.031 |
+
+| agent | vs `random_legal` (5,000 games) | vs heuristic (1,000 games) |
+|---|---|---|
+| DQN | 0.992 ± 0.002 (4951 / 16 / 33) | 0.047 ± 0.013 (45 / 4 / 951) |
+| PPO | **0.996 ± 0.002** (4967 / 22 / 11) | **0.286 ± 0.025** (196 / 181 / 623) |
+| Rainbow | 0.983 ± 0.003 (4896 / 33 / 71) | 0.084 ± 0.017 (78 / 12 / 910) |
+
+- **PPO is the strongest of the three** on every count. It beats both DQNs
+  head to head and scores 3–6 times as much as either against the heuristic.
+  These agree with the strength benchmark (PPO vs DQN 0.868, PPO vs heuristic
+  0.296).
+- **Rainbow and the DQN are level** head to head, but Rainbow holds up
+  better against PPO: 0.247 against PPO's 0.753, where the DQN gets 0.127.
+  Rainbow also scores more against the heuristic (0.084 against 0.047).
+- **The budgets differ.** PPO trained on 4.1 times as many env steps (5.24M
+  against 1.28M). Its env steps are cheaper, so the wall time was similar.
+  At about the same env steps, PPO's training evaluations (256 games, below)
+  were already ahead: 0.615 against the DQN and 0.119 against the heuristic
+  at 1.05M steps, where Rainbow and the DQN at 1.28M score 0.504 against each
+  other and 0.084 and 0.047 against the heuristic. An equal-budget comparison
+  would need longer DQN and Rainbow runs.
+- **One seed each**, so the run-to-run spread of each algorithm is unknown.
 
 ```bash
 uv pip install -e ".[rl]"            # adds optax
@@ -42,16 +81,22 @@ python baselines/dashboard.py        # then open http://127.0.0.1:8050
 ```
 
 `dashboard.py` serves a page that lists every run under `runs/` and
-`baselines/checkpoints/` (DQN and Rainbow alike) and re-reads its
+`baselines/checkpoints/` (DQN, PPO and Rainbow alike) and re-reads its
 `metrics.jsonl` every 5 seconds, so a run in progress updates as it trains.
 
 - **Run cards** show live / finished / stopped, progress and an ETA, and the
-  latest score against `random_legal`. Click a card to add the run to the
-  charts or take it off (up to 8, each keeping its colour).
-- **Charts** (over env steps, one shared axis): score against `random_legal`
-  with its 95% interval, training loss (log scale; DQN's Huber loss and
-  Rainbow's KL are not comparable), mean Q of the moves taken, self-play game
-  length and draw rate, throughput, and ε or the noisy-net σ.
+  latest greedy score against `random_legal`. Click a card to add the run to
+  the charts or take it off (up to 8, each keeping its colour). Live runs and
+  the committed checkpoints are shown at first.
+- **Charts** (over env steps, one shared axis):
+  - greedy score against each evaluation opponent, with its 95% interval:
+    `random_legal` for every run, plus the heuristic and the DQN for PPO;
+  - training loss (log scale; DQN's Huber loss and Rainbow's KL are not
+    comparable), or PPO's value loss;
+  - the value estimate: mean Q of the moves taken, or PPO's mean critic value;
+  - PPO's policy entropy;
+  - self-play game length and draw rate, and throughput;
+  - ε or the noisy-net σ.
 - **Death causes**: the share of self-play eliminations by cause, per run.
 - Hover (or focus a chart and use ←/→) for exact values; every chart also has
   a table view.
@@ -340,6 +385,7 @@ checkpoints):
 | vs `random_legal` | 5,000 | 0.983 ± 0.003 (4896 / 33 / 71) | **0.992 ± 0.002** (4951 / 16 / 33) |
 | vs heuristic | 1,000 | **0.084 ± 0.017** (78 / 12 / 910) | 0.047 ± 0.013 (45 / 4 / 951) |
 | Rainbow vs DQN | 1,000 | 0.504 ± 0.031 (499 / 10 / 491) | |
+| vs PPO | 1,000 | **0.247 ± 0.027** (244 / 5 / 751) | 0.127 ± 0.021 (127 / 1 / 872) |
 
 At the same budget, the two are level head to head. Rainbow is slightly
 weaker against the random snake but scores about 1.8× as much against the

@@ -1,4 +1,4 @@
-"""A live training dashboard for the baselines (DQN, Rainbow) in the browser.
+"""A live training dashboard for the baselines (DQN, PPO, Rainbow) in the browser.
 
 ::
 
@@ -79,14 +79,38 @@ def read_records(run: Path) -> list[dict[str, Any]]:
     return records
 
 
+def algorithm(config: dict[str, Any]) -> str:
+    # dqn.py's and ppo.py's config.json have no "algorithm" key.
+    if not config:
+        return "unknown"
+    return str(config.get("algorithm") or ("ppo" if "gae_lambda" in config else "dqn"))
+
+
 def total_steps(config: dict[str, Any]) -> int | None:
-    """The env steps a run will take: ``total_env_steps`` rounded up to whole log chunks."""
+    """The env steps a run will take: ``total_env_steps`` rounded up to whole log chunks.
+
+    A chunk is whole env-step batches (``num_envs`` each; ``num_envs * num_steps``
+    for PPO's iterations), as many as fit in ``log_every`` and at least one.
+    """
     try:
         total, every, envs = (int(config[k]) for k in ("total_env_steps", "log_every", "num_envs"))
+        step = max(envs, 1) * max(int(config.get("num_steps", 1)), 1)
     except (KeyError, TypeError, ValueError):
         return None
-    chunk = max(every // max(envs, 1), 1) * max(envs, 1)
+    chunk = max(every // step, 1) * step
     return -(-total // chunk) * chunk
+
+
+def is_headline_eval(record: dict[str, Any]) -> bool:
+    """An eval of the greedy policy against ``random_legal``, which every baseline logs.
+
+    PPO also evaluates against other opponents and with a sampled policy; DQN and
+    Rainbow records have neither field.
+    """
+    return (
+        record.get("opponent", "random_legal") == "random_legal"
+        and record.get("mode", "greedy") == "greedy"
+    )
 
 
 def read_run(run: Path) -> tuple[list[dict[str, Any]], float, str]:
@@ -114,6 +138,7 @@ def run_summary(run_id: str, run: Path, read: tuple | None = None) -> dict[str, 
     records, mtime, version = read_run(run) if read is None else read
     train = [r for r in records if r.get("type") == "train"]
     evals = [r for r in records if r.get("type") == "eval"]
+    headline = [r for r in evals if is_headline_eval(r)]
     total = total_steps(config)
     steps = (_number(train[-1].get("env_steps")) or 0) if train else 0
     # Live: written to within LIVE_SECONDS, or within 3 of this run's own chunk + eval
@@ -122,8 +147,7 @@ def run_summary(run_id: str, run: Path, read: tuple | None = None) -> dict[str, 
     return {
         "id": run_id,
         "name": run.name,
-        # dqn.py's config.json predates the "algorithm" key.
-        "algorithm": config.get("algorithm", "dqn" if config else "unknown"),
+        "algorithm": algorithm(config),
         "updated": mtime,
         "version": version,
         "live": time.time() - mtime < max(LIVE_SECONDS, 3 * cadence),
@@ -131,7 +155,7 @@ def run_summary(run_id: str, run: Path, read: tuple | None = None) -> dict[str, 
         "env_steps": steps,
         "total_steps": total,
         "last_train": train[-1] if train else None,
-        "last_eval": evals[-1] if evals else None,
+        "last_eval": headline[-1] if headline else None,
     }
 
 
