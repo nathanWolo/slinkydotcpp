@@ -52,9 +52,10 @@ matchup that neither has finished yet).
 bits of ``sha256("<a name>\\0<b name>")``. Game ``g`` of a matchup is game ``g`` of
 ``run_match`` with that key: it depends only on the seed, the two canonical names and
 ``g``, never on ``--slots``, ``--round-games``, ``--workers``, run order or which other
-matchups are in the sweep. So the same command reproduces every game exactly, and a
-larger run with the same seed (and the same config and code) contains the games of a
-smaller one.
+matchups are in the sweep (one exception: with ``--slots 1`` the DQN's Q-values can differ
+in the last bit, which has not been seen to change a move). So the same command reproduces
+every game exactly, and a larger run with the same seed (and the same config and code)
+contains the games of a smaller one.
 
 **Slots, memory and rounds.** ``run_match`` simulates ``S`` game slots at once and
 starts the next game in a slot as soon as its game ends, so no slot waits for the

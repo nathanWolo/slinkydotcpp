@@ -407,7 +407,7 @@ def format_number(v: float | int) -> str:
     """The shortest text that reads back as ``v``, with no exponent (``1e-05``: ``0.00001``)."""
     if isinstance(v, int) and not isinstance(v, bool):
         return str(v)
-    text = format(decimal.Decimal(repr(float(v))), "f")
+    text = format(decimal.Decimal(repr(float(v) + 0.0)), "f")  # + 0.0: -0.0 reads as 0
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 

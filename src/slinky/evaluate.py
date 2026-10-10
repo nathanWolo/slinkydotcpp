@@ -197,8 +197,10 @@ def _compiled_match(
             next_game = next_game + num_ended
 
             finished = next_game - slots  # games started minus the slots' current ones
-            jax.lax.cond(
-                finished // report_every != (finished - num_ended) // report_every,
+            before = finished - num_ended
+            jax.lax.cond(  # every report_every games, and once when the last game ends
+                (finished // report_every != before // report_every)
+                | ((finished >= num_games) & (before < num_games)),
                 lambda: jax.debug.callback(_report, call, finished, it + 1),
                 lambda: None,
             )
@@ -270,7 +272,9 @@ def run_match(
     playing it at once. The result is identical for every ``batch_size`` as
     long as the policies compute each game independently of the others in the
     batch (vmapped, as here) and XLA's arithmetic does not depend on the batch
-    shape (true of the policies in this package on CPU; tested).
+    shape (true of the policies in this package on CPU; tested, except that the
+    DQN's Q-values can differ in the last bit between a batch of one and larger
+    batches, which has not been seen to change a move).
 
     ``progress``, if given, is called as ``progress(games_finished,
     iterations)`` from inside the loop (a host callback, on another thread)
