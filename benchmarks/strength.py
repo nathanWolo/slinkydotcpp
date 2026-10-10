@@ -421,7 +421,7 @@ def tree_bytes_per_game(agent: Agent, game: GameConfig) -> int:
         return 0
     j = 4**n
     node = state_bytes(game) + 4 * j + 4 * n + 1 + 4 * n + 32 * n
-    if cfg.ucb1_tuned:
+    if cfg.ucb1_tuned and cfg.selection == "duct":  # (only DUCT keeps the squared values)
         node += 16 * n
     if cfg.selection == "rm":
         node += 32 * n + 4 * j + 4 * j * n

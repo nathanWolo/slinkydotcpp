@@ -85,10 +85,13 @@ usual UCB1 meaning.
   own moves. Player ``p`` takes ``argmax_a q01 + c_puct * P(a) * sqrt(max(N,
   1)) / (1 + n_a) + tie_noise * U(0, 1)`` over its legal moves, where ``P`` is
   its prior at the node (``Tree.prior``) and ``N`` its visits there. An
-  unvisited move's ``q01`` is the node's own stored value minus
-  ``fpu_reduction`` (first-play urgency, as in Leela Zero and KataGo), mapped
-  to ``[0, 1]``. There is no unvisited-first rule: the prior decides which
-  moves are tried, so a move with a small prior may get no visit at all.
+  unvisited move's ``q01`` is the node's own stored leaf value minus the
+  constant ``fpu_reduction``, mapped to ``[0, 1]``: a simple first-play
+  urgency (Leela Zero and KataGo scale their reduction with the square root of
+  the prior mass already visited, from the node's evaluation or mean value).
+  There is no unvisited-first rule: the prior decides which moves are tried,
+  so a move with a small prior may get no visit at all. ``ucb1_tuned`` is
+  refused here: PUCT has no use for the variance.
 
 **Final move** (``final``). ``"max"`` (default) plays each player's most
 visited move (DUCT, PUCT) or the largest average-strategy move (RM), breaking
@@ -101,8 +104,9 @@ DUCT(max) beat DUCT(mix) 58% in Tron (Lanctot et al. 2013).
 stores its priors (``Tree.prior``, ``float32[M, N, 4]``, 32 bytes per node in
 a duel; ``None`` under DUCT and RM, which are unchanged), set when it is
 expanded: uniform over the legal moves (``prior="uniform"``) or a softmax of
-the evaluator's logits over them (``prior="network"``). A forced row (dead or
-starving snake) is 1 on its move. The evaluator is passed to
+the evaluator's logits over them (``prior="network"``; logits are clipped to
+``+-1e30`` first, so a row whose legal logits are all ``-inf`` is uniform, not
+NaN). A forced row (dead or starving snake) is 1 on its move. The evaluator is passed to
 :func:`search` as ``evaluator(state) -> (value f32[N], logits f32[N, 4])``
 and called on ONE unbatched state, at the root and once per simulation on
 its new node; a ``vmap`` of the search over B games makes each call one
@@ -120,9 +124,13 @@ heuristic leaf, or a network leaf with uniform priors (or under DUCT).
 ``root_noise_frac > 0`` mixes ``Dirichlet(root_dirichlet_alpha)`` noise over
 each player's legal moves into its root priors, for self-play exploration;
 its key is folded from the search key, so everything else in the search
-draws the same randomness as without it. ``SearchOutput.policy`` (each
-player's share of its root visits) is the policy target, and
-``SearchOutput.root_prior`` reports the root priors used (after the noise).
+draws the same randomness as without it. The noise is normalized in log
+space (a softmax of log-Gamma draws): with a small alpha every Gamma draw of a
+row can underflow float32 (at alpha 0.01, 5% of rows then summed to less than
+0.999). ``SearchOutput.policy`` (each player's share of its root visits) is
+the policy target, and ``SearchOutput.root_prior`` reports the root priors
+used, after the noise (a Gumbel-style target, which needs the noise-free
+prior, should take it from the evaluator).
 Self-play should sample its opening moves from ``policy`` outside the
 search: ``final`` is static, and sampling every move is weak (see the
 ``final="max"`` default below).
@@ -257,7 +265,8 @@ class MCTSConfig:
       selection: ``"duct"`` (decoupled UCT), ``"rm"`` (regret matching) or
         ``"puct"`` (decoupled PUCT with priors, for AlphaZero).
       exploration: DUCT's UCB1 constant ``C``, on the ``[0, 1]`` value scale.
-      ucb1_tuned: DUCT uses UCB1-Tuned's variance bound instead of ``C``.
+      ucb1_tuned: DUCT uses UCB1-Tuned's variance bound instead of ``C`` (refused
+        with PUCT; ignored by RM).
       tie_noise: scale of the ``U(0, 1)`` noise added to DUCT and PUCT scores.
       rm_gamma: RM's exploration mix (0.1-0.3 in the literature).
       c_puct: PUCT's prior weight, on the ``[0, 1]`` value scale.
@@ -343,6 +352,8 @@ class MCTSConfig:
                 raise ValueError(f"{name} must be one of {allowed}, got {getattr(self, name)!r}")
         if self.selection != "puct" and (self.prior != "uniform" or self.root_noise_frac > 0):
             raise ValueError("prior and root_noise_frac only apply to selection='puct'")
+        if self.selection == "puct" and self.ucb1_tuned:
+            raise ValueError("ucb1_tuned is DUCT's bound; selection='puct' does not use it")
         if self.leaf == "network" and self.rollout_steps > 0:
             raise ValueError("leaf='network' evaluates the new node itself: no rollout_steps")
 
@@ -365,8 +376,8 @@ class SearchOutput(NamedTuple):
     value: jax.Array  # float32[N]: root value estimate in [-1, 1]
     nodes_used: jax.Array  # int32[]: expanded nodes, root included
     depth: jax.Array  # int32[]: depth of the deepest node
-    # float32[N, 4]: the root priors PUCT used (after root noise); uniform over the
-    # selectable moves under DUCT and RM
+    # float32[N, 4]: the root priors PUCT used (after root noise, so not the network's
+    # own prior); uniform over the selectable moves under DUCT and RM
     root_prior: jax.Array
 
 
@@ -374,8 +385,8 @@ class Tree(NamedTuple):
     """One game's search tree; ``M`` nodes, ``N`` players, ``J = 4**N`` joint actions.
 
     The RM fields are ``None`` unless ``selection="rm"``, ``prior`` is ``None``
-    unless ``selection="puct"``, and ``value_sq`` is ``None`` unless
-    ``ucb1_tuned``.
+    unless ``selection="puct"``, and ``value_sq`` is ``None`` unless DUCT runs
+    with ``ucb1_tuned`` (the only rule that reads it).
     """
 
     state: State  # State stacked to [M, ...]
@@ -527,10 +538,14 @@ def _node_prior(logits: jax.Array | None, legal: jax.Array, config: MCTSConfig) 
     """float32[N, 4] PUCT priors over the ``legal`` moves (exactly 0 elsewhere).
 
     A masked softmax of the evaluator's logits (``prior="network"``) or uniform.
-    A forced row (one legal move) is 1 on that move either way.
+    A forced row (one legal move) is 1 on that move either way. The logits are
+    clipped to ``+-1e30`` first (finite logits are unchanged), so a row whose
+    legal logits are all ``-inf`` (or several ``+inf``) is uniform over them
+    rather than NaN; a NaN logit still propagates.
     """
     if config.prior == "uniform":
         return legal / jnp.sum(legal, axis=-1, keepdims=True)
+    logits = jnp.clip(logits, -1e30, 1e30)
     return jax.nn.softmax(jnp.where(legal, logits, -jnp.inf), axis=-1)
 
 
@@ -541,12 +556,13 @@ def _noisy_root_prior(
 
     A Dirichlet over a subset of the moves is the normalized independent
     ``Gamma(alpha)`` draws of that subset, so the noise is 0 on illegal moves and
-    a forced row keeps its 1.
+    a forced row keeps its 1. It is normalized in log space, a softmax of
+    ``loggamma`` draws (finite for every alpha): below alpha 0.1 all the Gamma
+    draws of a row can underflow float32, and dividing by their sum then left
+    rows that did not sum to 1 (5% at alpha 0.01).
     """
-    g = jnp.where(legal, jax.random.gamma(key, config.root_dirichlet_alpha, prior.shape), 0.0)
-    total = jnp.sum(g, axis=-1, keepdims=True)
-    uniform = legal / jnp.sum(legal, axis=-1, keepdims=True)
-    noise = jnp.where(total > 0, g / jnp.maximum(total, 1e-30), uniform)  # all-underflow guard
+    log_g = jax.random.loggamma(key, config.root_dirichlet_alpha, prior.shape)
+    noise = jax.nn.softmax(jnp.where(legal, log_g, -jnp.inf), axis=-1)
     return (1.0 - config.root_noise_frac) * prior + config.root_noise_frac * noise
 
 
@@ -617,6 +633,11 @@ def _unbatched_barrier_vmap(axis_size: int, in_batched: list, x: State) -> tuple
     x = jax.tree.map(lambda a, b: a[0] if b else a, x, batched)
     x = _unbatched_barrier(x)
     return jax.tree.map(lambda a, b: a[None] if b else a, x, batched), batched
+
+
+def _uses_variance(config: MCTSConfig) -> bool:
+    """Whether the tree keeps ``value_sq``: only DUCT's UCB1-Tuned reads it."""
+    return config.selection == "duct" and config.ucb1_tuned
 
 
 def _rm_sigma(regret: jax.Array, legal: jax.Array) -> jax.Array:
@@ -747,7 +768,7 @@ def _init_tree(
         value=stack(_static_value(state, env, config, net_value)),
         visits=zeros(n, NUM_ACTIONS, dtype=jnp.int32),
         value_sum=zeros(n, NUM_ACTIONS),
-        value_sq=zeros(n, NUM_ACTIONS) if config.ucb1_tuned else None,
+        value_sq=zeros(n, NUM_ACTIONS) if _uses_variance(config) else None,
         regret=zeros(n, NUM_ACTIONS) if rm else None,
         strategy_sum=zeros(n, NUM_ACTIONS) if rm else None,
         joint_visits=zeros(j, dtype=jnp.int32) if rm else None,
@@ -831,7 +852,7 @@ def _backup(
         visits=tree.visits.at[at].add(1, mode="drop"),
         value_sum=tree.value_sum.at[at].add(v, mode="drop"),
     )
-    if config.ucb1_tuned:
+    if _uses_variance(config):
         tree = tree._replace(value_sq=tree.value_sq.at[at].add(v * v, mode="drop"))
     if config.selection == "rm":
         # Q_p(b): the joint table's mean for move b against the others' sampled

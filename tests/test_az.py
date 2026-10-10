@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -225,8 +226,8 @@ def test_loss_on_a_hand_made_batch():
     np.testing.assert_allclose(loss, np.mean(ce) + 0.7 * value_loss, rtol=1e-5)
     h = [-np.sum(t[t > 0] * np.log(t[t > 0])) for t in (target[0, 0], target[1, 0])]
     np.testing.assert_allclose(parts["target_entropy"], np.mean(h), rtol=1e-5)
-    np.testing.assert_allclose(parts["value_mean"], v, rtol=1e-5)
-    np.testing.assert_allclose(parts["value_target_mean"], -0.5 / 3, rtol=1e-5)
+    np.testing.assert_allclose(parts["value_abs_mean"], v, rtol=1e-5)
+    np.testing.assert_allclose(parts["value_target_var"], np.var([1.0, -1.0, -0.5]), rtol=1e-5)
     np.testing.assert_allclose(parts["masked_frac"], 0.5)
     # No samples at all: zero loss and zero gradients, not NaN.
     empty = batch._replace(w_policy=jnp.zeros_like(batch.w_policy), w_value=batch.w_policy & False)
@@ -257,13 +258,20 @@ def test_config_checks_and_schedule():
     assert s.teacher_chunks == 2 and s.teacher_steps == 128
     assert [s.phase(c) for c in range(4)] == ["teacher", "teacher", "network", "network"]
     assert s.total_updates == 4 * 2 * 4
+    # The learning-rate decay counts only the iterations that learn: with 70 positions to
+    # wait for, the first two (32 and 64 positions) take no gradient steps.
+    late = dataclasses.replace(cfg, learning_starts=70)
+    assert az.schedule(late).total_updates == (4 * 2 - 2) * 4
+    assert az.schedule(dataclasses.replace(cfg, learning_starts=0)).total_updates == 4 * 2 * 4
     assert az.agent_search(cfg, 8, final="sample").final == "sample"
     with pytest.raises(ValueError, match="can't be set"):
         az.agent_search(cfg, 8, selection="duct")
-    blend = az.AZConfig(blend_env_steps=100, blend_start=0.8)
+    # 10 env steps per iteration; the network phase starts after 5 iterations (50 steps).
+    blend = az.AZConfig(num_envs=2, num_steps=5, buffer_capacity=100, learning_starts=10,
+                        blend_env_steps=100, blend_start=0.8)  # fmt: skip
     assert az.blend_at(az.AZConfig(), jnp.int32(0), 0) is None
     np.testing.assert_allclose(
-        [az.blend_at(blend, jnp.int32(x), 50) for x in (50, 100, 150, 400)], [0.8, 0.4, 0.0, 0.0]
+        [az.blend_at(blend, jnp.int32(i), 50) for i in (5, 10, 15, 40)], [0.8, 0.4, 0.0, 0.0]
     )
     # The registry keeps its own copy of the settable search fields.
     assert agents_mod._az_search_fields() == az.AGENT_SEARCH_FIELDS
@@ -342,6 +350,7 @@ def test_two_phase_training_run_checkpoints_eval_only_and_registry(tmp_path, cap
     assert sum(r["games"] for r in train) >= 4 and train[-1]["masked_frac"] < 1
     for key in (*az.LOSS_METRICS, "grad_norm"):
         assert all(np.isfinite(r[key]) for r in train), key
+    assert all(r["explained_var"] is None or r["explained_var"] <= 1 for r in train)
     assert [(e["mode"], e["agent"]) for e in evals] == [("search", "az-2"), ("raw", "az-0")]
     assert all(e["num_games"] == 2 and e["env_steps"] == 32 for e in evals)
     for name in ("params.npz", "config.json", "runner.npz", "replay.npz"):
@@ -372,25 +381,41 @@ def test_two_phase_training_run_checkpoints_eval_only_and_registry(tmp_path, cap
     assert info["simulations"] == 4 and info["search"]["leaf"] == "network"
     assert info["network"]["max_turns"] == 6 and info["search"]["root_noise_frac"] == 0.0
 
-    # Without replay.npz a resumed run starts with an empty buffer.
-    os.remove(os.path.join(run_dir, "replay.npz"))
     template = jax.jit(az.init_runner, static_argnums=(0, 1))(
         cfg, az.make_env(cfg), jax.random.key(0)
     )
     runner, samples, restored = az.load_runner(run_dir, template)
-    assert not restored and int(runner.replay.size) == 0 and int(runner.env_steps) == 32
+    assert restored and int(runner.replay.size) == 32 and int(runner.iterations) == 2
     assert samples == train[-1]["agent_samples_total"]
+    # A crash between the two files of a later checkpoint leaves its buffer beside this
+    # runner: the buffer would repeat the games the runner replays, so it is not used.
+    runner_path = os.path.join(run_dir, "runner.npz")
+    shutil.copy(runner_path, tmp_path / "runner.npz")
+    az.save_runner(run_dir, runner._replace(iterations=runner.iterations + 1), samples, True)
+    shutil.copy(tmp_path / "runner.npz", runner_path)
+    runner, _, restored = az.load_runner(run_dir, template)
+    assert not restored and int(runner.replay.size) == 0 and int(runner.iterations) == 2
+    # Without replay.npz a resumed run starts with an empty buffer too.
+    os.remove(os.path.join(run_dir, "replay.npz"))
+    runner, _, restored = az.load_runner(run_dir, template)
+    assert not restored and int(runner.replay.size) == 0 and int(runner.iterations) == 2
 
 
 def test_resume_continues_exactly(tmp_path, monkeypatch):
     def argv(run_dir):
         return _argv(
             run_dir, "--total-env-steps", "48", "--teacher-env-steps", "0", "--checkpoint-every",
-            "16", "--eval-every", "48", "--eval-modes", "raw",
+            "16", "--eval-every", "48", "--eval-modes", "raw", "--learning-starts", "32",
         )  # fmt: skip
 
     full_dir, cut_dir = str(tmp_path / "full"), str(tmp_path / "cut")
-    _, full = az.train(az.parse_args(argv(full_dir))[0])
+    cfg = az.parse_args(argv(full_dir))[0]
+    _, full = az.train(cfg)
+    # The first of the three iterations waits for positions, and the learning rate still
+    # decays to its floor over the gradient steps actually taken.
+    last = [r for r in _records(full_dir) if r["type"] == "train"][-1]
+    assert last["total_updates"] == az.schedule(cfg).total_updates == 2 * 8
+    np.testing.assert_allclose(last["lr"], cfg.lr * cfg.final_lr_frac, rtol=1e-5)
 
     # Interrupt the second run during its third chunk, after two full checkpoints.
     calls = []

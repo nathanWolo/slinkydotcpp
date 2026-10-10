@@ -187,8 +187,17 @@ def test_bad_names(name, message):
 def test_agent_configs_are_complete_json():
     cfg = agent_config(parse_agent("mcts-64-rm"))
     fields = {f.name for f in dataclasses.fields(mcts.MCTSConfig)}
-    assert set(cfg) == fields | {"type"} and cfg["selection"] == "rm"
+    puct_only = set(agents_mod._PUCT_ONLY_FIELDS)
+    assert set(cfg) == fields - puct_only | {"type"} and cfg["selection"] == "rm"
     assert isinstance(cfg["weights"], dict) and json.loads(json.dumps(cfg)) == cfg
+    assert set(agent_config(parse_agent("mcts-64:selection=puct"))) == fields | {"type"}
+    # Without PUCT the config, and so every stored DUCT and RM benchmark result's identity,
+    # is what it was before PUCT's fields existed.
+    assert set(agent_config(parse_agent("mcts-64"))) == {
+        "draw_value", "exploration", "final", "leaf", "max_depth", "num_simulations",
+        "rm_gamma", "rollout_policy", "rollout_steps", "selection", "spawn_food", "tie_noise",
+        "type", "ucb1_tuned", "weights",
+    }  # fmt: skip
     assert agent_config(parse_agent("random")) == {"type": "random"}
     assert set(agent_config(parse_agent("heuristic"))["weights"]) >= {"territory", "contempt"}
     with pytest.raises(FileNotFoundError, match="no DQN checkpoint"):
@@ -378,7 +387,7 @@ def test_az_agents_play_raw_or_with_search(tmp_path):
     with pytest.raises(FileNotFoundError, match="no AlphaZero checkpoint"):
         make_agent("az-4:/nonexistent/run", CONFIG)
     # An AlphaZero run is not a PPO run, and a PPO run is not an AlphaZero run.
-    with pytest.raises(ValueError, match="is a az run; write az-<n>:<run dir>"):
+    with pytest.raises(ValueError, match="is an az run; write az-<n>:<run dir>"):
         check_game(parse_agent(f"ppo:{run}"), CONFIG)
     ppo_run = _tiny_ppo_checkpoint(tmp_path / "ppo-run")
     with pytest.raises(ValueError, match="not an AlphaZero run"):

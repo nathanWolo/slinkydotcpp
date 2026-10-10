@@ -252,11 +252,11 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
     """Everything that defines the agent's play, as plain JSON data.
 
     The full config, not only the non-default settings: every ``MCTSConfig``
-    field, the heuristic weights, a DQN's, PPO's, Rainbow's or AlphaZero's run config
-    (network included), how it picks moves and a hash of its parameters; an ``az``
-    agent also gets its simulations and, if it searches, the resolved search
-    (``search``: every ``MCTSConfig`` field, from its run and name). Benchmarks hash
-    it to tell results of different agents apart.
+    field (but see :func:`_mcts_fields`), the heuristic weights, a DQN's, PPO's,
+    Rainbow's or AlphaZero's run config (network included), how it picks moves and a
+    hash of its parameters; an ``az`` agent also gets its simulations and, if it
+    searches, the resolved search (``search``: the ``MCTSConfig`` fields, from its run
+    and name). Benchmarks hash it to tell results of different agents apart.
     """
     if spec.kind in ("random_legal", "random"):
         config: dict[str, Any] = {"type": spec.kind}
@@ -282,9 +282,21 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
     return json.loads(json.dumps(config, sort_keys=True))  # as it reads back from JSON
 
 
+# ``MCTSConfig`` fields that only PUCT reads. Without PUCT they are always at their
+# defaults (``MCTSConfig`` refuses ``prior`` and the noise, and :func:`_inert_settings` the
+# rest), and leaving them out keeps the identity of every DUCT and RM result stored before
+# they were added (``benchmarks/results/strength.jsonl``), so the benchmark does not re-run
+# them. A field added later should likewise be left out where it has no effect.
+_PUCT_ONLY_FIELDS = ("c_puct", "fpu_reduction", "prior", "root_noise_frac", "root_dirichlet_alpha")
+
+
 def _mcts_fields(config: Any) -> dict[str, Any]:
-    """Every field of an ``MCTSConfig`` as JSON-friendly data."""
-    fields = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+    """An ``MCTSConfig``'s fields as JSON-friendly data (without PUCT's own when not PUCT)."""
+    fields = {
+        f.name: getattr(config, f.name)
+        for f in dataclasses.fields(config)
+        if config.selection == "puct" or f.name not in _PUCT_ONLY_FIELDS
+    }
     return {k: v._asdict() if hasattr(v, "_asdict") else v for k, v in fields.items()}
 
 
@@ -455,9 +467,10 @@ def _run_config(spec: AgentSpec) -> Any:
     except (OSError, ValueError, AttributeError):
         algorithm = None  # let load_config report the problem
     if algorithm in BASELINES and algorithm != spec.kind:
+        article, name = ("an", "az-<n>") if algorithm == "az" else ("a", algorithm)
         raise ValueError(
-            f"{spec.name}: {_display_path(spec.checkpoint)} is a {algorithm} run; "
-            f"write {'az-<n>' if algorithm == 'az' else algorithm}:<run dir>"
+            f"{spec.name}: {_display_path(spec.checkpoint)} is {article} {algorithm} run; "
+            f"write {name}:<run dir>"
         )
     return load_baseline_module(spec.kind).load_config(str(spec.checkpoint))
 

@@ -111,6 +111,7 @@ def test_config_validation_and_digits():
         dict(selection="puct", root_dirichlet_alpha=0.0),
         dict(prior="network"),  # priors and root noise need PUCT
         dict(selection="rm", root_noise_frac=0.25),
+        dict(selection="puct", ucb1_tuned=True),  # DUCT's variance bound
         dict(leaf="network", rollout_steps=10),
     ]:
         with pytest.raises(ValueError):
@@ -118,6 +119,17 @@ def test_config_validation_and_digits():
     hash(M.MCTSConfig())  # frozen and hashable (used as a cache key)
     d = M._digits(2)
     assert d.shape == (16, 2) and d[3 + 4 * 2].tolist() == [3, 2]
+
+
+def test_only_ucb1_tuned_duct_keeps_squared_values():
+    env, state = env_for(DUEL), mid_game_state()
+    for kwargs, kept in [
+        (dict(ucb1_tuned=True), True),
+        (dict(selection="rm", ucb1_tuned=True), False),  # accepted, but RM never reads them
+        (dict(), False),
+    ]:
+        tree = M._init_tree(state, env, M.MCTSConfig(num_simulations=4, **kwargs), 5)
+        assert (tree.value_sq is not None) == kept, kwargs
 
 
 @pytest.mark.parametrize("selection", ["duct", "rm", "puct"])
@@ -454,6 +466,21 @@ def test_node_priors_are_distributions_over_the_legal_moves():
     prior = np.asarray(M._node_prior(logits, legal, network))
     e = np.exp([1.0, 0.0, -1.0])
     np.testing.assert_allclose(prior, [[*(e / e.sum())[:1], 0, *(e / e.sum())[1:]], [1, 0, 0, 0]])
+    # Infinite logits on every legal move: uniform over them (or over the +inf ones), not NaN.
+    for row, expected in [
+        ([-np.inf, 0.0, -np.inf, -np.inf], [1 / 3, 0, 1 / 3, 1 / 3]),
+        ([np.inf, 0.0, np.inf, 1.0], [0.5, 0, 0.5, 0]),
+    ]:
+        logits = jnp.array([row, [-np.inf] * 4])
+        prior = np.asarray(M._node_prior(logits, legal, network))
+        np.testing.assert_allclose(prior, [expected, [1, 0, 0, 0]], rtol=1e-6)
+    # ... also through the search, at every node (a forced row included).
+    evaluator = constant_evaluator((0.0, 0.0), ((-np.inf,) * 4,) * 2)
+    config = M.MCTSConfig(num_simulations=16, selection="puct", prior="network")
+    for state, _ in both_seats(list(COLLIDE)) + [(mid_game_state(), None)]:
+        out = run(state, config, evaluator=evaluator)
+        assert np.isfinite(out.root_prior).all() and np.isfinite(out.q).all()
+        np.testing.assert_allclose(out.root_prior.sum(-1), 1.0, rtol=1e-6)
 
 
 def test_puct_with_uniform_priors_is_deterministic_and_legal():
@@ -554,6 +581,21 @@ def test_root_noise_keeps_the_priors_on_the_legal_moves():
         np.testing.assert_array_equal(
             run(forced, config).root_prior, np.broadcast_to(mask, prior.shape)
         )
+
+
+@pytest.mark.parametrize("alpha", [0.003, 0.01, 0.5, 30.0])
+def test_root_noise_is_a_distribution_for_any_alpha(alpha):
+    # Below alpha 0.1 every Gamma draw of a row can underflow float32; normalizing the
+    # draws themselves left 5% of the rows at alpha 0.01 summing to less than 0.999.
+    legal = jnp.array([[True, True, True, False], [True, False, False, False]])
+    prior = legal / jnp.sum(legal, -1, keepdims=True)
+    config = M.MCTSConfig(selection="puct", root_noise_frac=1.0, root_dirichlet_alpha=alpha)
+    keys = jax.random.split(jax.random.key(0), 4096)
+    noise = np.asarray(jax.vmap(lambda k: M._noisy_root_prior(k, prior, legal, config))(keys))
+    assert np.isfinite(noise).all() and np.all(noise[:, ~np.asarray(legal)] == 0)
+    np.testing.assert_allclose(noise.sum(-1), 1.0, rtol=1e-5)
+    np.testing.assert_array_equal(noise[:, 1], np.broadcast_to([1, 0, 0, 0], (4096, 4)))
+    np.testing.assert_allclose(noise[:, 0, :3].mean(0), 1 / 3, atol=0.03)  # E[Dirichlet]
 
 
 def test_network_configs_need_an_evaluator():

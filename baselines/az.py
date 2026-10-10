@@ -65,8 +65,10 @@ network phase are two compiled chunks::
 
 The trained network plays as ``az-<n>[:<run dir>]`` in ``slinky.agents``
 (``az-0``: the raw network). ``--resume`` is exact when ``replay.npz`` was
-saved (``save_replay``, about 1 GB at the default capacity); without it the
-run resumes with an empty buffer and waits for ``learning_starts`` positions.
+saved (``save_replay``, about 1 GB at the default capacity, rewritten at every
+checkpoint) along with ``runner.npz``; without it, or if the two files come
+from different checkpoints (a crash between the two writes), the run resumes
+with an empty buffer and waits for ``learning_starts`` positions.
 
 **Defaults and why.** Measured on the 4-core CPU of this repository's other
 baselines, one process on cores 0-3, PPO's network:
@@ -207,7 +209,7 @@ class AZConfig:
     buffer_capacity: int = 1_048_576  # rounded down to whole iterations
     learning_starts: int = 32_768  # positions in the buffer before the first update
     batch_size: int = 512  # positions per gradient step (num_snakes agent samples each)
-    replay_ratio: float = 4.0  # expected gradient steps per stored position
+    replay_ratio: float = 4.0  # expected times each stored position is sampled
     augment: bool = True  # a random board symmetry per sampled position
     # Optimization.
     lr: float = 1e-3
@@ -337,7 +339,7 @@ class Schedule(NamedTuple):
     num_chunks: int
     total_steps: int  # env steps of the whole run (total_env_steps rounded up)
     teacher_chunks: int  # the first chunks play the teacher's search
-    total_updates: int  # gradient steps of the whole run (the learning-rate decay)
+    total_updates: int  # gradient steps of the whole run (the learning-rate decay's length)
 
     @property
     def teacher_steps(self) -> int:
@@ -352,7 +354,12 @@ def schedule(cfg: AZConfig) -> Schedule:
     chunk_steps = chunk_iters * cfg.steps_per_iteration
     num_chunks = -(-cfg.total_env_steps // chunk_steps)
     teacher_chunks = min(-(-cfg.teacher_env_steps // chunk_steps), num_chunks)
-    updates = num_chunks * chunk_iters * cfg.updates_per_iteration
+    # Iteration i (from 1) stores i * steps_per_iteration positions; the first that
+    # reaches learning_starts also learns. Counting the iterations before it too, the
+    # learning rate never reached its floor (1.07e-4 instead of 1e-4 at the defaults).
+    first_learning = max(-(-cfg.learning_starts // cfg.steps_per_iteration), 1)
+    learning_iters = max(num_chunks * chunk_iters - (first_learning - 1), 0)
+    updates = learning_iters * cfg.updates_per_iteration
     return Schedule(
         chunk_iters, chunk_steps, num_chunks, num_chunks * chunk_steps, teacher_chunks, updates
     )
@@ -780,8 +787,8 @@ def sample_batch(replay: Replay, key: jax.Array, cfg: AZConfig, env: Battlesnake
 # --- Loss ------------------------------------------------------------------------------
 
 LOSS_METRICS = (
-    "loss", "policy_loss", "value_loss", "target_entropy", "net_entropy", "value_mean",
-    "value_target_mean", "masked_frac",
+    "loss", "policy_loss", "value_loss", "target_entropy", "net_entropy", "value_abs_mean",
+    "value_target_var", "masked_frac",
 )  # fmt: skip
 
 
@@ -790,8 +797,11 @@ def az_loss(params: Params, batch: Batch, cfg: AZConfig) -> tuple[jax.Array, dic
 
     Means over the samples that count (:class:`Batch` weights). Also returns
     diagnostics: the entropies of the targets and of the network's policy,
-    the mean predicted value and target, and the fraction of positions whose
-    game had not ended (masked out).
+    the mean ``|value|``, the variance of the value targets (the log's
+    explained variance is ``1 - value_loss / value_target_var``) and the
+    fraction of positions whose game had not ended (masked out). The mean
+    value and mean target would say nothing in a duel: outcomes are zero-sum
+    but for draws, so both stay near 0 (-0.005 throughout a smoke run).
     """
     logits, value = network(params, batch.obs, cfg)
     log_probs = masked_log_probs(logits, batch.legal)
@@ -806,14 +816,15 @@ def az_loss(params: Params, batch: Batch, cfg: AZConfig) -> tuple[jax.Array, dic
     value_loss = mean((value - batch.z) ** 2, wv)
     loss = policy_loss + cfg.value_coef * value_loss
     target_log = jnp.log(jnp.where(target > 0, target, 1.0))
+    z_mean = mean(batch.z, wv)
     parts = {
         "loss": loss,
         "policy_loss": policy_loss,
         "value_loss": value_loss,
         "target_entropy": mean(-jnp.sum(target * target_log, axis=-1), wp),
         "net_entropy": mean(masked_entropy(log_probs, batch.legal), wp),
-        "value_mean": mean(value, wv),
-        "value_target_mean": mean(batch.z, wv),
+        "value_abs_mean": mean(jnp.abs(value), wv),
+        "value_target_var": mean((batch.z - z_mean) ** 2, wv),
         "masked_frac": 1.0 - jnp.mean(batch.finished.astype(jnp.float32)),
     }
     return loss, parts
@@ -830,7 +841,10 @@ class RunnerState(NamedTuple):
     env_states: State  # [num_envs] running games (never done)
     uids: jax.Array  # int32[num_envs] id of each running game (see Replay)
     key: jax.Array
-    env_steps: jax.Array  # int32[] env steps taken
+    # int32[] iterations taken. The host counts env steps (iterations *
+    # steps_per_iteration, a Python int): an int32 env-step counter would wrap after
+    # 2.1B env steps, about a day of self-play at 20k env steps/s on a GPU.
+    iterations: jax.Array
     updates: jax.Array  # int32[] gradient steps taken
     replay: Replay
 
@@ -872,21 +886,25 @@ def init_runner(cfg: AZConfig, env: BattlesnakeEnv, key: jax.Array) -> RunnerSta
         env_states=env_states,
         uids=jnp.arange(cfg.num_envs, dtype=jnp.int32),
         key=k_run,
-        env_steps=jnp.zeros((), jnp.int32),
+        iterations=jnp.zeros((), jnp.int32),
         updates=jnp.zeros((), jnp.int32),
         replay=replay_init(jax.tree.map(lambda x: x[0], env_states), cfg.capacity),
     )
 
 
-def blend_at(cfg: AZConfig, env_steps: jax.Array, teacher_steps: int) -> jax.Array | None:
+def blend_at(cfg: AZConfig, iterations: jax.Array, teacher_steps: int) -> jax.Array | None:
     """The heuristic's weight lam in the leaf value (None when the blend is off).
 
     It falls linearly from ``blend_start`` to 0 over the first
-    ``blend_env_steps`` env steps of the network phase.
+    ``blend_env_steps`` env steps of the network phase, which starts after
+    ``teacher_steps`` env steps (whole iterations). ``iterations`` is
+    :attr:`RunnerState.iterations`.
     """
     if not cfg.blend:
         return None
-    progress = (env_steps - teacher_steps).astype(jnp.float32) / cfg.blend_env_steps
+    network_iters = iterations - teacher_steps // cfg.steps_per_iteration
+    steps = network_iters.astype(jnp.float32) * cfg.steps_per_iteration
+    progress = steps / cfg.blend_env_steps
     return cfg.blend_start * jnp.clip(1.0 - progress, 0.0, 1.0)
 
 
@@ -994,7 +1012,7 @@ def make_train_chunk(
 
     def iteration(runner: RunnerState, _):
         key, k_play, k_learn = jax.random.split(runner.key, 3)
-        blend = blend_at(cfg, runner.env_steps, teacher_steps) if phase == "network" else None
+        blend = blend_at(cfg, runner.iterations, teacher_steps) if phase == "network" else None
         (env_states, uids), traj, metrics = selfplay(
             runner.params, blend, runner.env_states, runner.uids, k_play
         )
@@ -1025,7 +1043,7 @@ def make_train_chunk(
             env_states=env_states,
             uids=uids,
             key=key,
-            env_steps=runner.env_steps + k,
+            iterations=runner.iterations + 1,
             updates=runner.updates + updates,
             replay=replay,
         )
@@ -1035,7 +1053,7 @@ def make_train_chunk(
         runner, metrics = jax.lax.scan(iteration, runner, None, length=num_iters)
         means = ("blend",)
         metrics = {k: jnp.mean(v, 0) if k in means else jnp.sum(v, 0) for k, v in metrics.items()}
-        metrics["env_steps"] = runner.env_steps
+        metrics["iterations"] = runner.iterations
         metrics["total_updates"] = runner.updates
         metrics["buffer_size"] = runner.replay.size
         metrics["lr"] = lr(runner.updates)
@@ -1180,32 +1198,42 @@ def _load_tree(path: str, template: Any) -> tuple[Any, dict[str, np.ndarray]]:
 def save_runner(run_dir: str, runner: RunnerState, agent_samples: int, replay: bool) -> None:
     """Write the training state to ``runner.npz``, and the replay buffer to ``replay.npz``.
 
-    Both atomically. Without ``replay``, ``replay.npz`` is left out (and an
-    old one deleted): a resumed run then starts with an empty buffer.
+    Both atomically, each tagged with ``runner.iterations``. Without ``replay``,
+    ``replay.npz`` is left out (and an old one deleted): a resumed run then
+    starts with an empty buffer.
     """
     rest = runner._replace(key=jax.random.key_data(runner.key), replay=None)
+    iterations = int(runner.iterations)
     replay_path = os.path.join(run_dir, "replay.npz")
     if replay:
-        # The buffer first: a crash between the two files leaves a newer buffer with an
-        # older runner, which only replays a few more positions.
-        _save_tree(replay_path, runner.replay)
+        # The buffer first. A crash between the two files leaves it beside an older
+        # runner, which would replay games already in it (and, where self-play is not
+        # bit-identical, store positions under uids whose outcomes the buffer already
+        # holds): load_runner uses a buffer only if its tag matches the runner's.
+        _save_tree(replay_path, runner.replay, iterations=iterations)
     elif os.path.exists(replay_path):
         os.remove(replay_path)
-    _save_tree(os.path.join(run_dir, "runner.npz"), rest, agent_samples=agent_samples)
+    path = os.path.join(run_dir, "runner.npz")
+    _save_tree(path, rest, agent_samples=agent_samples, iterations=iterations)
 
 
 def load_runner(run_dir: str, template: RunnerState) -> tuple[RunnerState, int, bool]:
     """``(runner, agent_samples, replay restored)``, structured like ``template``.
 
-    Without ``replay.npz`` the template's (empty) buffer is kept.
+    Without a ``replay.npz`` of the same checkpoint as ``runner.npz`` (the same
+    ``iterations`` tag) the template's (empty) buffer is kept.
     """
+    path = os.path.join(run_dir, "runner.npz")
     rest = template._replace(key=jax.random.key_data(template.key), replay=None)
-    rest, extra = _load_tree(os.path.join(run_dir, "runner.npz"), rest)
+    rest, extra = _load_tree(path, rest)
+    if "iterations" not in extra or int(extra["iterations"]) != int(rest.iterations):
+        raise ValueError(f"{path} was written by an older baselines/az.py; start a new run")
     replay, restored = template.replay, False
     replay_path = os.path.join(run_dir, "replay.npz")
     if os.path.exists(replay_path):
-        replay, _ = _load_tree(replay_path, template.replay)
-        restored = True
+        buffer, tag = _load_tree(replay_path, template.replay)
+        if "iterations" in tag and int(tag["iterations"]) == int(rest.iterations):
+            replay, restored = buffer, True
     runner = rest._replace(key=jax.random.wrap_key_data(rest.key), replay=replay)
     return runner, int(extra["agent_samples"]), restored
 
@@ -1249,15 +1277,19 @@ def chunk_record(
     games, n_upd = int(m["games"]), int(m["updates"])
     deaths = {name: int(m["deaths"][c]) for name, c in DEATH_CAUSES.items()}
     losses = {k: float(m[k]) / n_upd if n_upd else None for k in (*LOSS_METRICS, "grad_norm")}
+    target_var = losses["value_target_var"]
+    # 1 - MSE / Var(z) over the chunk's value samples (R^2: a constant guess scores 0).
+    explained = 1.0 - losses["value_loss"] / target_var if target_var else None
     return {
         "type": "train",
         "phase": phase,
-        "env_steps": int(m["env_steps"]),
+        "env_steps": int(m["iterations"]) * cfg.steps_per_iteration,
         "agent_samples": int(m["agent_samples"]),
         "updates": n_upd,
         "total_updates": int(m["total_updates"]),
         "lr": float(m["lr"]),
         **losses,
+        "explained_var": explained,
         "blend": float(m["blend"]) if "blend" in m else None,
         "games": games,
         "mean_game_len": float(m["game_turns"]) / games if games else None,
@@ -1279,10 +1311,11 @@ def format_record(r: dict[str, Any], total_steps: int) -> str:
     shown = [k for k in DEATH_CAUSES if k != "hazard" or deaths[k]]
     length = f"{r['mean_game_len']:.0f}" if r["mean_game_len"] is not None else "-"
     if r["updates"]:
+        ev = f"{r['explained_var']:.2f}" if r["explained_var"] is not None else "-"
         learn = (
             f"pi {r['policy_loss']:.3f} (H {r['target_entropy']:.2f} net "
-            f"{r['net_entropy']:.2f}) v {r['value_loss']:.3f} V {r['value_mean']:+.2f} "
-            f"z {r['value_target_mean']:+.2f} masked {100 * r['masked_frac']:.0f}%"
+            f"{r['net_entropy']:.2f}) v {r['value_loss']:.3f} (ev {ev} |V| "
+            f"{r['value_abs_mean']:.2f}) masked {100 * r['masked_frac']:.0f}%"
         )
     else:
         learn = "no updates yet"
@@ -1305,10 +1338,11 @@ def train(cfg: AZConfig, resume: bool = False) -> tuple[str, Params]:
 
     With ``resume``, continue from ``run_dir/runner.npz`` (written every
     ``checkpoint_every`` env steps) if it exists, with the replay buffer of
-    ``replay.npz`` (``save_replay``; otherwise the buffer starts empty and
-    learning waits for ``learning_starts`` positions again). With the buffer,
-    on the same machine and core count, resuming is exact. A new run in an old
-    directory first deletes that run's metrics and checkpoints.
+    ``replay.npz`` (``save_replay``, and only if it was saved with that
+    ``runner.npz``; otherwise the buffer starts empty and learning waits for
+    ``learning_starts`` positions again). With the buffer, on the same machine
+    and core count, resuming is exact. A new run in an old directory first
+    deletes that run's metrics and checkpoints.
     """
     run_dir = cfg.run_dir or os.path.join("runs", time.strftime("az-%Y%m%d-%H%M%S"))
     cfg = dataclasses.replace(cfg, run_dir=run_dir)
@@ -1333,9 +1367,10 @@ def train(cfg: AZConfig, resume: bool = False) -> tuple[str, Params]:
     agent_total = 0
     if resuming:
         runner, agent_total, restored = load_runner(run_dir, runner)
-        _truncate_metrics(metrics_path, int(runner.env_steps))
-        note = "" if restored else " with an empty replay buffer (no replay.npz)"
-        print(f"resuming from env step {int(runner.env_steps):,}{note}")
+        resumed_steps = int(runner.iterations) * cfg.steps_per_iteration
+        _truncate_metrics(metrics_path, resumed_steps)
+        note = "" if restored else " with an empty replay buffer (no replay.npz of this checkpoint)"
+        print(f"resuming from env step {resumed_steps:,}{note}")
     elif cfg.init_from:
         runner = runner._replace(params=init_from_run(runner.params, cfg, cfg.init_from))
         runner = runner._replace(opt_state=make_optimizer(cfg).init(runner.params))
@@ -1374,7 +1409,7 @@ def train(cfg: AZConfig, resume: bool = False) -> tuple[str, Params]:
         def crossed(every: int, steps: int) -> bool:
             return steps // every > (steps - chunk_steps) // every
 
-        for chunk in range(int(runner.env_steps) // chunk_steps, sched.num_chunks):
+        for chunk in range(int(runner.iterations) // sched.chunk_iters, sched.num_chunks):
             phase = sched.phase(chunk)
             train_chunk = chunk_fn(phase)
             t = time.perf_counter()
