@@ -292,13 +292,13 @@ def make_policy(params: Params, cfg: PPOConfig, greedy: bool) -> Policy:
 
 
 def sample_from_logits(logits_fn: Callable[[Any], jax.Array]) -> Policy:
-    """Policy sampling each snake's move from ``softmax(logits_fn(obs))`` over its legal moves."""
-    return _sample_from_logits(logits_fn)
+    """Policy sampling each snake's move from ``softmax(logits_fn(obs))`` over its legal moves.
 
+    Not cached (unlike ``evaluate.greedy_from_q``): every :func:`make_policy`
+    call makes a new ``logits_fn``, so a cache would never hit and would only
+    keep old parameters alive.
+    """
 
-@functools.lru_cache(maxsize=16)
-def _sample_from_logits(logits_fn: Callable[[Any], jax.Array]) -> Policy:
-    # Cached like evaluate.greedy_from_q, so the same logits_fn hits play_match's jit cache.
     def policy(key: jax.Array, state: State, ts: TimeStep) -> jax.Array:
         return sample_actions(key, logits_fn(ts.obs), ts.action_mask)
 
@@ -771,8 +771,14 @@ def _truncate_metrics(path: str, env_steps: int) -> None:
     """Drop records logged after the checkpoint we resume from (they will be redone)."""
     if not os.path.exists(path):
         return
+    records = []
     with open(path) as f:
-        records = [line for line in f if json.loads(line)["env_steps"] <= env_steps]
+        for line in f:
+            try:
+                if json.loads(line)["env_steps"] <= env_steps:
+                    records.append(line)
+            except json.JSONDecodeError:  # a line cut short by a hard crash
+                pass
     with open(path, "w") as f:
         f.writelines(records)
 
@@ -840,14 +846,16 @@ def train(cfg: PPOConfig, resume: bool = False) -> tuple[str, Params]:
     """Run a full training; returns ``(run_dir, final params)``.
 
     With ``resume``, continue from ``run_dir/runner.npz`` (written every
-    ``checkpoint_every`` env steps) if it exists. Resuming is exact: the run
-    continues as if it had never stopped.
+    ``checkpoint_every`` env steps) if it exists. On the same machine with the
+    same number of CPU cores, resuming is exact: the run continues as if it had
+    never stopped (with another core count XLA's results can differ in the last
+    bits, and the runs then drift apart). A new run in an old directory first
+    deletes that run's metrics and checkpoints.
     """
     run_dir = cfg.run_dir or os.path.join("runs", time.strftime("ppo-%Y%m%d-%H%M%S"))
-    os.makedirs(run_dir, exist_ok=True)
     cfg = dataclasses.replace(cfg, run_dir=run_dir)
-    save_config(run_dir, cfg)
     metrics_path = os.path.join(run_dir, "metrics.jsonl")
+    runner_path = os.path.join(run_dir, "runner.npz")
 
     env, sim = make_envs(cfg)
     if cfg.eval_games > 0:  # fail now, not at the first evaluation, if one can't be built
@@ -855,15 +863,20 @@ def train(cfg: PPOConfig, resume: bool = False) -> tuple[str, Params]:
 
         for opponent in cfg.eval_opponents:
             make_agent(opponent, env.config)
+    os.makedirs(run_dir, exist_ok=True)
+    resuming = resume and os.path.exists(runner_path)
+    if not resuming:  # a new run in an old directory: --resume must not find the old run
+        for name in ("metrics.jsonl", "runner.npz", "params.npz"):
+            if os.path.exists(path := os.path.join(run_dir, name)):
+                os.remove(path)
+    save_config(run_dir, cfg)
     k_eval, k_init = jax.random.split(jax.random.key(cfg.seed))
     runner = jax.jit(init_runner, static_argnums=(0, 1))(cfg, sim, k_init)
     agent_total = 0
-    if resume and os.path.exists(os.path.join(run_dir, "runner.npz")):
+    if resuming:
         runner, agent_total = load_runner(run_dir, runner)
         _truncate_metrics(metrics_path, int(runner.env_steps))
         print(f"resuming from env step {int(runner.env_steps):,}")
-    elif os.path.exists(metrics_path):
-        os.remove(metrics_path)  # a fresh run in an old directory
 
     sched = schedule(cfg)
     chunk_steps = sched.chunk_steps

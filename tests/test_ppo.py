@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -272,10 +274,58 @@ def test_config_checks():
 
 
 def test_bad_eval_opponent_fails_before_training(tmp_path):
-    cfg = ppo.PPOConfig(eval_opponents=("alphasnake",), run_dir=str(tmp_path), **TINY)
+    """It writes nothing: no new directory, and an old run's files are left alone."""
+    cfg = ppo.PPOConfig(eval_opponents=("alphasnake",), run_dir=str(tmp_path / "new"), **TINY)
     with pytest.raises(ValueError, match="unknown agent"):
         ppo.train(cfg)
-    assert not (tmp_path / "metrics.jsonl").exists()
+    assert not (tmp_path / "new").exists()
+    old = tmp_path / "old"
+    old.mkdir()
+    files = {"config.json": "{}", "metrics.jsonl": "{}\n", "runner.npz": "r", "params.npz": "p"}
+    for name, text in files.items():
+        (old / name).write_text(text)
+    with pytest.raises(ValueError, match="unknown agent"):
+        ppo.train(dataclasses.replace(cfg, run_dir=str(old)))
+    assert {p.name: p.read_text() for p in old.iterdir()} == files
+
+
+def test_new_run_in_old_dir_does_not_resume_the_old_run(tmp_path, monkeypatch, capsys):
+    """A new run deletes the old run's checkpoints, so --resume can't continue the old run.
+
+    Here the new run is interrupted before its first checkpoint; resuming it must
+    start it afresh, not load the old run's state under the new config.
+    """
+    run_dir = str(tmp_path)
+    old = ppo.PPOConfig(seed=1, lr=5e-3, num_envs=4, num_steps=16, eval_games=0, **TINY)
+    old = dataclasses.replace(old, run_dir=run_dir)
+    _, sim = ppo.make_envs(old)
+    stale = ppo.init_runner(old, sim, jax.random.key(1))
+    ppo.save_config(run_dir, old)
+    ppo.save_checkpoint(run_dir, stale.params)
+    ppo.save_runner(run_dir, stale, 0)
+    (tmp_path / "metrics.jsonl").write_text('{"type": "train", "env_steps": 64}\n')
+
+    def interrupt(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ppo, "make_train_chunk", interrupt)  # stop before any checkpoint
+    new = dataclasses.replace(old, seed=0, lr=1e-3)
+    with pytest.raises(KeyboardInterrupt):
+        ppo.train(new)
+    assert sorted(os.listdir(run_dir)) == ["config.json"] and ppo.load_config(run_dir) == new
+    with pytest.raises(KeyboardInterrupt):
+        ppo.main(["--resume", run_dir])
+    assert sorted(os.listdir(run_dir)) == ["config.json"] and ppo.load_config(run_dir) == new
+    assert "resuming" not in capsys.readouterr().out
+
+
+def test_truncate_metrics_drops_later_and_cut_short_records(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    kept = ['{"type": "train", "env_steps": 128}\n', '{"type": "eval", "env_steps": 256}\n']
+    later = '{"type": "train", "env_steps": 384}\n'
+    path.write_text("".join(kept) + later + '{"type": "train", "env_st')  # hard crash
+    ppo._truncate_metrics(str(path), 256)
+    assert path.read_text() == "".join(kept)
 
 
 # --- (3) End to end ---------------------------------------------------------------
