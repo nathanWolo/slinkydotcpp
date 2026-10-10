@@ -375,7 +375,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="python -m slinky.replay",
         description="Play games between agents and save them as a replay (JSON and/or HTML).",
         epilog="Agents: random_legal, random, heuristic, dqn, dqn:<run dir>, "
-        "mcts-<n>[:field=value...] (see slinky.agents).",
+        "mcts-<n>[-shorthand...][:field=value...], e.g. mcts-256-rm or "
+        "mcts-128:exploration=0.5 (see slinky.agents).",
     )
     p.add_argument("--a", help="first agent (rotated across seats with --b)")
     p.add_argument("--b", help="second agent")

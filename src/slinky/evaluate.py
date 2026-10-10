@@ -25,7 +25,9 @@ parameters) compiles again.
 from __future__ import annotations
 
 import functools
+import itertools
 import math
+import sys
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -110,16 +112,34 @@ class MatchRun(NamedTuple):
         return self.result.mean_turns * self.result.num_games / (self.slots * self.iterations)
 
 
+# Progress hooks of the run_match calls in flight, by call number (traced, so the
+# compiled loop is shared by calls with and without a hook).
+_REPORTS = 16
+_CALLS = itertools.count()
+_PROGRESS: dict[int, Callable[[int, int], None]] = {}
+
+
+def _report(call: Any, finished: Any, iterations: Any) -> None:
+    hook = _PROGRESS.get(int(call))
+    if hook is not None:
+        try:
+            hook(int(finished), int(iterations))
+        except Exception as e:  # a failing report must not abort the match
+            print(f"progress callback failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 @functools.lru_cache(maxsize=16)
 def _compiled_match(
     env: BattlesnakeEnv, policy_a: Policy, policy_b: Policy, slots: int
 ) -> Callable[..., tuple[jax.Array, jax.Array, jax.Array]]:
-    """Jitted ``(key, first_game, num_games, max_turns) -> (counts, turns, iterations)``.
+    """Jitted ``(key, first_game, num_games, max_turns, call) -> (counts, turns, iterations)``.
 
     Plays games ``first_game ... first_game + num_games - 1`` in ``slots`` slots.
     ``counts[s]`` holds the wins, draws, losses and truncations (from A's point
     of view) of the games that slot ``s`` finished and ``turns[s]`` their total
-    length; ``iterations`` is the number of loop turns.
+    length; ``iterations`` is the number of loop turns. Every ``num_games / 16``
+    finished games the loop calls ``_report(call, finished, iterations)`` on the
+    host.
     """
     n = env.num_agents
     seats = jnp.arange(n)
@@ -143,7 +163,8 @@ def _compiled_match(
         )
         return code, cut_off
 
-    def run(key, first_game, num_games, max_turns):
+    def run(key, first_game, num_games, max_turns, call):
+        report_every = jnp.maximum(num_games // _REPORTS, 1)
         game = jnp.arange(slots, dtype=jnp.int32)  # game held by each slot, from first_game
         states, ts, k_loop = jax.vmap(start, in_axes=(None, 0))(key, first_game + game)
         counts = jnp.zeros((slots, 4), jnp.int32)  # wins, draws, losses, truncated
@@ -172,7 +193,15 @@ def _compiled_match(
 
             # Each slot whose game ended takes the next game id (ids >= num_games idle).
             game = jnp.where(ended, next_game + jnp.cumsum(ended) - 1, game).astype(jnp.int32)
-            next_game = next_game + jnp.sum(ended, dtype=jnp.int32)
+            num_ended = jnp.sum(ended, dtype=jnp.int32)
+            next_game = next_game + num_ended
+
+            finished = next_game - slots  # games started minus the slots' current ones
+            jax.lax.cond(
+                finished // report_every != (finished - num_ended) // report_every,
+                lambda: jax.debug.callback(_report, call, finished, it + 1),
+                lambda: None,
+            )
 
             def pick(fresh, old):
                 return jnp.where(ended.reshape((-1,) + (1,) * (old.ndim - 1)), fresh, old)
@@ -231,6 +260,7 @@ def run_match(
     max_turns: int = 1000,
     batch_size: int = 1024,
     first_game: int = 0,
+    progress: Callable[[int, int], None] | None = None,
 ) -> MatchRun:
     """:func:`play_match` that also reports how the slots were used.
 
@@ -242,10 +272,15 @@ def run_match(
     batch (vmapped, as here) and XLA's arithmetic does not depend on the batch
     shape (true of the policies in this package on CPU; tested).
 
+    ``progress``, if given, is called as ``progress(games_finished,
+    iterations)`` from inside the loop (a host callback, on another thread)
+    about 16 times over the match, for progress reports. Early games are the
+    short ones, so the fraction of games finished runs ahead of the work done.
+
     The compiled loop is cached per ``(env, policy_a, policy_b, slots)``:
-    ``num_games``, ``max_turns`` and ``first_game`` are traced, so changing them
-    does not recompile, except that fewer games than ``batch_size`` shrink the
-    slots to ``num_games``.
+    ``num_games``, ``max_turns``, ``first_game`` and ``progress`` do not enter
+    it, so changing them does not recompile, except that fewer games than
+    ``batch_size`` shrink the slots to ``num_games``.
     """
     if env.config.solo:
         raise ValueError("play_match needs a game with at least two snakes (not solo)")
@@ -255,9 +290,15 @@ def run_match(
         raise ValueError("game ids must lie in [0, 2**31)")
     slots = min(batch_size, num_games)
     run = _compiled_match(env, policy_a, policy_b, slots)
-    counts, turns, iterations = jax.device_get(
-        run(key, jnp.int32(first_game), jnp.int32(num_games), jnp.int32(max_turns))
-    )
+    call = next(_CALLS)
+    if progress is not None:
+        _PROGRESS[call] = progress
+    try:
+        counts, turns, iterations = jax.device_get(
+            run(key, jnp.int32(first_game), jnp.int32(num_games), jnp.int32(max_turns), call)
+        )
+    finally:
+        _PROGRESS.pop(call, None)
     wins, draws, losses, truncated = (int(x) for x in counts.sum(axis=0, dtype=np.int64))
     result = _summarize(
         wins=wins,

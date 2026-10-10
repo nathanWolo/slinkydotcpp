@@ -78,12 +78,14 @@ def test_seats_are_balanced():
     assert abs(r.wins - n / 2) < 0.1 * n
     assert abs(r.losses - n / 2) < 0.1 * n
 
-    # With one game per batch the seat still alternates with the global game index.
-    r1 = play_match(
-        ENV, left_in_seat0_else_random, left_in_seat0_else_random, jax.random.key(3), 40,
-        batch_size=1,
-    )  # fmt: skip
-    assert abs(r1.wins - 20) <= 4 and abs(r1.losses - 20) <= 4
+    # With one slot, or a number of slots that is not a multiple of N, the seat still
+    # alternates with the game index: refilled slots don't unbalance it.
+    for slots in (1, 7):
+        r1 = play_match(
+            ENV, left_in_seat0_else_random, left_in_seat0_else_random, jax.random.key(3), 40,
+            batch_size=slots,
+        )  # fmt: skip
+        assert abs(r1.wins - 20) <= 4 and abs(r1.losses - 20) <= 4
 
     # Only A suicidal-in-seat-0: A loses nearly all of its seat-0 games, ~even otherwise.
     p = random_legal(ENV)
@@ -126,11 +128,85 @@ def test_eliminated_policy_loses_with_more_snakes():
     assert r.score < 0.1
 
 
-def test_padding_is_ignored():
+def test_games_not_a_multiple_of_the_slots():
     p = random_legal(ENV)
     r = play_match(ENV, p, p, jax.random.key(7), num_games=70, max_turns=2, batch_size=32)
     assert r.num_games == 70 and r.truncated == 70 and r.draws == 70
-    assert r.mean_turns == 2  # padded games (turn 0) would pull this below 2
+    assert r.mean_turns == 2  # idle slots (and their extra games) would change this
+
+
+def test_result_does_not_depend_on_batch_size():
+    # Game g depends only on (key, g): the slots, and when a slot picks it up, don't matter.
+    p = random_legal(ENV)
+    runs = [
+        evaluate.run_match(ENV, p, p, jax.random.key(20), 64, max_turns=300, batch_size=b)
+        for b in (1, 5, 64)
+    ]
+    assert runs[0].result == runs[1].result == runs[2].result
+    assert runs[0].result.truncated == 0
+    # Fewer games than slots: the slots shrink to the number of games.
+    small = evaluate.run_match(ENV, p, p, jax.random.key(20), 5, max_turns=300, batch_size=64)
+    assert small.slots == 5
+    assert small.result == evaluate.run_match(ENV, p, p, jax.random.key(20), 5, 300, 1).result
+    # The heuristic (float scores) is just as invariant.
+    from slinky.heuristic import heuristic
+
+    h = heuristic(ENV)
+    a = play_match(ENV, h, p, jax.random.key(21), 20, max_turns=300, batch_size=3)
+    b = play_match(ENV, h, p, jax.random.key(21), 20, max_turns=300, batch_size=20)
+    assert a == b
+
+
+def test_refill_keeps_slots_busy():
+    p = random_legal(ENV)
+    key, games, slots = jax.random.key(22), 64, 8
+    run = evaluate.run_match(ENV, p, p, key, games, max_turns=300, batch_size=slots)
+    total_turns = round(run.result.mean_turns * games)
+    assert run.slots == slots and run.iterations * slots >= total_turns
+    # Without refill each block of 8 games would last as long as its longest game:
+    # play the same games (by id) block by block to measure that.
+    blocks = [
+        evaluate.run_match(ENV, p, p, key, slots, 300, slots, first_game=g)
+        for g in range(0, games, slots)
+    ]
+    fixed = sum(b.iterations for b in blocks)
+    for field in ("wins", "draws", "losses", "truncated"):
+        assert sum(getattr(b.result, field) for b in blocks) == getattr(run.result, field)
+    assert sum(b.result.mean_turns * slots for b in blocks) == pytest.approx(total_turns)
+    assert run.iterations < 0.75 * fixed
+    assert run.utilization > 0.8
+    # One slot is never idle: one loop turn per game turn.
+    one = evaluate.run_match(ENV, p, p, key, 16, max_turns=300, batch_size=1)
+    assert one.iterations == round(one.result.mean_turns * 16) and one.utilization == 1.0
+
+
+def test_game_ranges_add_up():
+    p = random_legal(ENV)
+    key = jax.random.key(23)
+    whole = evaluate.run_match(ENV, p, p, key, 30, 300, 4).result
+    head = evaluate.run_match(ENV, p, p, key, 18, 300, 4).result
+    tail = evaluate.run_match(ENV, p, p, key, 12, 300, 4, first_game=18).result
+    assert (head.wins + tail.wins, head.draws + tail.draws, head.losses + tail.losses) == (
+        whole.wins, whole.draws, whole.losses
+    )  # fmt: skip
+    assert head.mean_turns * 18 + tail.mean_turns * 12 == pytest.approx(whole.mean_turns * 30)
+    with pytest.raises(ValueError):
+        evaluate.run_match(ENV, p, p, key, 4, first_game=-1)
+
+
+def test_progress_reports():
+    p = random_legal(ENV)
+    seen = []
+    run = evaluate.run_match(
+        ENV, p, p, jax.random.key(24), 48, 300, 8, progress=lambda f, i: seen.append((f, i))
+    )
+    finished = [f for f, _ in seen]
+    assert finished == sorted(finished) and finished[-1] == 48 and len(seen) <= 16
+    assert seen[-1][1] == run.iterations
+    # A failing callback is reported but does not stop the match.
+    assert evaluate.run_match(
+        ENV, p, p, jax.random.key(24), 48, 300, 8, progress=lambda f, i: 1 / 0
+    ) == run  # fmt: skip
 
 
 def test_deterministic_given_key():
@@ -146,10 +222,13 @@ def test_jitted_function_is_cached():
     p = random_legal(ENV)
     assert random_legal(ENV) is p
     play_match(ENV, p, always_left, jax.random.key(10), 16, batch_size=16)
-    before = evaluate._compiled_batch.cache_info()
+    before = evaluate._compiled_match.cache_info()
+    # num_games, max_turns and first_game are traced: no recompilation.
     play_match(ENV, p, always_left, jax.random.key(11), 16, max_turns=50, batch_size=16)
-    after = evaluate._compiled_batch.cache_info()
-    assert after.misses == before.misses and after.hits == before.hits + 1
+    play_match(ENV, p, always_left, jax.random.key(11), 40, max_turns=7, batch_size=16)
+    evaluate.run_match(ENV, p, always_left, jax.random.key(1), 20, 9, 16, first_game=3)
+    after = evaluate._compiled_match.cache_info()
+    assert after.misses == before.misses and after.hits == before.hits + 3
 
 
 def test_solo_is_rejected():

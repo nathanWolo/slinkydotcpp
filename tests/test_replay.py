@@ -1,9 +1,7 @@
-"""Tests for replay recording (``slinky.replay``), the viewer page and the agent registry."""
+"""Tests for replay recording (``slinky.replay``) and the viewer page (agents: test_agents.py)."""
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import json
 import math
 import re
@@ -17,9 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from slinky import agents as agents_mod
 from slinky import replay as replay_mod
-from slinky.agents import Agent, make_agent, make_env, parse_mcts_name
+from slinky.agents import Agent, make_agent, make_env
 from slinky.engine_json import countdown_to_body, state_from_engine
 from slinky.policies import random_legal_policy
 from slinky.replay import (
@@ -476,56 +473,6 @@ def test_viewer_death_labels_leave_crosses_and_heads_visible():
             assert g["pad"] <= lb["y"] and lb["y"] + lb["h"] <= g["pad"] + 11 * cell
             assert not any(_overlap(lb, box) for box in crosses + heads), (lb, g)
             assert not any(_overlap(lb, other) for other in labels[:i])
-
-
-def test_agents_registry():
-    for name in ("random_legal", "random", "heuristic"):
-        agent = make_agent(name, CONFIG)
-        assert agent.name == name and not agent.needs_obs and agent.description
-        assert make_agent(name, CONFIG) is agent  # cached: play_match's jit cache hits
-    assert (
-        make_agent("heuristic", CONFIG).policy
-        is not make_agent("heuristic", GameConfig(num_snakes=4)).policy
-    )
-    with pytest.raises(ValueError, match="unknown agent"):
-        make_agent("alphasnake", CONFIG)
-    with pytest.raises(FileNotFoundError, match="no DQN checkpoint"):
-        make_agent("dqn:/nonexistent/run", CONFIG)
-
-
-def test_dqn_agent_plays_from_observations():
-    pytest.importorskip("optax")
-    if not agents_mod.DEFAULT_DQN_CHECKPOINT.is_dir():
-        pytest.skip("no DQN checkpoint in this checkout")
-    agent = make_agent("dqn", CONFIG)
-    assert agent.needs_obs
-    assert make_agent("dqn:baselines/checkpoints/dqn-duel-seed0", CONFIG).needs_obs
-    with pytest.raises(ValueError, match="trained on 11x11"):
-        make_agent("dqn", GameConfig(width=7, height=7))
-    r = record_games(CONFIG, ["dqn", "random_legal"], jax.random.key(0), 2, max_turns=6)
-    assert [g["seats"][0] for g in r["games"]] == ["dqn", "random_legal"]
-
-
-@pytest.mark.skipif(importlib.util.find_spec("slinky.mcts") is None, reason="no slinky.mcts")
-def test_mcts_agent_names():
-    try:
-        mcts = importlib.import_module("slinky.mcts")
-    except Exception as e:  # pragma: no cover - module under development
-        pytest.skip(f"slinky.mcts does not import: {e}")
-    n, overrides = parse_mcts_name("mcts-16:exploration=1.0:spawn_food=true:selection=rm")
-    assert n == 16 and overrides == {"exploration": 1.0, "spawn_food": True, "selection": "rm"}
-    with pytest.raises(ValueError, match="unknown mcts option 'bogus'"):
-        parse_mcts_name("mcts-16:bogus=1")
-    with pytest.raises(ValueError, match="expected a float"):
-        parse_mcts_name("mcts-16:exploration=lots")
-    with pytest.raises(ValueError, match="field=value"):
-        parse_mcts_name("mcts-16:exploration")
-    agent = make_agent("mcts-2:max_depth=2", CONFIG)
-    assert not agent.needs_obs and "2 simulations" in agent.description
-    assert agent is make_agent("mcts-2:max_depth=2", CONFIG)
-    assert {"exploration", "selection"} <= set(mcts.MCTSConfig.__dataclass_fields__)
-    r = record_games(CONFIG, [agent, "random_legal"], jax.random.key(0), 1, max_turns=2)
-    assert len(r["games"][0]["frames"]) >= 2
 
 
 def test_cli_writes_json_and_html(tmp_path, capsys):

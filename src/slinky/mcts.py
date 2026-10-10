@@ -126,11 +126,11 @@ positions, against the final default's 0.594 +- 0.043:
 * ``max_depth=32``: never reached in practice (the deepest node at 1024
   simulations was 10-11 moves down), but it bounds the path buffer.
 
-**Speed** (4-core CPU, ``jit(vmap(search))``, default config): about 6 us per
-simulation at a batch of 256 games (5.2 at 16 simulations, 6.9 at 256; 145k to
-190k simulations/s in all) and 7-10 us at a batch of 64. The heuristic leaf is
-about 2.6 us of that, and the tree takes 1.04 KB per node (0.27 MB per game at
-256 simulations).
+**Speed** (4-core CPU, ``jit(vmap(search))``, default config): about 5 us per
+simulation at a batch of 256 games (3.9 at 16 simulations, 6.0 at 256; 165k to
+255k simulations/s in all) and 6 us at a batch of 64 (64 simulations). The
+heuristic leaf is about 1.5 us of that, and the tree takes 1.04 KB per node
+(0.27 MB per game at 256 simulations).
 
 **Limits.** The children table has ``4**N`` entries per node, so ``N <= 4``
 (256 joint actions; more snakes raise ``ValueError``). The spec was written for
@@ -182,7 +182,9 @@ class MCTSConfig:
       rollout_policy: ``"random"`` (uniform over ``env.action_mask``) or
         ``"heuristic"`` (:func:`slinky.heuristic.heuristic_policy`, about 30x
         the cost of a random step).
-      weights: the heuristic's weights (leaf evaluator and rollout policy).
+      weights: the heuristic's weights (leaf evaluator and rollout policy). Its
+        policy fields, such as ``contempt``, only matter for heuristic rollouts;
+        the search's own value of a draw is ``draw_value``.
       max_depth: the deepest a simulation descends (edges from the root). A
         selection that reaches it backs up that node's stored leaf value.
       final: ``"max"`` or ``"sample"`` (see the module docstring).

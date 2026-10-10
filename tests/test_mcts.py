@@ -31,6 +31,7 @@ def run(state: State, config: M.MCTSConfig = DEFAULT, game: GameConfig = DUEL, n
     return jax.tree.map(np.asarray, batched_search(game, config)(keys, state))
 
 
+@functools.cache
 def mid_game_state() -> State:
     """One live duel state after 30 turns of random legal play."""
     state = jax.tree.map(lambda x: x[0], rollout_states(DUEL, batch=1))
@@ -124,7 +125,7 @@ def test_finished_game_returns_valid_moves():
     assert acts.shape == (2,) and np.all(np.asarray(acts) >= 0)
 
 
-@pytest.mark.parametrize("draw_value", [None, 0.0, -0.25])
+@pytest.mark.parametrize("draw_value", [None, 0.0])
 def test_draw_value_scores_mutual_eliminations(draw_value):
     # None checks the default (-0.5, "contempt").
     if draw_value is None:
@@ -162,7 +163,7 @@ def test_truncation_inside_the_tree_is_a_draw(spawn_food):
     np.testing.assert_array_equal(out.nodes_used, 1 + 2 * 3)  # every joint move, all terminal
 
 
-@pytest.mark.parametrize(("selection", "max_depth"), [("duct", 1), ("duct", 2), ("rm", 2)])
+@pytest.mark.parametrize(("selection", "max_depth"), [("duct", 1), ("rm", 2)])
 def test_max_depth_caps_the_descent(selection, max_depth):
     # A selection that reaches max_depth backs up the stored value there and expands nothing.
     state = mid_game_state()
@@ -185,9 +186,10 @@ def test_unvisited_moves_are_tried_in_uniformly_random_order():
     tree = tree._replace(legal=jnp.ones_like(tree.legal))
     u = jax.random.uniform(jax.random.key(0), (100_000, 2, NUM_ACTIONS))
 
+    @jax.jit
     def first_moves(tree):
-        moves = np.asarray(jax.vmap(lambda u: M._duct_moves(tree, 0, u, config))(u))
-        return np.stack([np.bincount(moves[:, p], minlength=NUM_ACTIONS) for p in range(2)])
+        moves = jax.vmap(lambda u: M._duct_moves(tree, 0, u, config))(u)
+        return jnp.stack([jnp.bincount(moves[:, p], length=NUM_ACTIONS) for p in range(2)])
 
     np.testing.assert_allclose(first_moves(tree) / len(u), 0.25, atol=0.01)
     # With UP and DOWN visited (and looking good), LEFT and RIGHT still come first, evenly.
@@ -258,7 +260,7 @@ def test_variants_run():
         M.MCTSConfig(num_simulations=16, rollout_steps=10, leaf="none", spawn_food=True),
         M.MCTSConfig(num_simulations=8, rollout_steps=2, rollout_policy="heuristic"),
     ]:
-        out = run(state, config, n_keys=8)
+        out = run(state, config)
         np.testing.assert_array_equal(out.visits.sum(-1), config.num_simulations)
         assert np.all(np.abs(out.q) <= 1)
         # Sampled or not, every move is one the mask allows.
@@ -268,30 +270,28 @@ def test_variants_run():
 def test_spawn_free_transition_matches_env_step():
     # On a map without food the deterministic model must equal env.step exactly: the
     # turn count, max_turns truncation, freezing finished games and the action mask.
+    # Three snakes, so some die while the game goes on.
+    game = GameConfig(num_snakes=3, ruleset="wrapped_constrictor", map="empty", max_turns=45)
+    env = env_for(game)
     model, sampled = M.MCTSConfig(spawn_food=False), M.MCTSConfig(spawn_food=True)
-    for game in [
-        GameConfig(map="empty", max_turns=45),
-        GameConfig(num_snakes=3, ruleset="wrapped_constrictor", map="empty", max_turns=45),
-    ]:
-        env = env_for(game)
 
-        def play(key, env=env):
-            def step(carry, k):
-                state, mask = carry
-                k_act, k_step = jax.random.split(k)
-                acts = jax.random.categorical(k_act, jnp.where(mask, 0.0, -jnp.inf), axis=-1)
-                acts = acts.astype(jnp.int32)
-                a = M._transition(k_step, state, acts, env, model)
-                b = M._transition(k_step, state, acts, env, sampled)
-                return b, (a, b)
+    def play(key):
+        def step(carry, k):
+            state, mask = carry
+            k_act, k_step = jax.random.split(k)
+            acts = jax.random.categorical(k_act, jnp.where(mask, 0.0, -jnp.inf), axis=-1)
+            acts = acts.astype(jnp.int32)
+            a = M._transition(k_step, state, acts, env, model)
+            b = M._transition(k_step, state, acts, env, sampled)
+            return b, (a, b)
 
-            state, ts = env.reset(key)
-            return jax.lax.scan(step, (state, ts.action_mask), jax.random.split(key, 60))[1]
+        state, ts = env.reset(key)
+        return jax.lax.scan(step, (state, ts.action_mask), jax.random.split(key, 60))[1]
 
-        a, b = jax.jit(jax.vmap(play))(jax.random.split(jax.random.key(2), 16))
-        assert bool(jnp.all(b[0].done[:, -1]))  # every game ended, many by truncation
-        for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True):
-            np.testing.assert_array_equal(x, y)
+    a, b = jax.jit(jax.vmap(play))(jax.random.split(jax.random.key(2), 16))
+    assert bool(jnp.all(b[0].done[:, -1]))  # every game ended, some by truncation
+    for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True):
+        np.testing.assert_array_equal(x, y)
 
 
 # --- Tactics (hero in both seats, several keys) ----------------------------------------

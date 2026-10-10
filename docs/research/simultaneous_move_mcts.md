@@ -523,7 +523,10 @@ is a useful template:
 
 - **Deterministic tie-breaking in DUCT.** Use random tie-breaking [Bosansky16].
   Unvisited actions should get a large finite priority plus noise, not `+inf`.
-  Otherwise the ties between unvisited actions are broken in index order.
+  Otherwise the ties between unvisited actions are broken in index order. The
+  same happens in float32 if the priority is too large: `1e6 + U(0, 1)` takes
+  only 17 distinct values. Ranking the unvisited actions by the noise alone
+  avoids this.
 - **Reward scale against `C` and γ.** Normalize to `[0, 1]` first (§5). Exp3
   degrades with wide payoff ranges [Bosansky16].
 - **Exp3 overflow.** Use the max-subtracted or ratio form [Lisy13,
@@ -550,6 +553,40 @@ is a useful template:
   [Bosansky16 §5.2]. It is an optional optimization.
 
 ## Recommendations for slinky
+
+**Status.** Implemented in `src/slinky/mcts.py`. The recommendations and the
+implementation spec below are the original plan. Where the code differs, its
+module docstring and `MCTSConfig` are authoritative; the docstring's "Defaults
+and why" section has the measurements behind each change. The changes:
+
+- **Values.** Each player's statistics use its own value in `[-1, 1]` (there is
+  no `u1 = 1 − u0`, so 3 and 4 snakes work too), mapped to `[0, 1]` only inside
+  the UCB formulas. Exact outcomes follow `env.win_loss_reward`: a loss is −1
+  and a win +1. A mutual elimination is worth `draw_value`, −0.5 by default
+  ("contempt"), not ½, and a game cut off by `max_turns` is 0 for every living
+  snake.
+- **Leaf evaluation.** `slinky.heuristic.evaluate` replaces
+  `v0 = ½ + ½·tanh(Δ/τ)`. Its score adds food in the territory, length, hunger
+  and a trap term to the time-aware Voronoi territory, and its values are
+  `clip(tanh(score difference), −0.99, 0.99)`.
+- **DUCT constant.** `exploration = 0.25`, not `C = 1.4`. The heuristic's
+  values are compressed, so a large `C` spreads the visits almost uniformly.
+- **Transitions.** By default (`spawn_food=False`) the tree uses the
+  deterministic alternative: `rules.rules_step` without the food spawn. It has
+  the same strength per simulation and 1.4x the simulations per second.
+  `spawn_food=True` is the spec's `env.step`, with the spawn sampled once per
+  node.
+- **Final move.** `final` is `"max"` (the default) or `"sample"`; there is no
+  `"mix"` or `"argmax"`. `"max"` is also RM's default: it plays the largest
+  average-strategy move, the spec's purified option. `"sample"` draws from the
+  visit counts (DUCT) or the average strategy (RM).
+- **Data layout.** There are no parent pointers. Each simulation records its
+  path (node and joint action per level, at most `max_depth = 32` levels), and
+  the backup scatters along it. RM's joint table is `joint_visits[M, 4**N]` and
+  `joint_value[M, 4**N, N]`, so it also works for N players.
+- **Selection details.** Unvisited moves come first, in uniformly random order
+  (there is no `BIG` constant). Each depth of a descent draws its own noise.
+  Dead snakes and snakes that certainly starve get a single action.
 
 1. **Default: DUCT on the joint-action (stacked matrix) tree.** Use
    per-player UCB1, values in `[0, 1]` (`u1 = 1 − u0`), `C = 1.4`, random
@@ -585,6 +622,9 @@ is a useful template:
    with formulas, data layout and expected trends, is below.
 
 ### Implementation spec (duel; written to generalize to N players)
+
+This is the original plan. See the [status note](#recommendations-for-slinky)
+above for where `src/slinky/mcts.py` differs.
 
 **Data layout.** One tree per game, `vmap`ped over games by `play_match`.
 

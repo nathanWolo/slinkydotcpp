@@ -105,6 +105,19 @@ A policy is a function `(key, state, timestep) -> int32[N]` for one game.
 `random_legal(env)` is the reference opponent: it picks uniformly among the
 moves that don't certainly die next turn.
 
+`batch_size` is the number of game slots simulated at once: when a game
+ends, its slot starts the next one, so no slot waits for the longest game
+(game lengths are heavy-tailed; this made MCTS evaluations 3-3.5x faster).
+Game `g` depends only on `(key, g)`, so the result is the same for every
+`batch_size`. `run_match` also reports the loop iterations and slot
+utilisation, plays a range of game ids (`first_game`) and takes a progress
+callback.
+
+`benchmarks/strength.py` plays all pairs of two agent lists and keeps the
+results in a resumable JSONL file (`--table` prints markdown tables);
+`--workers 4` runs four matchups at once, each in a process pinned to its
+own core, which is the fast path on a 4-core machine.
+
 ## Baselines
 
 [`baselines/`](baselines/) has single-file RL baselines trained by self-play.
@@ -126,10 +139,13 @@ python -m slinky.replay --a mcts-256 --b heuristic --games 4 --out replays/mcts.
 python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --html replays/four.html   # 4 snakes
 ```
 
-- **Agents** come from the registry in `slinky.agents`: `random_legal`,
-  `random`, `heuristic`, `dqn` (the checkpoint in `baselines/checkpoints/`)
-  or `dqn:<run dir>`, and `mcts-<simulations>[:field=value...]`, e.g.
-  `mcts-128:exploration=1.0`.
+- **Agents** come from the registry in `slinky.agents` (shared with
+  `benchmarks/strength.py`): `random_legal`, `random`, `heuristic`, `dqn`
+  (the checkpoint in `baselines/checkpoints/`) or `dqn:<run dir>`, and
+  `mcts-<simulations>` with dash shorthands and/or `:field=value`
+  overrides of `MCTSConfig`, e.g. `mcts-256-rm`, `mcts-64-rollout` or
+  `mcts-128:exploration=0.5`. Names are shown in a canonical form that
+  lists only non-default settings.
 - **The viewer** shows the board (API coordinates, `(0, 0)` bottom-left),
   each snake's length and health, eliminations with the engine's cause, a
   health-by-turn strip that doubles as the scrubber, the match score and the

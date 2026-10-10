@@ -69,6 +69,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from jax.custom_batching import custom_vmap
 
 from slinky import rules
 from slinky.env import BattlesnakeEnv
@@ -292,35 +293,85 @@ def _pack(grid: jax.Array) -> jax.Array:
 
 
 def _packed_neighbours(rows: jax.Array, width: int, wrapped: bool) -> jax.Array:
-    """:func:`neighbours` on bit-packed rows uint32[..., H]."""
+    """:func:`neighbours` on bit-packed rows uint32[..., H, B] (board rows, then games)."""
     full = jnp.uint32((1 << width) - 1)
     if wrapped:
         left = (rows << 1) | (rows >> (width - 1))
         right = (rows >> 1) | (rows << (width - 1))
-        return ((left | right) & full) | jnp.roll(rows, 1, axis=-1) | jnp.roll(rows, -1, axis=-1)
-    zero = jnp.zeros_like(rows[..., :1])
-    up = jnp.concatenate([zero, rows[..., :-1]], axis=-1)
-    down = jnp.concatenate([rows[..., 1:], zero], axis=-1)
+        return ((left | right) & full) | jnp.roll(rows, 1, axis=-2) | jnp.roll(rows, -1, axis=-2)
+    zero = jnp.zeros_like(rows[..., :1, :])
+    up = jnp.concatenate([zero, rows[..., :-1, :]], axis=-2)
+    down = jnp.concatenate([rows[..., 1:, :], zero], axis=-2)
     return (((rows << 1) | (rows >> 1)) & full) | up | down
 
 
 def _fill_stats_packed(countdown, heads, lengths, food, tails, steps, wrapped, wait) -> FillStats:
     """:func:`fill_stats` on bit-packed rows: one uint32 per board row and snake.
 
+    One game is run as a batch of one (see :func:`_packed_fill`).
+    """
+    fill = _packed_fill(steps, wrapped, wait)
+    out = fill(*(x[None] for x in (countdown, heads, lengths, food, tails)))
+    return FillStats(*(x[0] for x in out))
+
+
+@functools.cache
+def _packed_fill(steps: int, wrapped: bool, wait: bool) -> Callable[..., tuple[jax.Array, ...]]:
+    """The packed fill of a batch of games (a leading axis on every argument).
+
+    It is a ``custom_vmap``. A plain ``vmap`` would put its axis in front, which
+    leaves the dozen rows of one board as the fastest-varying axis. Instead, a
+    ``vmap`` of this function (nested ones too) folds its axis into the batch,
+    and the race runs with the games on the last axis, so XLA vectorizes across
+    games. That makes a whole MCTS search 15-20% faster on CPU, with the same
+    integer results.
+    """
+
+    @custom_vmap
+    def fill(countdown, heads, lengths, food, tails):
+        d = jnp.arange(1, steps + 1)
+        open_rows = _pack(countdown[:, None] <= d[None, :, None, None])  # [B, steps, H]
+        args = (open_rows, _pack(heads), lengths, _pack(food), tails)
+        # Games last. The barrier keeps XLA from fusing these transposes into the loop.
+        args = jax.lax.optimization_barrier(tuple(jnp.moveaxis(x, 0, -1) for x in args))
+        out = _packed_race(*args, countdown.shape[-1], wrapped, wait)
+        return tuple(jnp.moveaxis(x, -1, 0) for x in out)
+
+    @fill.def_vmap
+    def fold(axis_size, in_batched, *args):
+        args = [
+            x if batched else jnp.broadcast_to(x, (axis_size, *x.shape))
+            for x, batched in zip(args, in_batched, strict=True)
+        ]
+        out = fill(*(x.reshape(-1, *x.shape[2:]) for x in args))
+        return tuple(x.reshape(axis_size, -1, *x.shape[1:]) for x in out), (True,) * len(out)
+
+    return fill
+
+
+def _packed_race(open_rows, seeds, lengths, food_rows, tails, width, wrapped, wait):
+    """The race of :func:`_fill_stats_packed`, for ``B`` games on the last axis.
+
     Each step, every snake's new cells are ``neighbours(frontier) & ~visited &
     open``, where ``open`` is ``countdown <= d``. A new cell that nobody reached
     earlier is claimed by the snake reaching it, unless another snake that is
     at least as long reaches it on the same step.
-    """
-    n, h, w = heads.shape
-    alive = jnp.any(heads, axis=(1, 2))
 
-    def any_snake(rows: jax.Array) -> jax.Array:  # [N, H] -> [N, H], OR over snakes, broadcast
+    Takes the open cells of each step ``open_rows`` uint32[steps, H, B], the
+    packed heads ``seeds`` uint32[N, H, B], ``lengths`` int32[N, B],
+    ``food_rows`` uint32[H, B] and ``tails`` int32[N, 2, B]. Returns the
+    :class:`FillStats` fields, each ``[N, B]``.
+    """
+    steps, h, b = open_rows.shape
+    n = seeds.shape[0]
+    alive = jnp.any(seeds != 0, axis=1)
+
+    def any_snake(rows: jax.Array) -> jax.Array:  # [N, H, B]: OR over snakes, broadcast
         merged = functools.reduce(jnp.bitwise_or, [rows[j] for j in range(n)])
-        return jnp.broadcast_to(merged, (n, h))
+        return jnp.broadcast_to(merged, rows.shape)
 
     # beats[i, j]: snake j takes a cell from snake i when both reach it on the same step.
-    beats = ~jnp.eye(n, dtype=bool) & alive[None, :] & (lengths[None, :] >= lengths[:, None])
+    beats = ~jnp.eye(n, dtype=bool)[:, :, None] & alive[None] & (lengths[None] >= lengths[:, None])
     beat_masks = jnp.where(beats, jnp.uint32(_ALL_BITS), jnp.uint32(0))
 
     def claim(fresh: jax.Array) -> jax.Array:
@@ -329,23 +380,20 @@ def _fill_stats_packed(countdown, heads, lengths, food, tails, steps, wrapped, w
         )
         return fresh & ~beaten
 
-    seeds = _pack(heads)
-    food_rows = jnp.broadcast_to(_pack(food), (n, h))
+    food_rows = jnp.broadcast_to(food_rows, (n, h, b))
+    # Pre-broadcasting the open cells to every snake keeps broadcasts out of the loop
+    # body, which is noticeably faster on CPU.
+    open_rows = jnp.broadcast_to(open_rows[:, None], (steps, n, h, b))
     d_all = jnp.arange(1, steps + 1)
-    # The open cells for each step, precomputed, broadcast to every snake. Pre-broadcasting
-    # keeps broadcasts out of the loop body, which is noticeably faster on CPU.
-    open_rows = jnp.broadcast_to(
-        _pack(countdown[None] <= d_all[:, None, None])[:, None], (steps, n, h)
-    )
-    dist0 = jnp.where(jnp.any((seeds & food_rows) != 0, axis=-1), 0, INF)
+    dist0 = jnp.where(jnp.any((seeds & food_rows) != 0, axis=1), 0, INF)
 
     def step(carry, x):
         d, open_d = x
         visited, frontier, claimed, reached, dist_food = carry
         grow_from = visited if wait else frontier
-        new = _packed_neighbours(grow_from, w, wrapped) & ~visited & open_d
+        new = _packed_neighbours(grow_from, width, wrapped) & ~visited & open_d
         claimed = claimed | claim(new & ~reached)
-        hit = jnp.any((new & food_rows) != 0, axis=-1)
+        hit = jnp.any((new & food_rows) != 0, axis=1)
         dist_food = jnp.where((dist_food == INF) & hit, d, dist_food)
         return (visited | new, new, claimed, reached | any_snake(new), dist_food), None
 
@@ -353,17 +401,17 @@ def _fill_stats_packed(countdown, heads, lengths, food, tails, steps, wrapped, w
     (visited, _, claimed, _, dist_food), _ = jax.lax.scan(step, init, (d_all, open_rows))
 
     def count(rows: jax.Array) -> jax.Array:
-        return jnp.sum(jax.lax.population_count(rows), axis=-1, dtype=jnp.int32)
+        return jnp.sum(jax.lax.population_count(rows), axis=1, dtype=jnp.int32)
 
-    tx = jnp.clip(tails[:, 0], 0, w - 1).astype(jnp.uint32)
+    tx = jnp.clip(tails[:, 0], 0, width - 1).astype(jnp.uint32)
     ty = jnp.clip(tails[:, 1], 0, h - 1)
     tail_row = jnp.take_along_axis(visited, ty[:, None], axis=1)[:, 0]
-    return FillStats(
-        space=count(visited),
-        territory=count(claimed),
-        food_territory=count(claimed & food_rows),
-        dist_food=dist_food.astype(jnp.int32),
-        tail_reachable=((tail_row >> tx) & 1) == 1,
+    return (
+        count(visited),
+        count(claimed),
+        count(claimed & food_rows),
+        dist_food.astype(jnp.int32),
+        ((tail_row >> tx) & 1) == 1,
     )
 
 

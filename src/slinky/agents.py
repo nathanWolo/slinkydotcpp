@@ -16,25 +16,46 @@ Names:
   is ``baselines/checkpoints/dqn-duel-seed0``. It reads egocentric
   observations (``needs_obs``), so it only plays on the board size it was
   trained on (11x11, not wrapped). ``baselines/`` is not part of the installed
-  package: this agent needs a checkout of the repository.
+  package: this agent needs a checkout of the repository. A relative run dir
+  is looked up in the working directory, then in the repository.
 * ``mcts-<n>``: simultaneous-move MCTS (:func:`slinky.mcts.mcts`) with ``n``
-  simulations per move. Other :class:`slinky.mcts.MCTSConfig` fields can be set
-  after colons, e.g. ``mcts-128:exploration=1.0:selection=rm``. Values are
-  converted to the type of the field's default (``true``/``false`` for
+  simulations per move and the default :class:`slinky.mcts.MCTSConfig`. Other
+  fields are set with dash-separated shorthands (``mcts-256-rm-c0.5``; the list
+  is in :data:`MCTS_SHORTHANDS`) or with ``:field=value`` overrides after them
+  (``mcts-128:exploration=1.0:selection=rm``), in any order. Override values
+  are converted to the type of the field's default (``true``/``false`` for
   booleans).
 
-Agents are cached per ``(name, config)``: calling :func:`make_agent` twice
-returns the same policy object, which keeps ``play_match``'s jit cache warm.
+**Canonical names.** :func:`parse_agent` returns an :class:`AgentSpec` whose
+``name`` is canonical: it lists only the settings that differ from the
+current defaults, shorthands first (in the order of :data:`MCTS_SHORTHANDS`),
+then ``:field=value`` for settings no shorthand can express. A canonical name
+parses back to the same config, so two different configs never share a name
+(``mcts-64-rollout`` and ``mcts-64:rollout_steps=10`` are both
+``mcts-64-rollout10``). A field set twice is an error, and so is a setting
+with no effect on the search, which would otherwise give one agent two names:
+``gamma`` without ``rm``; ``c``, ``noise`` or ``tuned`` with ``rm``; ``c``
+with ``tuned``; ``rollout_policy`` without rollout steps; ``depth`` above the
+number of simulations (the search caps it there).
+
+Agents are cached per ``(canonical name, config)``: calling :func:`make_agent`
+twice returns the same policy object, which keeps ``play_match``'s jit cache
+warm.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import decimal
 import functools
+import hashlib
 import importlib
 import importlib.util
+import json
+import math
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any, NamedTuple
@@ -50,14 +71,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DQN_SCRIPT = REPO_ROOT / "baselines" / "dqn.py"
 DEFAULT_DQN_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "dqn-duel-seed0"
 
-AGENT_NAMES = ("random_legal", "random", "heuristic", "dqn", "dqn:<run dir>", "mcts-<n>[:k=v...]")
+AGENT_NAMES = (
+    "random_legal", "random", "heuristic", "dqn", "dqn:<run dir>",
+    "mcts-<n>[-shorthand...][:field=value...]",
+)  # fmt: skip
+SIMPLE_AGENTS = ("random_legal", "random", "heuristic")
 
 
 class Agent(NamedTuple):
     """A named policy.
 
     Attributes:
-      name: the registry name it was made from (e.g. ``"mcts-128"``).
+      name: the canonical registry name it was made from (e.g. ``"mcts-128"``).
       policy: ``(key, state, timestep) -> int32[N]`` for one game; only the
         entries of the seats the agent controls are used.
       needs_obs: the policy reads ``timestep.obs``, so the env that steps the
@@ -72,22 +97,68 @@ class Agent(NamedTuple):
     description: str
 
 
-_CACHE: dict[tuple[str, GameConfig], Agent] = {}
+@dataclasses.dataclass(frozen=True)
+class AgentSpec:
+    """What an agent name means, before anything is built (parsing reads no files).
+
+    Attributes:
+      name: the canonical name (see the module docstring).
+      kind: ``"random_legal"``, ``"random"``, ``"heuristic"``, ``"dqn"`` or ``"mcts"``.
+      mcts: the search settings of an ``mcts`` agent.
+      checkpoint: the resolved run directory of a ``dqn`` agent.
+    """
+
+    name: str
+    kind: str
+    mcts: Any = None  # slinky.mcts.MCTSConfig (imported lazily)
+    checkpoint: Path | None = None
+
+    @property
+    def sims(self) -> int:
+        """Simulations per move (0 for agents without a search)."""
+        return self.mcts.num_simulations if self.mcts is not None else 0
 
 
-def make_agent(name: str, config: GameConfig | None = None) -> Agent:
+def parse_agent(name: str) -> AgentSpec:
+    """The :class:`AgentSpec` of ``name``, with its canonical name.
+
+    Raises:
+      ValueError: unknown name, bad ``mcts`` setting, or a setting with no effect.
+    """
+    name = name.strip()
+    if name in SIMPLE_AGENTS:
+        return AgentSpec(name, name)
+    if name == "dqn" or name.startswith("dqn:"):
+        return _parse_dqn(name)
+    if name.startswith("dqn@"):
+        raise ValueError(f"{name!r}: write dqn:<run dir>")
+    if name.startswith("mcts-"):
+        return _parse_mcts(name)
+    raise ValueError(f"unknown agent {name!r}; known agents: {', '.join(AGENT_NAMES)}")
+
+
+def canonical_name(name: str) -> str:
+    """``parse_agent(name).name``."""
+    return parse_agent(name).name
+
+
+def make_agent(name: str | AgentSpec, config: GameConfig | None = None) -> Agent:
     """The agent called ``name`` (see the module docstring) for games with ``config``.
 
     Raises:
-      ValueError: unknown name, bad ``mcts`` override, or a board the agent can't play.
+      ValueError: unknown name, bad ``mcts`` setting, or a game the agent can't play.
       FileNotFoundError: ``dqn`` without ``baselines/dqn.py`` or its checkpoint.
     """
     config = config or GameConfig()
-    name = name.strip()
-    key = (name, config)
+    spec = parse_agent(name) if isinstance(name, str) else name
+    key = (spec.name, config)
     if key not in _CACHE:
-        _CACHE[key] = _build(name, config)
+        check_game(spec, config)
+        _CACHE[key] = _build(spec, config)
     return _CACHE[key]
+
+
+_CACHE: dict[tuple[str, GameConfig], Agent] = {}
 
 
 @functools.lru_cache(maxsize=32)
@@ -96,24 +167,72 @@ def make_env(config: GameConfig, obs: bool) -> BattlesnakeEnv:
     return BattlesnakeEnv(config, obs="egocentric" if obs else None)
 
 
-def _build(name: str, config: GameConfig) -> Agent:
+def check_game(spec: AgentSpec, config: GameConfig) -> None:
+    """Raise ``ValueError`` if the agent can't play games with ``config``.
+
+    Raises ``FileNotFoundError`` for a ``dqn`` agent without its checkpoint.
+    """
+    if spec.kind == "mcts":
+        mcts = importlib.import_module("slinky.mcts")
+        if config.num_snakes > mcts.MAX_SNAKES:
+            raise ValueError(f"{spec.name}: MCTS supports at most {mcts.MAX_SNAKES} snakes")
+    elif spec.kind == "dqn":
+        trained = _dqn_config(spec.checkpoint).game
+        if (config.width, config.height) != (trained.width, trained.height) or (
+            config.ruleset.wrapped != trained.ruleset.wrapped
+        ):
+            raise ValueError(
+                f"{spec.name} was trained on {trained.width}x{trained.height} boards "
+                f"({'wrapped' if trained.ruleset.wrapped else 'not wrapped'}) and can't play "
+                f"{config.width}x{config.height} ({config.ruleset.value})"
+            )
+
+
+def agent_config(spec: AgentSpec) -> dict[str, Any]:
+    """Everything that defines the agent's play, as plain JSON data.
+
+    The full config, not only the non-default settings: every ``MCTSConfig``
+    field, the heuristic weights, a DQN's network config and a hash of its
+    parameters. Benchmarks hash it to tell results of different agents apart.
+    """
+    if spec.kind in ("random_legal", "random"):
+        config: dict[str, Any] = {"type": spec.kind}
+    elif spec.kind == "heuristic":
+        heuristic = importlib.import_module("slinky.heuristic")
+        config = {"type": "heuristic", "weights": heuristic.DEFAULT_WEIGHTS._asdict()}
+    elif spec.kind == "dqn":
+        path = spec.checkpoint
+        params = _checkpoint_files(path)[0]
+        config = {
+            "type": "dqn",
+            "checkpoint": _display_path(path),
+            "greedy": True,
+            "params_sha256": hashlib.sha256(params.read_bytes()).hexdigest()[:16],
+            "network": dataclasses.asdict(_dqn_config(path)),
+        }
+    else:
+        fields = {f.name: getattr(spec.mcts, f.name) for f in dataclasses.fields(spec.mcts)}
+        fields = {k: v._asdict() if hasattr(v, "_asdict") else v for k, v in fields.items()}
+        config = {"type": "mcts", **fields}
+    return json.loads(json.dumps(config, sort_keys=True))  # as it reads back from JSON
+
+
+def _build(spec: AgentSpec, config: GameConfig) -> Agent:
     env = make_env(config, False)
-    if name == "random_legal":
+    if spec.kind == "random_legal":
         desc = "uniformly random among the moves that are not certainly fatal"
-        return Agent(name, random_legal(env), False, desc)
-    if name == "random":
+        return Agent(spec.name, random_legal(env), False, desc)
+    if spec.kind == "random":
         desc = "uniformly random over all four moves"
-        return Agent(name, _random(env), False, desc)
-    if name == "heuristic":
+        return Agent(spec.name, _random(env), False, desc)
+    if spec.kind == "heuristic":
         from slinky.heuristic import heuristic
 
         desc = "hand-written snake: safety tiers, then a one-ply duel search"
-        return Agent(name, heuristic(env), False, desc)
-    if name == "dqn" or name.startswith("dqn:"):
-        return _dqn_agent(name, config)
-    if re.fullmatch(r"mcts-\d+(:.*)?", name):
-        return _mcts_agent(name, config)
-    raise ValueError(f"unknown agent {name!r}; known agents: {', '.join(AGENT_NAMES)}")
+        return Agent(spec.name, heuristic(env), False, desc)
+    if spec.kind == "dqn":
+        return _dqn_agent(spec)
+    return _mcts_agent(spec, env)
 
 
 @functools.lru_cache(maxsize=16)
@@ -149,93 +268,310 @@ def load_dqn_module() -> ModuleType:
     return module
 
 
-def _resolve_run_dir(text: str) -> Path:
-    path = Path(text).expanduser()
+def _parse_dqn(name: str) -> AgentSpec:
+    _, sep, text = name.partition(":")
+    if sep and not text.strip():
+        raise ValueError("write dqn:<run dir>, e.g. dqn:baselines/checkpoints/dqn-duel-seed0")
+    path = Path(text.strip()).expanduser() if sep else DEFAULT_DQN_CHECKPOINT
     if not path.is_absolute() and not path.exists() and (REPO_ROOT / path).exists():
         path = REPO_ROOT / path
-    if not (path / "params.npz").is_file() or not (path / "config.json").is_file():
+    path = path.resolve()
+    if path == DEFAULT_DQN_CHECKPOINT.resolve():
+        return AgentSpec("dqn", "dqn", checkpoint=path)
+    return AgentSpec(f"dqn:{_display_path(path)}", "dqn", checkpoint=path)
+
+
+def _display_path(path: Path) -> str:
+    """Relative to the repository if inside it, else absolute."""
+    return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else str(path)
+
+
+def _checkpoint_files(path: Path) -> tuple[Path, Path]:
+    params, config = path / "params.npz", path / "config.json"
+    if not params.is_file() or not config.is_file():
         raise FileNotFoundError(
             f"no DQN checkpoint in {path} (expected params.npz and config.json there)"
         )
-    return path.resolve()
+    return params, config
 
 
-def _dqn_agent(name: str, config: GameConfig) -> Agent:
-    _, sep, path = name.partition(":")
-    if sep and not path:
-        raise ValueError("write dqn:<run dir>, e.g. dqn:baselines/checkpoints/dqn-duel-seed0")
-    run_dir = _resolve_run_dir(path) if sep else _resolve_run_dir(str(DEFAULT_DQN_CHECKPOINT))
+def _dqn_config(path: Path) -> Any:
+    _checkpoint_files(path)
+    return load_dqn_module().load_config(str(path))
+
+
+def _dqn_agent(spec: AgentSpec) -> Agent:
     dqn = load_dqn_module()
-    cfg = dqn.load_config(str(run_dir))
-    trained = cfg.game
-    if (config.width, config.height) != (trained.width, trained.height) or (
-        config.ruleset.wrapped != trained.ruleset.wrapped
-    ):
-        raise ValueError(
-            f"{name} was trained on {trained.width}x{trained.height} boards "
-            f"({'wrapped' if trained.ruleset.wrapped else 'not wrapped'}) and can't play "
-            f"{config.width}x{config.height} ({config.ruleset.value})"
-        )
-    params = dqn.load_params(str(run_dir), cfg)
+    cfg = _dqn_config(spec.checkpoint)
+    params = dqn.load_params(str(spec.checkpoint), cfg)
 
     def q_fn(obs: jax.Array) -> jax.Array:
         return dqn.q_network(params, obs, cfg)
 
-    desc = f"greedy self-play DQN ({run_dir.name})"
-    return Agent(name, greedy_from_q(q_fn), True, desc)
+    desc = f"greedy self-play DQN ({spec.checkpoint.name})"
+    return Agent(spec.name, greedy_from_q(q_fn), True, desc)
 
 
 # --- MCTS ------------------------------------------------------------------------
 
 
+@dataclasses.dataclass(frozen=True)
+class Shorthand:
+    """A dash-separated shorthand of ``mcts-<n>`` that sets config fields.
+
+    ``number`` is None for a flag and ``int`` or ``float`` for ``name<value>``;
+    ``default`` is the value when the number is omitted (None: required).
+    ``apply(value)`` gives the fields it sets. ``show(config, defaults)`` is the
+    value the canonical name shows: None or False when the config does not use
+    the shorthand (default settings, or a value it can't spell, such as a
+    negative number, which then goes in a ``:field=value`` override).
+    """
+
+    name: str
+    doc: str
+    fields: tuple[str, ...]
+    apply: Callable[[Any], dict[str, Any]]
+    show: Callable[[Any, Any], Any]
+    number: type | None = None
+    default: float | None = None
+
+    def token(self, config: Any, defaults: Any) -> str | None:
+        v = self.show(config, defaults)
+        if v is None or v is False:
+            return None
+        return self.name if self.number is None else f"{self.name}{format_number(v)}"
+
+
+def _changed(field: str) -> Callable[[Any, Any], Any]:
+    """Show the field's value if it differs from the default and is a plain number."""
+
+    def show(c: Any, d: Any) -> Any:
+        v = getattr(c, field)
+        return v if v != getattr(d, field) and _spellable(v) else None
+
+    return show
+
+
+def _rollout(policy: str) -> Callable[[Any, Any], Any]:
+    return lambda c, d: c.rollout_steps if c.rollout_steps and c.rollout_policy == policy else None
+
+
+def _contempt(c: Any, d: Any) -> Any:
+    v = 0.0 - c.draw_value
+    return v if c.draw_value != d.draw_value and _spellable(v) else None
+
+
+# fmt: off
+MCTS_SHORTHANDS: tuple[Shorthand, ...] = (
+    Shorthand("rm", "regret-matching selection instead of DUCT (selection='rm')", ("selection",),
+              lambda v: {"selection": "rm"}, lambda c, d: c.selection == "rm"),
+    Shorthand("tuned", "UCB1-Tuned variance bound in DUCT (ucb1_tuned=True)", ("ucb1_tuned",),
+              lambda v: {"ucb1_tuned": True}, lambda c, d: c.ucb1_tuned is True),
+    Shorthand("c", "c<x>: DUCT's exploration constant, e.g. c0.5 (exploration=x)",
+              ("exploration",), lambda v: {"exploration": v}, _changed("exploration"), float),
+    Shorthand("noheur", "no heuristic leaf evaluation: living snakes are worth 0 (leaf='none')",
+              ("leaf",), lambda v: {"leaf": "none"}, lambda c, d: c.leaf == "none"),
+    Shorthand("rollout", "rollout[<k>]: k random-policy rollout turns before the leaf (default 10)",
+              ("rollout_steps", "rollout_policy"),
+              lambda v: {"rollout_steps": v, "rollout_policy": "random"}, _rollout("random"),
+              int, 10),
+    Shorthand("hrollout", "hrollout[<k>]: like rollout, with the heuristic policy (default 10)",
+              ("rollout_steps", "rollout_policy"),
+              lambda v: {"rollout_steps": v, "rollout_policy": "heuristic"},
+              _rollout("heuristic"), int, 10),
+    Shorthand("spawn", "sample food spawns inside the tree (spawn_food=True)", ("spawn_food",),
+              lambda v: {"spawn_food": True}, lambda c, d: c.spawn_food is True),
+    Shorthand("sample", "sample the final move from the visit counts (final='sample')",
+              ("final",), lambda v: {"final": "sample"}, lambda c, d: c.final == "sample"),
+    Shorthand("contempt", "contempt<x>: a mutual elimination is worth -x inside the search "
+              "(draw_value=-x; not the heuristic's Weights.contempt)", ("draw_value",),
+              lambda v: {"draw_value": 0.0 - v}, _contempt, float),
+    Shorthand("noise", "noise<x>: scale of DUCT's tie-breaking noise (tie_noise=x)",
+              ("tie_noise",), lambda v: {"tie_noise": v}, _changed("tie_noise"), float),
+    Shorthand("gamma", "gamma<x>: regret matching's exploration mix (rm_gamma=x); needs rm",
+              ("rm_gamma",), lambda v: {"rm_gamma": v}, _changed("rm_gamma"), float),
+    Shorthand("depth", "depth<k>: deepest descent from the root (max_depth=k), at most <n>",
+              ("max_depth",), lambda v: {"max_depth": v}, _changed("max_depth"), int),
+)
+# fmt: on
+_SHORTHAND_BY_NAME = {s.name: s for s in MCTS_SHORTHANDS}
+
+
+def mcts_shorthand_help() -> str:
+    """One line per shorthand, for ``--help`` texts."""
+    width = max(len(s.name) for s in MCTS_SHORTHANDS) + 3
+    return "\n".join(f"  {s.name:<{width}}{s.doc}" for s in MCTS_SHORTHANDS)
+
+
+def format_number(v: float | int) -> str:
+    """The shortest text that reads back as ``v``, with no exponent (``1e-05``: ``0.00001``)."""
+    if isinstance(v, int) and not isinstance(v, bool):
+        return str(v)
+    text = format(decimal.Decimal(repr(float(v))), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _spellable(v: Any) -> bool:
+    """A number a dash shorthand can spell (digits and a point)."""
+    return isinstance(v, (int, float)) and math.isfinite(v) and v >= 0
+
+
+def _parse_number(kind: type, text: str, what: str) -> Any:
+    try:
+        value = kind(text)
+    except ValueError:
+        article = "an" if kind is int else "a"
+        raise ValueError(f"{what}: expected {article} {kind.__name__}") from None
+    if kind is float and not math.isfinite(value):
+        raise ValueError(f"{what}: expected a finite number")
+    return value
+
+
 def _coerce(field: str, text: str, default: Any) -> Any:
     kind = type(default)
-    try:
-        if kind is bool:
-            lowered = text.lower()
-            if lowered in ("1", "true", "yes", "on"):
-                return True
-            if lowered in ("0", "false", "no", "off"):
-                return False
-            raise ValueError(text)
-        if kind in (int, float, str):
-            return kind(text)
-    except ValueError:
-        raise ValueError(f"mcts option {field}={text!r}: expected a {kind.__name__}") from None
+    what = f"mcts option {field}={text!r}"
+    if kind is bool:
+        lowered = text.lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+        raise ValueError(f"{what}: expected true or false")
+    if kind in (int, float):
+        return _parse_number(kind, text, what)
+    if kind is str:
+        return text
     raise ValueError(f"mcts option {field} ({kind.__name__}) can't be set from an agent name")
 
 
-def parse_mcts_name(name: str) -> tuple[int, dict[str, Any]]:
-    """``"mcts-128:exploration=1.0"`` -> ``(128, {"exploration": 1.0})``.
-
-    Field names and types come from :class:`slinky.mcts.MCTSConfig` at runtime.
-    """
-    m = re.fullmatch(r"mcts-(\d+)((?::[^:]*)*)", name)
-    if m is None:
-        raise ValueError(f"bad mcts agent name {name!r}; write mcts-<n>[:field=value...]")
-    num_simulations = int(m.group(1))
+def _parse_mcts(name: str) -> AgentSpec:
     mcts = importlib.import_module("slinky.mcts")
-    fields = {f.name for f in dataclasses.fields(mcts.MCTSConfig)}
     defaults = mcts.MCTSConfig()
-    overrides: dict[str, Any] = {}
-    for item in filter(None, m.group(2).split(":")):
+    head, *overrides = name.split(":")
+    parts = head.split("-")
+    if len(parts) < 2 or not parts[1].isdigit() or int(parts[1]) < 1:
+        raise ValueError(
+            f"bad mcts agent name {name!r}; write mcts-<n>[-shorthand...][:field=value...] "
+            "with n >= 1"
+        )
+    fields: dict[str, Any] = {"num_simulations": int(parts[1])}
+    given: dict[str, str] = {}  # field -> the item that set it
+
+    def put(item: str, values: dict[str, Any]) -> None:
+        for field, value in values.items():
+            if field in given:
+                raise ValueError(f"{name!r}: {given[field]!r} and {item!r} both set {field}")
+            given[field] = item
+            fields[field] = value
+
+    for token in parts[2:]:
+        match = re.fullmatch(r"([a-z]+)([0-9.]*)", token)
+        shorthand = _SHORTHAND_BY_NAME.get(match[1]) if match else None
+        if shorthand is None:
+            valid = ", ".join(s.name for s in MCTS_SHORTHANDS)
+            raise ValueError(f"{name!r}: unknown shorthand {token!r} (valid: {valid})")
+        digits = match[2]
+        if shorthand.number is None:
+            if digits:
+                raise ValueError(f"{name!r}: shorthand {shorthand.name!r} takes no number")
+            value = None
+        elif digits:
+            value = _parse_number(shorthand.number, digits, f"{name!r}: {token!r}")
+            if shorthand.number is int and value < 1:
+                raise ValueError(f"{name!r}: {token!r} must be >= 1")
+        elif shorthand.default is not None:
+            value = shorthand.number(shorthand.default)
+        else:
+            raise ValueError(
+                f"{name!r}: shorthand {shorthand.name!r} needs a number, e.g. {shorthand.name}1"
+            )
+        put(token, shorthand.apply(value))
+
+    known = {f.name for f in dataclasses.fields(mcts.MCTSConfig)} - {"num_simulations"}
+    for item in overrides:
         field, sep, text = item.partition("=")
         field = field.strip()
         if not sep:
             raise ValueError(f"mcts option {item!r} in {name!r}: write field=value")
         if field == "num_simulations":
             raise ValueError("set num_simulations with the name itself: mcts-<n>")
-        if field not in fields:
-            known = ", ".join(sorted(fields - {"num_simulations"}))
-            raise ValueError(f"unknown mcts option {field!r} in {name!r}; known options: {known}")
-        overrides[field] = _coerce(field, text.strip(), getattr(defaults, field))
-    return num_simulations, overrides
+        if field not in known:
+            raise ValueError(
+                f"unknown mcts option {field!r} in {name!r}; known options: "
+                f"{', '.join(sorted(known))}"
+            )
+        put(item, {field: _coerce(field, text.strip(), getattr(defaults, field))})
+
+    try:
+        config = mcts.MCTSConfig(**fields)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name!r}: {e}") from None
+    if inert := _inert_settings(config, defaults):
+        raise ValueError(f"{name!r}: {'; '.join(inert)}")
+    return AgentSpec(mcts_name(config), "mcts", mcts=config)
 
 
-def _mcts_agent(name: str, config: GameConfig) -> Agent:
-    num_simulations, overrides = parse_mcts_name(name)
+def _inert_settings(c: Any, d: Any) -> list[str]:
+    """Settings that differ from the defaults but do not change the search (see mcts.search)."""
+    out = []
+
+    def changed(field: str) -> bool:
+        return getattr(c, field) != getattr(d, field)
+
+    if c.selection == "rm":
+        duct_only = (("c", "exploration"), ("tuned", "ucb1_tuned"), ("noise", "tie_noise"))
+        out += [
+            f"{what} ({field}) has no effect with rm" for what, field in duct_only if changed(field)
+        ]
+    elif changed("rm_gamma"):
+        out.append("gamma (rm_gamma) has no effect without rm")
+    if c.selection != "rm" and c.ucb1_tuned and changed("exploration"):
+        out.append("c (exploration) has no effect with tuned")
+    if c.rollout_steps == 0 and changed("rollout_policy"):
+        out.append("rollout_policy has no effect without rollout steps")
+    sims = c.num_simulations
+    if changed("max_depth") and (
+        c.max_depth > sims or (c.max_depth == sims and d.max_depth >= sims)
+    ):
+        out.append(
+            f"depth{c.max_depth} has no effect: the search caps the depth at the number of "
+            f"simulations ({sims}, default depth {d.max_depth})"
+        )
+    return out
+
+
+def mcts_name(config: Any) -> str:
+    """The canonical name of an ``MCTSConfig`` (see the module docstring)."""
     mcts = importlib.import_module("slinky.mcts")
-    search = mcts.MCTSConfig(num_simulations=num_simulations, **overrides)
-    extra = "".join(f", {k}={v}" for k, v in overrides.items())
-    desc = f"simultaneous-move MCTS, {num_simulations} simulations{extra}"
-    return Agent(name, mcts.mcts(make_env(config, False), search), False, desc)
+    defaults = mcts.MCTSConfig()
+    tokens, covered = [], {"num_simulations"}
+    for shorthand in MCTS_SHORTHANDS:
+        if token := shorthand.token(config, defaults):
+            tokens.append(token)
+            covered.update(shorthand.fields)
+    overrides = []
+    for f in dataclasses.fields(config):
+        value = getattr(config, f.name)
+        if f.name not in covered and value != getattr(defaults, f.name):
+            if isinstance(value, bool):
+                text = str(value).lower()
+            elif isinstance(value, (int, float)):
+                text = format_number(value)
+            elif isinstance(value, str) and not re.search(r"[:=\s]", value):
+                text = value
+            else:
+                raise ValueError(f"mcts field {f.name}={value!r} has no agent-name spelling")
+            overrides.append(f":{f.name}={text}")
+    return "-".join(["mcts", str(config.num_simulations), *tokens]) + "".join(overrides)
+
+
+def _mcts_agent(spec: AgentSpec, env: BattlesnakeEnv) -> Agent:
+    mcts = importlib.import_module("slinky.mcts")
+    defaults = mcts.MCTSConfig()
+    extra = "".join(
+        f", {f.name}={getattr(spec.mcts, f.name)}"
+        for f in dataclasses.fields(spec.mcts)
+        if f.name != "num_simulations" and getattr(spec.mcts, f.name) != getattr(defaults, f.name)
+    )
+    desc = f"simultaneous-move MCTS, {spec.sims} simulations{extra}"
+    return Agent(spec.name, mcts.mcts(env, spec.mcts), False, desc)
