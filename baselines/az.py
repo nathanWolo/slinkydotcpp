@@ -1,6 +1,115 @@
 """AlphaZero for the 1v1 duel: self-play with network-guided search (single file, all JAX).
 
-PLACEHOLDER DOCSTRING (rewritten below once measured).
+* **One network, both snakes.** PPO's actor-critic torso (``baselines/ppo.py``:
+  egocentric 21x21x13 observations, 3x3 convs, a dense layer) with a policy head
+  (4 logits, illegal moves masked) and a ``tanh`` value head, evaluated for each
+  snake from its own view. ``--init-from`` copies the torso and policy head of a
+  PPO run (the value head too from an AZ run; PPO's was fit to discounted returns
+  with draws worth 0, a different target).
+* **Search.** :func:`slinky.mcts.search` with decoupled PUCT: each snake picks
+  its own move by ``q + c_puct * P * sqrt(N) / (1 + n)`` with the network's
+  priors and leaf values, one search for both snakes (see ``slinky.mcts``). The
+  network enters as an evaluator closure over the *traced* parameters, so new
+  parameters never recompile; under ``vmap`` over ``num_envs`` games each leaf
+  is one network call on ``2 * num_envs`` observations.
+* **Self-play.** Every turn searches every game (with Dirichlet noise in the
+  root priors), samples each snake's move from its root visit share before
+  ``temperature_turns``, then plays the search's own (most visited) move,
+  steps with the real food spawns and starts a new game where one ended.
+* **Targets.** A position gives one sample per living snake: the policy target
+  is its root visit share and the value target its game outcome,
+  ``heuristic.terminal_values`` of the final state with the search's
+  ``draw_value`` (win +1, loss -1, a mutual elimination -0.5, a game cut off at
+  ``max_turns`` 0): the scale of the tree's exact values. Values are per snake,
+  not forced zero-sum, since draws are not. A snake certain to starve has its
+  move fixed by the search, so it is left out of the policy loss.
+* **Replay with late outcomes.** Positions are stored as compact
+  :class:`~slinky.types.State` (under 1 KB, as in ``baselines/dqn.py``; the
+  observations would be 46 KB) with both targets and the game's id. A game's
+  outcome goes into a table when it ends; a sampled position of a game still
+  running gets weight 0 (:class:`Replay` argues why the table never aliases).
+  Sampling is uniform over the filled slots; ``replay_ratio`` sets the
+  gradient steps per iteration (the expected uses of each position).
+* **Augmentation.** A random one of the 8 board symmetries per sampled
+  position. The rules, the observations, the legal masks and the heuristic
+  commute with all 8 exactly (``tests/test_az.py`` checks it on real
+  positions), so a mirrored position is a real position with the permuted
+  policy target and the same outcome. The State is mirrored before the
+  observations are built (one gather per grid, cheaper than mirroring 2 x 23 KB
+  of observations).
+* **Learning.** Cross-entropy to the visit shares plus ``value_coef`` times the
+  value MSE, AdamW with gradient clipping and a linear learning-rate decay to
+  ``final_lr_frac`` of ``lr``.
+* **Expert iteration** (``teacher_env_steps``). The first env steps play the
+  heuristic-leaf DUCT search (``mcts-<teacher_simulations>``, which scores
+  0.715 against the heuristic at 256 simulations) instead of the network's,
+  with the same sampling and targets, so the network starts from a strong
+  teacher's visit distributions (Anthony et al. 2017).
+* **Heuristic blend** (``blend_env_steps``). The leaf value
+  ``lam * heuristic.evaluate + (1 - lam) * network``, lam falling linearly from
+  ``blend_start`` to 0 over the first env steps of the network phase.
+
+All of it runs on the device: a jitted chunk (:func:`make_train_chunk`) is a
+``lax.scan`` of iterations, each a ``lax.scan`` of ``num_steps`` self-play turns
+followed by a ``lax.scan`` of gradient steps, with the replay buffer updated in
+place (no copies in the compiled program). The Python loop only logs, evaluates
+(the network with search, ``az-<eval_simulations>``, and without, ``az-0``,
+against ``slinky.agents`` opponents) and saves checkpoints. The teacher and the
+network phase are two compiled chunks::
+
+    python baselines/az.py                                     # default run
+    python baselines/az.py --teacher-env-steps 1048576         # expert-iteration start
+    python baselines/az.py --init-from baselines/checkpoints/ppo-duel-seed0
+    python baselines/az.py --eval-only runs/az-20261010-120000 --eval-simulations 256
+    python baselines/az.py --resume runs/az-20261010-120000    # after an interruption
+
+The trained network plays as ``az-<n>[:<run dir>]`` in ``slinky.agents``
+(``az-0``: the raw network). ``--resume`` is exact when ``replay.npz`` was
+saved (``save_replay``, about 1 GB at the default capacity); without it the
+run resumes with an empty buffer and waits for ``learning_starts`` positions.
+
+**Defaults and why.** Measured on the 4-core CPU of this repository's other
+baselines, one process on cores 0-3, PPO's network:
+
+* ``num_simulations=64``. The network is about 95% of the cost of a search
+  (85-89 us per simulation against DUCT's 4.9; ``slinky.mcts``), so the budget
+  per move is the main price of self-play. The design study recommended 64;
+  fewer gives noisier targets (visit counts are coarse below about 16).
+  Self-play alone runs at about 390 env steps/s, and 310-330 with the default
+  learning (16 gradient steps of 1024 samples per 2048 env steps, about 20% of
+  the time). The teacher phase at 256 simulations runs at about 430 env steps/s
+  with learning (510-530 without). The SMOKE line below has a short run.
+* ``c_puct=0.5``, ``fpu_reduction=0.2``: ``slinky.mcts``'s PUCT defaults. The
+  search maps values to ``[0, 1]``, so 0.5 here is AlphaZero's 1.0 on its
+  ``[-1, 1]`` scale (it used 1.25). Untuned with network priors.
+* ``root_noise_frac=0.25`` (AlphaZero's), ``root_dirichlet_alpha=0.5``
+  (``slinky.mcts``'s default for 2-3 legal moves; untuned).
+* ``temperature_turns=16``: the opening varies (heuristic mirror games are
+  over 90% draws, and opening head-on collisions happen at a median of turn 4),
+  then the most visited move: sampling every move from visit counts scored
+  0.127 against the heuristic, where the argmax scored 0.594 (``slinky.mcts``).
+* ``draw_value=-0.5``: the search's contempt, which the targets must match.
+* ``teacher_env_steps=0``: a plain AlphaZero run by default; the expert
+  iteration start is one flag away, left to the pilots to measure.
+* ``buffer_capacity=1_048_576`` positions, about 1 GB of device memory and
+  about 55 minutes of self-play at 310 env steps/s (a quarter of the default
+  run). ``batch_size=512`` positions (1024 samples), ``replay_ratio=4``,
+  ``learning_starts=32_768`` (16 iterations, after most of the first games
+  ended).
+* ``lr=1e-3`` decaying to 1e-4, as PPO's 1e-3; ``weight_decay=1e-4`` (AdamW,
+  scaled by the learning rate: mild); ``max_grad_norm=1``; ``value_coef=1``
+  (AlphaZero's equal weights).
+* ``total_env_steps=4_194_304``: about 3.7 hours at the default settings, the
+  scale of the PPO baseline's 5.2M env steps.
+* ``eval_games=128`` per opponent and mode every 524,288 env steps: a search
+  evaluation costs about a 64-simulation search per move, ~SMOKE_EVAL.
+
+On a GPU the same code runs unchanged; raise ``num_envs`` (the network's batch
+is ``2 * num_envs`` observations per simulation) and keep ``replay_ratio``.
+An *env step* is one game advancing one turn; it stores one position, worth
+one agent sample per living snake (two in a duel). The file is self-contained:
+it shares no code with ``baselines/ppo.py`` (the network and checkpoint
+helpers follow it).
 """
 
 from __future__ import annotations
