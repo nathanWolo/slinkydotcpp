@@ -11,15 +11,14 @@ The design follows the implementation spec in
 nodes (:class:`Tree`). Node 0 is the root and simulation ``i`` owns slot
 ``i + 1``, so no allocation counter is needed: if the simulation expands a
 node it lands there, otherwise the slot is never referenced. Each node stores
-its full :class:`State` (about 0.9 KB in an 11x11 duel), so a simulation costs
-one ``env.step`` and one leaf evaluation, never a replay from the root. The
-food spawn is drawn once, when the node is expanded, from a key folded with
-the slot number, so the tree is a consistent determinization. Per node there
-are also ``children[4**N]`` (``-1`` = not expanded), the move mask
-``legal[N, 4]``, ``terminal`` and the leaf ``value[N]``, plus the selection
-statistics. Everything is updated in place with ``.at[]`` inside a
-``fori_loop`` over simulations (measured: the time per simulation does not grow
-with ``M``).
+its full :class:`State` (about 0.9 KB of the 1.04 KB per node in an 11x11
+duel), so a simulation costs one transition and one leaf evaluation, never a
+replay from the root. Per node there are also ``children[4**N]`` (``-1`` = not
+expanded), the move mask ``legal[N, 4]``, ``terminal`` and the leaf
+``value[N]``, plus the selection statistics. Everything is updated in place
+with ``.at[]`` inside a ``fori_loop`` over simulations; XLA never copies the
+tree (checked in the compiled HLO), and the time per simulation grows only
+slowly with ``M`` (cache misses, deeper descents).
 
 **One simulation.**
 
@@ -28,8 +27,13 @@ with ``M``).
    joint action per level) is recorded in a small buffer, so the backup needs
    no pointer chasing: a ``while_loop`` over the tree under ``vmap`` would
    ``select`` the whole tree on every iteration.
-2. *Expansion* of one node: ``env.step`` on an observation-free env (exact
-   head-to-heads, tail rule, starvation, food, ``max_turns`` truncation).
+2. *Expansion* of one node with the exact rules (head-to-heads, tail rule,
+   starvation, hazards, ``max_turns`` truncation). By default
+   (``spawn_food=False``) this is ``rules.rules_step`` without the map's food
+   spawn, a deterministic model of the game (as in Schier & Wustenbecker 2019).
+   With ``spawn_food=True`` it is ``env.step`` on an observation-free env: the
+   spawn is drawn once, when the node is expanded, from a key folded with the
+   slot number, so the tree is one consistent sample of the chance events.
 3. *Leaf evaluation*: the exact outcome if the game is over (as
    ``env.win_loss_reward``: dead -1, sole survivor +1, snakes dying together on
    the last turn 0; a truncated game is 0 for every living snake). Otherwise
@@ -79,19 +83,33 @@ by mean value. ``"sample"`` draws from the visit distribution (DUCT) or the
 average strategy (RM), which is what the convergence results are about.
 DUCT(max) beat DUCT(mix) 58% in Tron (Lanctot et al. 2013).
 
-**Defaults and why.** DUCT, ``C = 1.4`` (about sqrt 2, Tak et al.'s reference
-value), heuristic leaves, no rollouts, ``final="max"``. The research found
-evaluation functions beat random playouts in Tron for every sampling method
-(Bosansky et al. 2016); see :class:`MCTSConfig` for the measured trade-offs in
-this environment.
+**Defaults and why** (measured in the 11x11 duel against the heuristic snake
+of :mod:`slinky.heuristic`, with 95% confidence intervals; see
+:class:`MCTSConfig`):
+
+* DUCT with heuristic leaves and no rollouts, as the research recommends:
+  evaluation functions beat random playouts in Tron for every sampling method
+  (Bosansky et al. 2016).
+* ``exploration=0.25`` rather than UCB1's ``sqrt(2)``. The heuristic's values
+  are compressed (the median ``|value|`` over states of heuristic play is
+  0.25, so 0.12 from the middle of UCB's ``[0, 1]`` scale), and a large ``C``
+  spreads the visits almost uniformly. At 64 simulations ``C = 1.4`` scored 0.49 +- 0.03
+  and ``C = 0.25`` 0.54 +- 0.03 (256 games each).
+* ``spawn_food=False``: the same strength per simulation as sampled spawns
+  (0.594 +- 0.043 against 0.590 +- 0.046 at 64 simulations) at about 1.5x the
+  simulations per second, since the spawn's random draw costs more than the
+  rest of the rules step.
+* ``final="max"`` (DUCT(max) beat DUCT(mix) 58% in Tron; Lanctot et al. 2013).
+* ``max_depth=32``: never reached in practice (the deepest node at 1024
+  simulations was 11 moves down), but it bounds the path buffer.
 
 **Limits.** The children table has ``4**N`` entries per node, so ``N <= 4``
 (256 joint actions; more snakes raise ``ValueError``). The spec was written for
 duels; 3 and 4 snakes run (values are per player, not constant-sum), but they
 have not been tuned or benchmarked. The tree is rebuilt every turn, since a
-``Policy`` keeps no state between turns. Food spawns inside the tree are
-sampled once per node, so a node stands for one sampled outcome of the chance
-event rather than an average over spawns.
+``Policy`` keeps no state between turns. Food spawns inside the tree are either
+ignored (the default) or sampled once per node, so a node never stands for an
+average over spawns.
 """
 
 from __future__ import annotations
@@ -150,7 +168,7 @@ class MCTSConfig:
 
     num_simulations: int = 128
     selection: str = "duct"
-    exploration: float = 1.4
+    exploration: float = 0.25
     ucb1_tuned: bool = False
     tie_noise: float = 0.01
     rm_gamma: float = 0.2
@@ -161,7 +179,7 @@ class MCTSConfig:
     max_depth: int = 32
     final: str = "max"
     draw_value: float = 0.0
-    spawn_food: bool = True
+    spawn_food: bool = False
 
     def __post_init__(self) -> None:
         if self.num_simulations < 1:
