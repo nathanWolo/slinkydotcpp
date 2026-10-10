@@ -3,10 +3,23 @@
 Single-file reinforcement-learning baselines for the 1v1 duel (11×11,
 standard rules), trained by self-play on slinky.
 
+| baseline | file | training | vs `random_legal` | vs heuristic | checkpoint |
+|---|---|---|---|---|---|
+| Double DQN | `dqn.py` | 31 min, 1.28M env steps | 0.993 | 0.053 | `checkpoints/dqn-duel-seed0/` |
+| PPO | `ppo.py` | 67 min, 5.24M env steps | 0.998 | 0.296 | `checkpoints/ppo-duel-seed0/` |
+
+- **Hardware:** both trained on a 4-core cloud CPU, with no GPU.
+- **Head-to-head:** PPO beats the DQN 0.868 over 1,024 games (888 / 2 / 134).
+- **Sources:** the PPO scores and both heuristic scores are from the strength
+  benchmark ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games
+  each). The DQN's score against `random_legal` is its 5,000-game evaluation
+  below.
+
 ```bash
 uv pip install -e ".[rl]"            # adds optax
 python baselines/dqn.py              # default run, ~30 min on a 4-core CPU
-python baselines/dqn.py --help       # every hyperparameter is a flag
+python baselines/ppo.py              # default run, ~70 min on 3 cores
+python baselines/dqn.py --help       # every hyperparameter is a flag (same for ppo.py)
 python baselines/dqn.py --eval-only runs/dqn-<timestamp> --eval-games 5000
 python baselines/dqn.py --resume runs/dqn-<timestamp>   # continue an interrupted run
 ```
@@ -14,7 +27,8 @@ python baselines/dqn.py --resume runs/dqn-<timestamp>   # continue an interrupte
 Each run writes to `runs/` (gitignored):
 
 - `config.json`;
-- `metrics.jsonl`, one record per chunk of 16k env steps plus the evaluations;
+- `metrics.jsonl`, one record per log chunk (16k env steps for the DQN, 32k
+  for PPO) plus the evaluations;
 - `params.npz`, the latest network;
 - `runner.npz`, the full training state used by `--resume`.
 
@@ -113,10 +127,120 @@ I did not inspect replays.
   - on the MCTS scale, the DQN beats MCTS with 4 simulations (MCTS scores
     0.427) and loses to MCTS with 16 (0.947).
 
+  - PPO self-play on the same setup (below) beats it 0.868.
+
   Still to try: past checkpoints and other algorithms (Elo or TrueSkill over
-  a population), and PPO self-play on the same setup.
+  a population).
 
 The final network from this run is kept in
 [`checkpoints/dqn-duel-seed0/`](checkpoints/dqn-duel-seed0/) (2.6 MB) as a
 fixed opponent for benchmarks:
 `python baselines/dqn.py --eval-only baselines/checkpoints/dqn-duel-seed0`.
+
+## PPO (`ppo.py`)
+
+PPO-clip with one actor-critic network playing both snakes (parameter-sharing
+self-play), in the style of cleanRL and PureJaxRL. The file is self-contained:
+it shares no code with `dqn.py`.
+
+- **Acting.** Each snake samples from a softmax over its legal moves only:
+  illegal moves get a logit of -1e9, so their probability is exactly 0 while
+  the entropy and the gradients stay finite. The observation is the DQN's
+  egocentric `21×21×13` board.
+- **Rollouts.** 64 games run in parallel for 128 turns per iteration, and a
+  finished game is replaced at once. Every turn gives one sample per living
+  snake, so an iteration has 16,384 samples.
+- **Episodes.** A snake's episode ends when it dies (-1), wins (+1) or draws
+  (0), with no bootstrapping. A game cut off at `max_turns` bootstraps from the
+  value of the state reached. GAE never crosses the end of an episode.
+- **Network.** Convolutions 16 → 32 → 32 with strides 2, 2, 1, then dense 256,
+  then a 4-logit policy head and a value head (312k parameters). That is half
+  the DQN's channels: twice the env steps per second, and as strong per minute
+  of training in pilots.
+- **Optimiser.** 4 epochs of 8 minibatches (2,048 samples) per iteration;
+  Adam at 1e-3 decayed linearly to 0, gradient clipping at 0.5. γ = 0.99,
+  λ = 0.95, clip 0.2, value coefficient 0.5 (clipped value loss), entropy
+  coefficient 0.01, advantages normalised per minibatch.
+- **Speed.** The convolutions use a hand-written backward pass. XLA's own
+  convolution gradient inside `lax.scan` is about 70 times slower on CPU.
+  Training runs at about 1,400 env-steps/s on 3 pinned cores, and the
+  updates take about 90% of the time.
+- **Play mode.** The `ppo` agent in `slinky.agents` plays greedily (the masked
+  argmax); `ppo-sample` samples. Greedy was as strong or stronger in almost
+  every evaluation (below).
+
+### Results
+
+Default config, seed 0, 5.24M env steps (10.5M agent samples, 20,480 gradient
+steps). It took **67 minutes** on 3 pinned cores of a 4-core cloud CPU, five
+evaluation rounds included.
+
+**During training** (256 games per cell, greedy / sampled score; ± is at most
+0.06 against the DQN and 0.05 against the heuristic):
+
+| env steps | vs `random_legal` | vs DQN | vs heuristic | W / D / L vs heuristic (greedy) |
+|--:|---|---|---|---|
+| 1.05M | 0.986 / 0.992 | 0.615 / 0.510 | 0.119 / 0.064 | 17 / 27 / 212 |
+| 2.10M | 1.000 / 0.994 | 0.686 / 0.541 | 0.121 / 0.098 | 23 / 16 / 217 |
+| 3.15M | 0.996 / 0.982 | 0.777 / 0.791 | 0.225 / 0.186 | 34 / 47 / 175 |
+| 4.19M | 0.986 / 0.992 | 0.836 / 0.828 | 0.232 / 0.242 | 33 / 53 / 170 |
+| 5.24M | 1.000 / 0.996 | 0.836 / 0.848 | 0.338 / 0.268 | 60 / 53 / 143 |
+
+**Final checkpoint in the strength benchmark** (fresh games;
+[`benchmarks/README.md`](../benchmarks/README.md)):
+
+| match | games | W / D / L | score |
+|---|--:|---|---|
+| PPO vs `random_legal` | 1,024 | 1020 / 3 / 1 | 0.998 [0.992, 0.999] |
+| PPO vs DQN | 1,024 | 888 / 2 / 134 | 0.868 [0.846, 0.888] |
+| PPO vs heuristic | 1,024 | 205 / 197 / 622 | 0.296 [0.269, 0.325] |
+| PPO greedy vs PPO sampled | 512 | 280 / 2 / 230 | 0.549 [0.506, 0.591] |
+
+- **Against the heuristic:** 0.296 over 1,024 games, against 0.338 in the
+  final 256-game training evaluation; the two agree within noise.
+- **On the MCTS scale**, PPO plays between 4 and 16 simulations. MCTS-4
+  scores 0.127 against it and MCTS-16 0.642, while MCTS at 500 ms per move
+  (24,000 simulations) scores 0.949.
+- **How it loses:** PPO rarely draws, so it wins more games against strong
+  MCTS than the heuristic does, but it scores less against it.
+
+**Self-play dynamics.**
+
+- Early on, 82% of self-play deaths are head-to-heads and games last about 55
+  turns.
+- By the end, games between the two copies last about 195 turns,
+  head-to-heads are down to 18% of deaths, and running into its own body is
+  the most common death (52%).
+- The policy's entropy falls from 0.90 to 0.24 nats.
+- The value function stays weak: explained variance is only 0.1–0.2. A review
+  found no bug behind it, and turning off value clipping or raising the value
+  coefficient did not help in a short A/B run. The policy still gets the
+  outcome through the GAE returns.
+
+**Pilots.** The defaults come from 1M-step pilots on one core each (about 30
+minutes):
+
+- **A learning rate of 2.5e-4 collapses into opening head-on draws.** That
+  pilot scored a misleading 0.36 against the heuristic with zero wins, while
+  scoring 0.10 against the DQN and 0.83 against `random_legal`. Read the
+  W/D/L, not just the score.
+- **Smaller rollouts hurt.** 32 games × 64 turns at lr 2e-3 scored 0.07
+  against the heuristic.
+- **Within noise of each other:** lr 1e-3 and 2e-3, γ 0.99 and 0.995, a
+  constant learning rate, and the DQN-sized network at equal wall time.
+- **Greedy beats sampled.** In a 1,024-game paired evaluation, greedy scored
+  0.196 against 0.160 vs the heuristic, and 0.567 against 0.504 vs the DQN.
+
+### Caveats
+
+- **One seed**, like the DQN.
+- **Still improving.** Against the heuristic the score rose from 0.23 to 0.34
+  over the last million steps, while the learning rate decayed to 0. A longer
+  run would probably be stronger.
+- **Resuming is exact only with the same number of CPU cores**: the
+  floating-point reductions depend on the thread count.
+
+The final network from this run is kept in
+[`checkpoints/ppo-duel-seed0/`](checkpoints/ppo-duel-seed0/) (1.3 MB) as the
+default `ppo` agent:
+`python baselines/ppo.py --eval-only baselines/checkpoints/ppo-duel-seed0`.

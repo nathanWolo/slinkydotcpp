@@ -130,6 +130,11 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
   minutes of training on a 4-core CPU, it scores 0.993 ± 0.002 against
   `random_legal` (99.2% wins over 5,000 games). It plays between MCTS with 4
   and with 16 simulations.
+- **PPO** (`baselines/ppo.py`, see [`baselines/README.md`](baselines/README.md)):
+  self-play PPO with one shared actor-critic network and masked illegal moves.
+  After 67 minutes of training on 3 CPU cores, it beats the DQN 0.868 and
+  `random_legal` 0.998, and scores 0.296 against the heuristic. It plays
+  between MCTS with 4 and with 16 simulations, closer to 16.
 - **Heuristic** (`slinky.heuristic`): a hand-written snake.
   - It uses time-aware flood fills, Voronoi territory and food control.
   - It picks moves with a one-ply simultaneous-move search over the exact
@@ -141,9 +146,12 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
   heuristic's evaluation at the leaves).
   - Against the heuristic it scores 0.53 at 32 simulations, 0.78 at 1024 and
     0.85 at 2048. It levels off there, held back by opening head-on draws.
-  - It costs about 3.5–6 µs per simulation per CPU core.
+  - At Battlesnake's 500 ms per move (24,000 simulations for one game on one
+    core) it scores 0.875 against the heuristic and 0.949 against PPO.
+  - It costs about 3.5–6 µs per simulation per CPU core in batches, and about
+    18 µs for one game alone.
 
-![MCTS score against random_legal, the DQN and the heuristic, by simulations per move](benchmarks/results/strength.svg)
+![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 
 ## Watching games
 
@@ -158,11 +166,11 @@ python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --
 
 - **Agents** come from the registry in `slinky.agents` (shared with
   `benchmarks/strength.py`): `random_legal`, `random`, `heuristic`, `dqn`
-  (the checkpoint in `baselines/checkpoints/`) or `dqn:<run dir>`, and
-  `mcts-<simulations>` with dash shorthands and/or `:field=value`
-  overrides of `MCTSConfig`, e.g. `mcts-256-rm`, `mcts-64-rollout` or
-  `mcts-128:exploration=0.5`. Names are shown in a canonical form that
-  lists only non-default settings.
+  (the checkpoint in `baselines/checkpoints/`) or `dqn:<run dir>`, `ppo`
+  (greedy), `ppo-sample` or `ppo:<run dir>`, and `mcts-<simulations>` with
+  dash shorthands and/or `:field=value` overrides of `MCTSConfig`, e.g.
+  `mcts-256-rm`, `mcts-64-rollout` or `mcts-128:exploration=0.5`. Names are
+  shown in a canonical form that lists only non-default settings.
 - **The viewer** shows the board (API coordinates, `(0, 0)` bottom-left),
   each snake's length and health, eliminations with the engine's cause, a
   health-by-turn strip that doubles as the scrubber, the match score and the
@@ -266,7 +274,7 @@ should scale much better with batch size.
    - self-play DQN (done; see `baselines/`);
    - heuristic snake and simultaneous-move MCTS, with a strength-vs-simulations
      benchmark (done; see `benchmarks/README.md`);
-   - independent PPO with self-play;
+   - self-play PPO (done; see `baselines/`);
    - population or league training;
    - AlphaZero-style search with a learned value and policy, on top of
      `slinky.mcts`.
@@ -278,7 +286,7 @@ src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   engine_json, policies, evaluate (matches between policies),
                   heuristic (hand-written snake), mcts (simultaneous-move MCTS),
                   agents (named-agent registry), replay (+ viewer.html)
-baselines/        RL baselines (self-play DQN) and its checkpoint
+baselines/        RL baselines (self-play DQN and PPO) and their checkpoints
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
 benchmarks/       throughput and strength benchmarks, results/ (strength sweep data)

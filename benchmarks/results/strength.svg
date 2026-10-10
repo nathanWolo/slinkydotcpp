@@ -13,95 +13,131 @@
 <text x="606" y="192.0" text-anchor="end" fill="#6b7179">even (0.5)</text>
 <line x1="64.0" x2="64.0" y1="372" y2="377" stroke="#555b63"/>
 <text x="64.0" y="391" text-anchor="middle" fill="#555b63">1</text>
-<line x1="155.0" x2="155.0" y1="372" y2="377" stroke="#555b63"/>
-<text x="155.0" y="391" text-anchor="middle" fill="#555b63">4</text>
-<line x1="246.0" x2="246.0" y1="372" y2="377" stroke="#555b63"/>
-<text x="246.0" y="391" text-anchor="middle" fill="#555b63">16</text>
-<line x1="291.5" x2="291.5" y1="372" y2="377" stroke="#555b63"/>
-<text x="291.5" y="391" text-anchor="middle" fill="#555b63">32</text>
-<line x1="337.0" x2="337.0" y1="372" y2="377" stroke="#555b63"/>
-<text x="337.0" y="391" text-anchor="middle" fill="#555b63">64</text>
-<line x1="382.5" x2="382.5" y1="372" y2="377" stroke="#555b63"/>
-<text x="382.5" y="391" text-anchor="middle" fill="#555b63">128</text>
-<line x1="428.0" x2="428.0" y1="372" y2="377" stroke="#555b63"/>
-<text x="428.0" y="391" text-anchor="middle" fill="#555b63">256</text>
-<line x1="473.5" x2="473.5" y1="372" y2="377" stroke="#555b63"/>
-<text x="473.5" y="391" text-anchor="middle" fill="#555b63">512</text>
-<line x1="519.0" x2="519.0" y1="372" y2="377" stroke="#555b63"/>
-<text x="519.0" y="391" text-anchor="middle" fill="#555b63">1024</text>
-<line x1="564.5" x2="564.5" y1="372" y2="377" stroke="#555b63"/>
-<text x="564.5" y="391" text-anchor="middle" fill="#555b63">2048</text>
+<line x1="139.0" x2="139.0" y1="372" y2="377" stroke="#555b63"/>
+<text x="139.0" y="391" text-anchor="middle" fill="#555b63">4</text>
+<line x1="214.1" x2="214.1" y1="372" y2="377" stroke="#555b63"/>
+<text x="214.1" y="391" text-anchor="middle" fill="#555b63">16</text>
+<line x1="251.6" x2="251.6" y1="372" y2="377" stroke="#555b63"/>
+<text x="251.6" y="391" text-anchor="middle" fill="#555b63">32</text>
+<line x1="289.1" x2="289.1" y1="372" y2="377" stroke="#555b63"/>
+<text x="289.1" y="391" text-anchor="middle" fill="#555b63">64</text>
+<line x1="326.7" x2="326.7" y1="372" y2="377" stroke="#555b63"/>
+<text x="326.7" y="391" text-anchor="middle" fill="#555b63">128</text>
+<line x1="364.2" x2="364.2" y1="372" y2="377" stroke="#555b63"/>
+<text x="364.2" y="391" text-anchor="middle" fill="#555b63">256</text>
+<line x1="401.7" x2="401.7" y1="372" y2="377" stroke="#555b63"/>
+<text x="401.7" y="391" text-anchor="middle" fill="#555b63">512</text>
+<line x1="439.2" x2="439.2" y1="372" y2="377" stroke="#555b63"/>
+<text x="439.2" y="391" text-anchor="middle" fill="#555b63">1024</text>
+<line x1="476.8" x2="476.8" y1="372" y2="377" stroke="#555b63"/>
+<text x="476.8" y="391" text-anchor="middle" fill="#555b63">2048</text>
+<line x1="514.3" x2="514.3" y1="372" y2="377" stroke="#555b63"/>
+<text x="514.3" y="391" text-anchor="middle" fill="#555b63">4096</text>
 <line x1="610.0" x2="610.0" y1="372" y2="377" stroke="#555b63"/>
-<text x="610.0" y="391" text-anchor="middle" fill="#555b63">4096</text>
+<text x="610.0" y="391" text-anchor="middle" fill="#555b63">24000</text>
 <line x1="64" x2="610" y1="372" y2="372" stroke="#555b63"/>
+<line x1="610.0" x2="610.0" y1="24" y2="372" stroke="#9aa0a8" stroke-dasharray="3 3"/>
+<text x="605.0" y="364" text-anchor="end" fill="#6b7179">500 ms per move</text>
 <text x="337.0" y="416" text-anchor="middle" fill="#30353b">MCTS simulations per move (log scale)</text>
 <text transform="translate(18 198.0) rotate(-90)" text-anchor="middle" fill="#30353b">score of MCTS (win 1, draw ½, loss 0)</text>
-<path d="M64.0,196.6 L155.0,72.6 L246.0,27.4 L291.5,26.7 L337.0,26.0 L382.5,25.7 L428.0,26.4 L473.5,27.1 L519.0,25.7" fill="none" stroke="#8a8f98" stroke-width="2"/>
+<path d="M64.0,196.6 L139.0,72.6 L214.1,27.4 L251.6,26.7 L289.1,26.0 L326.7,25.7 L364.2,26.4 L401.7,27.1 L439.2,25.7 L610.0,26.7" fill="none" stroke="#8a8f98" stroke-width="2"/>
 <line x1="64.0" x2="64.0" y1="181.6" y2="211.7" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
 <circle cx="64.0" cy="196.6" r="3.2" fill="#8a8f98"><title>mcts-1 vs random_legal: 0.504 [0.461, 0.547], 211/94/207 over 512 games</title></circle>
-<line x1="155.0" x2="155.0" y1="63.1" y2="84.0" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="155.0" cy="72.6" r="3.2" fill="#8a8f98"><title>mcts-4 vs random_legal: 0.860 [0.828, 0.888], 398/85/29 over 512 games</title></circle>
-<line x1="246.0" x2="246.0" y1="25.5" y2="31.9" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="246.0" cy="27.4" r="3.2" fill="#8a8f98"><title>mcts-16 vs random_legal: 0.990 [0.977, 0.996], 502/10/0 over 512 games</title></circle>
-<line x1="291.5" x2="291.5" y1="25.1" y2="30.9" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="291.5" cy="26.7" r="3.2" fill="#8a8f98"><title>mcts-32 vs random_legal: 0.992 [0.980, 0.997], 504/8/0 over 512 games</title></circle>
-<line x1="337.0" x2="337.0" y1="24.7" y2="29.9" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="337.0" cy="26.0" r="3.2" fill="#8a8f98"><title>mcts-64 vs random_legal: 0.994 [0.983, 0.998], 506/6/0 over 512 games</title></circle>
-<line x1="382.5" x2="382.5" y1="24.5" y2="29.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="382.5" cy="25.7" r="3.2" fill="#8a8f98"><title>mcts-128 vs random_legal: 0.995 [0.984, 0.998], 507/5/0 over 512 games</title></circle>
-<line x1="428.0" x2="428.0" y1="24.9" y2="30.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="428.0" cy="26.4" r="3.2" fill="#8a8f98"><title>mcts-256 vs random_legal: 0.993 [0.981, 0.997], 505/7/0 over 512 games</title></circle>
-<line x1="473.5" x2="473.5" y1="25.3" y2="31.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="473.5" cy="27.1" r="3.2" fill="#8a8f98"><title>mcts-512 vs random_legal: 0.991 [0.979, 0.996], 503/9/0 over 512 games</title></circle>
-<line x1="519.0" x2="519.0" y1="24.5" y2="29.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
-<circle cx="519.0" cy="25.7" r="3.2" fill="#8a8f98"><title>mcts-1024 vs random_legal: 0.995 [0.984, 0.998], 507/5/0 over 512 games</title></circle>
-<text x="622" y="29.7" fill="#8a8f98" font-weight="bold">vs random_legal</text>
-<path d="M64.0,370.6 L155.0,223.5 L246.0,42.4 L291.5,43.7 L337.0,30.8 L382.5,40.0 L428.0,29.4 L473.5,35.6 L519.0,28.1 L564.5,33.5 L610.0,34.2" fill="none" stroke="#2563c9" stroke-width="2"/>
+<line x1="139.0" x2="139.0" y1="63.1" y2="84.0" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="139.0" cy="72.6" r="3.2" fill="#8a8f98"><title>mcts-4 vs random_legal: 0.860 [0.828, 0.888], 398/85/29 over 512 games</title></circle>
+<line x1="214.1" x2="214.1" y1="25.5" y2="31.9" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="214.1" cy="27.4" r="3.2" fill="#8a8f98"><title>mcts-16 vs random_legal: 0.990 [0.977, 0.996], 502/10/0 over 512 games</title></circle>
+<line x1="251.6" x2="251.6" y1="25.1" y2="30.9" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="251.6" cy="26.7" r="3.2" fill="#8a8f98"><title>mcts-32 vs random_legal: 0.992 [0.980, 0.997], 504/8/0 over 512 games</title></circle>
+<line x1="289.1" x2="289.1" y1="24.7" y2="29.9" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="289.1" cy="26.0" r="3.2" fill="#8a8f98"><title>mcts-64 vs random_legal: 0.994 [0.983, 0.998], 506/6/0 over 512 games</title></circle>
+<line x1="326.7" x2="326.7" y1="24.5" y2="29.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="326.7" cy="25.7" r="3.2" fill="#8a8f98"><title>mcts-128 vs random_legal: 0.995 [0.984, 0.998], 507/5/0 over 512 games</title></circle>
+<line x1="364.2" x2="364.2" y1="24.9" y2="30.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="364.2" cy="26.4" r="3.2" fill="#8a8f98"><title>mcts-256 vs random_legal: 0.993 [0.981, 0.997], 505/7/0 over 512 games</title></circle>
+<line x1="401.7" x2="401.7" y1="25.3" y2="31.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="401.7" cy="27.1" r="3.2" fill="#8a8f98"><title>mcts-512 vs random_legal: 0.991 [0.979, 0.996], 503/9/0 over 512 games</title></circle>
+<line x1="439.2" x2="439.2" y1="24.5" y2="29.4" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="439.2" cy="25.7" r="3.2" fill="#8a8f98"><title>mcts-1024 vs random_legal: 0.995 [0.984, 0.998], 507/5/0 over 512 games</title></circle>
+<line x1="610.0" x2="610.0" y1="24.3" y2="48.6" stroke="#8a8f98" stroke-width="1.2" opacity="0.7"/>
+<circle cx="610.0" cy="26.7" r="3.2" fill="#8a8f98"><title>mcts-24000 vs random_legal: 0.992 [0.929, 0.999], 63/1/0 over 64 games</title></circle>
+<text x="622" y="30.7" fill="#8a8f98" font-weight="bold">vs random_legal</text>
+<path d="M64.0,370.6 L139.0,223.5 L214.1,42.4 L251.6,43.7 L289.1,30.8 L326.7,40.0 L364.2,29.4 L401.7,35.6 L439.2,28.1 L476.8,33.5 L514.3,34.2 L610.0,24.0" fill="none" stroke="#2563c9" stroke-width="2"/>
 <line x1="64.0" x2="64.0" y1="367.1" y2="371.6" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
 <circle cx="64.0" cy="370.6" r="3.2" fill="#2563c9"><title>mcts-1 vs DQN (self-play): 0.004 [0.001, 0.014], 2/0/510 over 512 games</title></circle>
-<line x1="155.0" x2="155.0" y1="208.4" y2="238.2" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="155.0" cy="223.5" r="3.2" fill="#2563c9"><title>mcts-4 vs DQN (self-play): 0.427 [0.385, 0.470], 217/3/292 over 512 games</title></circle>
-<line x1="246.0" x2="246.0" y1="36.7" y2="50.3" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="246.0" cy="42.4" r="3.2" fill="#2563c9"><title>mcts-16 vs DQN (self-play): 0.947 [0.924, 0.964], 484/2/26 over 512 games</title></circle>
-<line x1="291.5" x2="291.5" y1="37.8" y2="51.9" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="291.5" cy="43.7" r="3.2" fill="#2563c9"><title>mcts-32 vs DQN (self-play): 0.943 [0.920, 0.960], 482/2/28 over 512 games</title></circle>
-<line x1="337.0" x2="337.0" y1="27.7" y2="36.4" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="337.0" cy="30.8" r="3.2" fill="#2563c9"><title>mcts-64 vs DQN (self-play): 0.980 [0.964, 0.989], 502/0/10 over 512 games</title></circle>
-<line x1="382.5" x2="382.5" y1="34.8" y2="47.5" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="382.5" cy="40.0" r="3.2" fill="#2563c9"><title>mcts-128 vs DQN (self-play): 0.954 [0.932, 0.969], 488/1/23 over 512 games</title></circle>
-<line x1="428.0" x2="428.0" y1="26.8" y2="34.6" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="428.0" cy="29.4" r="3.2" fill="#2563c9"><title>mcts-256 vs DQN (self-play): 0.984 [0.969, 0.992], 504/0/8 over 512 games</title></circle>
-<line x1="473.5" x2="473.5" y1="31.2" y2="42.3" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="473.5" cy="35.6" r="3.2" fill="#2563c9"><title>mcts-512 vs DQN (self-play): 0.967 [0.947, 0.979], 495/0/17 over 512 games</title></circle>
-<line x1="519.0" x2="519.0" y1="25.9" y2="32.8" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="519.0" cy="28.1" r="3.2" fill="#2563c9"><title>mcts-1024 vs DQN (self-play): 0.988 [0.975, 0.995], 506/0/6 over 512 games</title></circle>
-<line x1="564.5" x2="564.5" y1="28.6" y2="43.3" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="564.5" cy="33.5" r="3.2" fill="#2563c9"><title>mcts-2048 vs DQN (self-play): 0.973 [0.945, 0.987], 249/0/7 over 256 games</title></circle>
-<line x1="610.0" x2="610.0" y1="29.1" y2="44.2" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
-<circle cx="610.0" cy="34.2" r="3.2" fill="#2563c9"><title>mcts-4096 vs DQN (self-play): 0.971 [0.942, 0.985], 247/3/6 over 256 games</title></circle>
-<text x="622" y="52.2" fill="#2563c9" font-weight="bold">vs DQN (self-play)</text>
-<path d="M64.0,368.9 L155.0,335.0 L246.0,260.2 L291.5,188.1 L337.0,162.3 L382.5,154.5 L428.0,123.2 L473.5,122.2 L519.0,101.5 L564.5,77.7 L610.0,79.7" fill="none" stroke="#d4580f" stroke-width="2"/>
+<line x1="139.0" x2="139.0" y1="208.4" y2="238.2" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="139.0" cy="223.5" r="3.2" fill="#2563c9"><title>mcts-4 vs DQN (self-play): 0.427 [0.385, 0.470], 217/3/292 over 512 games</title></circle>
+<line x1="214.1" x2="214.1" y1="36.7" y2="50.3" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="214.1" cy="42.4" r="3.2" fill="#2563c9"><title>mcts-16 vs DQN (self-play): 0.947 [0.924, 0.964], 484/2/26 over 512 games</title></circle>
+<line x1="251.6" x2="251.6" y1="37.8" y2="51.9" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="251.6" cy="43.7" r="3.2" fill="#2563c9"><title>mcts-32 vs DQN (self-play): 0.943 [0.920, 0.960], 482/2/28 over 512 games</title></circle>
+<line x1="289.1" x2="289.1" y1="27.7" y2="36.4" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="289.1" cy="30.8" r="3.2" fill="#2563c9"><title>mcts-64 vs DQN (self-play): 0.980 [0.964, 0.989], 502/0/10 over 512 games</title></circle>
+<line x1="326.7" x2="326.7" y1="34.8" y2="47.5" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="326.7" cy="40.0" r="3.2" fill="#2563c9"><title>mcts-128 vs DQN (self-play): 0.954 [0.932, 0.969], 488/1/23 over 512 games</title></circle>
+<line x1="364.2" x2="364.2" y1="26.8" y2="34.6" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="364.2" cy="29.4" r="3.2" fill="#2563c9"><title>mcts-256 vs DQN (self-play): 0.984 [0.969, 0.992], 504/0/8 over 512 games</title></circle>
+<line x1="401.7" x2="401.7" y1="31.2" y2="42.3" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="401.7" cy="35.6" r="3.2" fill="#2563c9"><title>mcts-512 vs DQN (self-play): 0.967 [0.947, 0.979], 495/0/17 over 512 games</title></circle>
+<line x1="439.2" x2="439.2" y1="25.9" y2="32.8" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="439.2" cy="28.1" r="3.2" fill="#2563c9"><title>mcts-1024 vs DQN (self-play): 0.988 [0.975, 0.995], 506/0/6 over 512 games</title></circle>
+<line x1="476.8" x2="476.8" y1="28.6" y2="43.3" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="476.8" cy="33.5" r="3.2" fill="#2563c9"><title>mcts-2048 vs DQN (self-play): 0.973 [0.945, 0.987], 249/0/7 over 256 games</title></circle>
+<line x1="514.3" x2="514.3" y1="29.1" y2="44.2" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="514.3" cy="34.2" r="3.2" fill="#2563c9"><title>mcts-4096 vs DQN (self-play): 0.971 [0.942, 0.985], 247/3/6 over 256 games</title></circle>
+<line x1="610.0" x2="610.0" y1="24.0" y2="43.7" stroke="#2563c9" stroke-width="1.2" opacity="0.7"/>
+<circle cx="610.0" cy="24.0" r="3.2" fill="#2563c9"><title>mcts-24000 vs DQN (self-play): 1.000 [0.943, 1.000], 64/0/0 over 64 games</title></circle>
+<text x="622" y="56.0" fill="#2563c9" font-weight="bold">vs DQN (self-play)</text>
+<path d="M64.0,369.6 L139.0,327.8 L214.1,148.7 L251.6,98.8 L289.1,93.7 L326.7,87.6 L364.2,89.2 L401.7,79.4 L439.2,64.4 L476.8,55.3 L514.3,53.9 L610.0,41.7" fill="none" stroke="#15924f" stroke-width="2"/>
+<line x1="64.0" x2="64.0" y1="365.6" y2="371.1" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="64.0" cy="369.6" r="3.2" fill="#15924f"><title>mcts-1 vs PPO (self-play): 0.007 [0.003, 0.019], 3/1/508 over 512 games</title></circle>
+<line x1="139.0" x2="139.0" y1="316.8" y2="336.9" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="139.0" cy="327.8" r="3.2" fill="#15924f"><title>mcts-4 vs PPO (self-play): 0.127 [0.101, 0.159], 50/30/432 over 512 games</title></circle>
+<line x1="214.1" x2="214.1" y1="134.7" y2="163.5" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="214.1" cy="148.7" r="3.2" fill="#15924f"><title>mcts-16 vs PPO (self-play): 0.642 [0.599, 0.682], 313/31/168 over 512 games</title></circle>
+<line x1="251.6" x2="251.6" y1="87.1" y2="111.9" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="251.6" cy="98.8" r="3.2" fill="#15924f"><title>mcts-32 vs PPO (self-play): 0.785 [0.748, 0.819], 385/34/93 over 512 games</title></circle>
+<line x1="289.1" x2="289.1" y1="82.4" y2="106.5" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="289.1" cy="93.7" r="3.2" fill="#15924f"><title>mcts-64 vs PPO (self-play): 0.800 [0.763, 0.832], 388/43/81 over 512 games</title></circle>
+<line x1="326.7" x2="326.7" y1="76.7" y2="100.0" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="326.7" cy="87.6" r="3.2" fill="#15924f"><title>mcts-128 vs PPO (self-play): 0.817 [0.782, 0.848], 387/63/62 over 512 games</title></circle>
+<line x1="364.2" x2="364.2" y1="78.3" y2="101.8" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="364.2" cy="89.2" r="3.2" fill="#15924f"><title>mcts-256 vs PPO (self-play): 0.812 [0.776, 0.844], 387/58/67 over 512 games</title></circle>
+<line x1="401.7" x2="401.7" y1="69.3" y2="91.3" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="401.7" cy="79.4" r="3.2" fill="#15924f"><title>mcts-512 vs PPO (self-play): 0.841 [0.807, 0.870], 405/51/56 over 512 games</title></circle>
+<line x1="439.2" x2="439.2" y1="55.8" y2="75.1" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="439.2" cy="64.4" r="3.2" fill="#15924f"><title>mcts-1024 vs PPO (self-play): 0.884 [0.853, 0.909], 432/41/39 over 512 games</title></circle>
+<line x1="476.8" x2="476.8" y1="47.7" y2="65.0" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="476.8" cy="55.3" r="3.2" fill="#15924f"><title>mcts-2048 vs PPO (self-play): 0.910 [0.882, 0.932], 453/26/33 over 512 games</title></circle>
+<line x1="514.3" x2="514.3" y1="46.5" y2="63.5" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="514.3" cy="53.9" r="3.2" fill="#15924f"><title>mcts-4096 vs PPO (self-play): 0.914 [0.887, 0.935], 458/20/34 over 512 games</title></circle>
+<line x1="610.0" x2="610.0" y1="32.4" y2="60.0" stroke="#15924f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="610.0" cy="41.7" r="3.2" fill="#15924f"><title>mcts-24000 vs PPO (self-play): 0.949 [0.896, 0.976], 119/5/4 over 128 games</title></circle>
+<text x="622" y="73.7" fill="#15924f" font-weight="bold">vs PPO (self-play)</text>
+<path d="M64.0,368.9 L139.0,335.0 L214.1,260.2 L251.6,188.1 L289.1,162.3 L326.7,154.5 L364.2,123.2 L401.7,122.2 L439.2,101.5 L476.8,77.7 L514.3,79.7 L610.0,67.5" fill="none" stroke="#d4580f" stroke-width="2"/>
 <line x1="64.0" x2="64.0" y1="364.6" y2="370.7" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
 <circle cx="64.0" cy="368.9" r="3.2" fill="#d4580f"><title>mcts-1 vs heuristic: 0.009 [0.004, 0.021], 1/7/504 over 512 games</title></circle>
-<line x1="155.0" x2="155.0" y1="324.6" y2="343.3" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="155.0" cy="335.0" r="3.2" fill="#d4580f"><title>mcts-4 vs heuristic: 0.106 [0.083, 0.136], 9/91/412 over 512 games</title></circle>
-<line x1="246.0" x2="246.0" y1="245.7" y2="273.8" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="246.0" cy="260.2" r="3.2" fill="#d4580f"><title>mcts-16 vs heuristic: 0.321 [0.282, 0.363], 108/113/291 over 512 games</title></circle>
-<line x1="291.5" x2="291.5" y1="173.2" y2="203.2" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="291.5" cy="188.1" r="3.2" fill="#d4580f"><title>mcts-32 vs heuristic: 0.528 [0.485, 0.571], 172/197/143 over 512 games</title></circle>
-<line x1="337.0" x2="337.0" y1="147.9" y2="177.3" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="337.0" cy="162.3" r="3.2" fill="#d4580f"><title>mcts-64 vs heuristic: 0.603 [0.560, 0.644], 200/217/95 over 512 games</title></circle>
-<line x1="382.5" x2="382.5" y1="140.3" y2="169.4" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="382.5" cy="154.5" r="3.2" fill="#d4580f"><title>mcts-128 vs heuristic: 0.625 [0.582, 0.666], 200/240/72 over 512 games</title></circle>
-<line x1="428.0" x2="428.0" y1="110.2" y2="137.4" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="428.0" cy="123.2" r="3.2" fill="#d4580f"><title>mcts-256 vs heuristic: 0.715 [0.674, 0.752], 260/212/40 over 512 games</title></circle>
-<line x1="473.5" x2="473.5" y1="109.3" y2="136.3" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="473.5" cy="122.2" r="3.2" fill="#d4580f"><title>mcts-512 vs heuristic: 0.718 [0.677, 0.755], 253/229/30 over 512 games</title></circle>
-<line x1="519.0" x2="519.0" y1="89.7" y2="114.7" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="519.0" cy="101.5" r="3.2" fill="#d4580f"><title>mcts-1024 vs heuristic: 0.777 [0.739, 0.811], 308/180/24 over 512 games</title></circle>
-<line x1="564.5" x2="564.5" y1="64.1" y2="94.9" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="564.5" cy="77.7" r="3.2" fill="#d4580f"><title>mcts-2048 vs heuristic: 0.846 [0.796, 0.885], 178/77/1 over 256 games</title></circle>
-<line x1="610.0" x2="610.0" y1="65.9" y2="97.1" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
-<circle cx="610.0" cy="79.7" r="3.2" fill="#d4580f"><title>mcts-4096 vs heuristic: 0.840 [0.790, 0.880], 181/68/7 over 256 games</title></circle>
-<text x="622" y="83.7" fill="#d4580f" font-weight="bold">vs heuristic</text>
+<line x1="139.0" x2="139.0" y1="324.6" y2="343.3" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="139.0" cy="335.0" r="3.2" fill="#d4580f"><title>mcts-4 vs heuristic: 0.106 [0.083, 0.136], 9/91/412 over 512 games</title></circle>
+<line x1="214.1" x2="214.1" y1="245.7" y2="273.8" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="214.1" cy="260.2" r="3.2" fill="#d4580f"><title>mcts-16 vs heuristic: 0.321 [0.282, 0.363], 108/113/291 over 512 games</title></circle>
+<line x1="251.6" x2="251.6" y1="173.2" y2="203.2" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="251.6" cy="188.1" r="3.2" fill="#d4580f"><title>mcts-32 vs heuristic: 0.528 [0.485, 0.571], 172/197/143 over 512 games</title></circle>
+<line x1="289.1" x2="289.1" y1="147.9" y2="177.3" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="289.1" cy="162.3" r="3.2" fill="#d4580f"><title>mcts-64 vs heuristic: 0.603 [0.560, 0.644], 200/217/95 over 512 games</title></circle>
+<line x1="326.7" x2="326.7" y1="140.3" y2="169.4" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="326.7" cy="154.5" r="3.2" fill="#d4580f"><title>mcts-128 vs heuristic: 0.625 [0.582, 0.666], 200/240/72 over 512 games</title></circle>
+<line x1="364.2" x2="364.2" y1="110.2" y2="137.4" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="364.2" cy="123.2" r="3.2" fill="#d4580f"><title>mcts-256 vs heuristic: 0.715 [0.674, 0.752], 260/212/40 over 512 games</title></circle>
+<line x1="401.7" x2="401.7" y1="109.3" y2="136.3" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="401.7" cy="122.2" r="3.2" fill="#d4580f"><title>mcts-512 vs heuristic: 0.718 [0.677, 0.755], 253/229/30 over 512 games</title></circle>
+<line x1="439.2" x2="439.2" y1="89.7" y2="114.7" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="439.2" cy="101.5" r="3.2" fill="#d4580f"><title>mcts-1024 vs heuristic: 0.777 [0.739, 0.811], 308/180/24 over 512 games</title></circle>
+<line x1="476.8" x2="476.8" y1="64.1" y2="94.9" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="476.8" cy="77.7" r="3.2" fill="#d4580f"><title>mcts-2048 vs heuristic: 0.846 [0.796, 0.885], 178/77/1 over 256 games</title></circle>
+<line x1="514.3" x2="514.3" y1="65.9" y2="97.1" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="514.3" cy="79.7" r="3.2" fill="#d4580f"><title>mcts-4096 vs heuristic: 0.840 [0.790, 0.880], 181/68/7 over 256 games</title></circle>
+<line x1="610.0" x2="610.0" y1="51.3" y2="91.3" stroke="#d4580f" stroke-width="1.2" opacity="0.7"/>
+<circle cx="610.0" cy="67.5" r="3.2" fill="#d4580f"><title>mcts-24000 vs heuristic: 0.875 [0.807, 0.922], 99/26/3 over 128 games</title></circle>
+<text x="622" y="99.5" fill="#d4580f" font-weight="bold">vs heuristic</text>
 </svg>

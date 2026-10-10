@@ -375,6 +375,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="python -m slinky.replay",
         description="Play games between agents and save them as a replay (JSON and/or HTML).",
         epilog="Agents: random_legal, random, heuristic, dqn, dqn:<run dir>, "
+        "ppo[-greedy|-sample], ppo:<run dir>, "
         "mcts-<n>[-shorthand...][:field=value...], e.g. mcts-256-rm or "
         "mcts-128:exploration=0.5 (see slinky.agents).",
     )

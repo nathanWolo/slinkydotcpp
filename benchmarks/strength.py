@@ -11,8 +11,9 @@ the harness only, and the agents do not know about it.
 
 Agents (``--a`` and ``--b`` take comma-separated lists) are names from the registry in
 :mod:`slinky.agents`: ``random_legal``, ``random``, ``heuristic``, ``dqn`` (the checkpoint
-in ``baselines/checkpoints/dqn-duel-seed0``) or ``dqn:<run dir>``, and
-``mcts-<sims>[-shorthand...][:field=value...]``, e.g. ``mcts-64-rollout``,
+in ``baselines/checkpoints/dqn-duel-seed0``) or ``dqn:<run dir>``, ``ppo`` (greedy; the
+checkpoint in ``baselines/checkpoints/ppo-duel-seed0``), ``ppo-sample`` or ``ppo:<run dir>``,
+and ``mcts-<sims>[-shorthand...][:field=value...]``, e.g. ``mcts-64-rollout``,
 ``mcts-256-rm-c0.5`` or ``mcts-128:exploration=0.5`` (the shorthands are listed by
 ``--help``). Names are printed and stored in their canonical form, which lists only the
 non-default settings (``mcts-64-rollout`` becomes ``mcts-64-rollout10``). The default
