@@ -39,7 +39,8 @@ crashed sweep resumes by running the same command. The identity covers *configs*
 *code*: changing an ``MCTSConfig`` or ``Weights`` default changes it, but a fix to the
 search, the heuristic or the rules does not. Each line records the code that produced
 it (``git_commit``, ``git_dirty`` and ``code_fingerprint``, a hash of the ``slinky``
-modules the process loaded, ``baselines/dqn.py`` and this script, all captured when the
+modules the process loaded, the baseline scripts (``baselines/dqn.py``, ``ppo.py``,
+``rainbow.py``) and this script, all captured when the
 process started); the sweep warns when it skips lines made by other code, and
 ``--rerun`` plays the selected matchups again (the new line is preferred by ``--table``;
 the old one stays in the file). A line is
@@ -302,10 +303,7 @@ def code_fingerprint() -> tuple[str, int]:
     name, so checkouts in different directories with the same code agree.
     """
     files = {"benchmarks/strength.py": Path(__file__)}
-    for name, script in (
-        ("baselines_dqn", registry.DQN_SCRIPT),
-        ("baselines_ppo", registry.PPO_SCRIPT),
-    ):
+    for script, name, _ in registry.BASELINES.values():  # dqn.py, ppo.py, rainbow.py
         if script.is_file():
             files[name] = script
     for name, module in list(sys.modules.items()):
@@ -357,7 +355,9 @@ class Matchup:
         kinds = (self.a.spec.kind, self.b.spec.kind)
         sims = self.a.sims + self.b.sims
         ms = ROUGH_MS["fixed"] + ROUGH_MS["per_sim"] * sims * (1 + sims / ROUGH_MS["sim_scale"])
-        ms += ROUGH_MS["dqn"] * kinds.count("dqn") + ROUGH_MS["ppo"] * kinds.count("ppo")
+        # Rainbow's network is the DQN's with a wider head: about the same cost per move.
+        ms += ROUGH_MS["dqn"] * (kinds.count("dqn") + kinds.count("rainbow"))
+        ms += ROUGH_MS["ppo"] * kinds.count("ppo")
         random = {"random", "random_legal"} & set(kinds)
         turns = ROUGH_TURNS_VS_RANDOM if random else ROUGH_TURNS_PER_GAME
         return self.games * turns * ms / 1e3
@@ -1056,7 +1056,7 @@ def estimate(s: Settings, matchups: list[Matchup], out: Path, assume_turns: int)
 def agent_sort_key(name: str) -> tuple[int, int, str]:
     if name in registry.SIMPLE_AGENTS:
         return registry.SIMPLE_AGENTS.index(name), 0, name
-    if name.startswith(("dqn", "ppo")):
+    if name.startswith(("dqn", "ppo", "rainbow")):
         return 3, 0, name
     if match := re.match(r"mcts-(\d+)(.*)", name):
         return 4, int(match[1]), match[2]
