@@ -270,19 +270,22 @@ the heuristic, with 32 games in flight on one pinned core.
 ![az-64 against plain MCTS by simulations, one line per checkpoint](results/az_ladder.svg)
 
 - **The network's 64 simulations are worth about 2,000–4,000 plain ones.**
-  `az-64` is level with both MCTS-2048 (0.489) and MCTS-4096 (0.501). Plain
-  MCTS gains little between those two budgets (0.846 and 0.840 against the
-  heuristic), so the crossing is no sharper than that.
+  `az-64` is level with both MCTS-2048 (0.489) and MCTS-4096 (0.501), each
+  ±0.043, so the data place the crossing no more finely than that.
+  (MCTS-4096 against MCTS-2048 was not played; their scores against the
+  heuristic, 0.846 and 0.840, have saturated.)
 - **At equal time it wins.** On this CPU `az-64` takes 7.0 ms per move, what
-  plain MCTS spends on about 1,190 simulations (the dashed line), and it beats
-  MCTS-1024 0.588. Almost all of its time is the network: about 0.1 ms per
-  simulation (from `az-256`'s timing against `az-64`'s), against 5–8 µs for
-  a plain simulation. A GPU would shift the balance further.
+  plain MCTS spends on about 1,190 simulations (the orange dashed line), and
+  it beats MCTS-1024 0.588. Almost all of its time is the network: each extra
+  simulation costs about 0.1 ms (`az-256`'s timing against `az-64`'s),
+  against 5–8 µs for an extra plain simulation (the MCTS timings, differenced
+  the same way). On a GPU, which runs the batched network calls much faster,
+  the balance would likely shift further (not measured).
 - **Over training** (the lighter lines: training snapshots, 256 games per
   point): the crossing moves from about 600 simulations at 1.05M env steps to
   just over 1,000 at 2.10M–3.15M, about 1,500 at 4.19M and 2,800–3,500 at
   5.24M–7.34M. A 256-game point is ±0.06, about one doubling of plain
-  simulations on these slopes, so the final network (1,900–4,100) is level
+  simulations on these slopes, so the final network (1,900–4,200) is level
   with the last snapshots.
 - **The raw network** plays like MCTS-32: 0.491 against it, 0.663 against
   MCTS-16 and 0.387 against MCTS-64. Against the heuristic it scores 0.484,
@@ -324,11 +327,12 @@ python benchmarks/plot_az_ladder.py   # results/az_ladder.svg
   loop until the loop returns, and a 512-game round of `az-256` grew past
   5 GB. A game depends only on its id, so rounds play the same games. The
   queue passed `--round-games 128` for `az-256` and 256 for `az-64` to keep
-  more slots busy; five matchups ran before rounds were added, in one round
-  each (`rounds` in the results).
+  more slots busy (`az-256` vs DQN and `az-64` vs MCTS-1024 used the default
+  64); five matchups ran before rounds were added, in one round each
+  (`rounds` in the results).
 - **Snapshots.** The ladder's rows `az-64:runs/az-duel-seed0-snaps/<env
   steps>` are copies of the run's `params.npz` taken at each evaluation, at
-  256 games per matchup (`--out results/az_ladder.jsonl`). Each row records
+  256 games per matchup (`--out benchmarks/results/az_ladder.jsonl`). Each row records
   its parameters' hash (`params_sha256` in `a_config`); the snapshots
   themselves are not committed.
 

@@ -166,10 +166,12 @@ results and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md)
   - The raw network (`az-0`) is the strongest learned policy here. It beats
     PPO 0.581 and scores 0.484 against the heuristic, like MCTS with 32
     simulations.
-  - With 64 simulations per move (`az-64`, 7 ms per move) it beats PPO 0.943
+  - With 64 simulations per move (`az-64`: 7 ms per move with 32 games in
+    flight on one core, where MCTS-24000 takes 186 ms) it beats PPO 0.943
     and the heuristic 0.853. It is level with plain MCTS at 2048–4096
     simulations, so the network makes each simulation worth 30–60 plain ones.
-    At equal time it beats plain MCTS (0.588 against MCTS-1024).
+    At equal time (about 1,190 plain simulations) it beats plain MCTS,
+    scoring 0.588 against MCTS-1024.
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 
@@ -192,7 +194,8 @@ python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --
   with PUCT search; `az-0` is the raw network), and `mcts-<simulations>`
   with dash shorthands and/or `:field=value` overrides of `MCTSConfig`, e.g.
   `mcts-256-rm`, `mcts-64-rollout` or `mcts-128:exploration=0.5`. Names are
-  shown in a canonical form that lists only non-default settings.
+  shown in a canonical form that lists only non-default settings (an `az`
+  name keeps every `:field=value` given, even one equal to its run's).
 - **The viewer** shows the board (API coordinates, `(0, 0)` bottom-left),
   each snake's length and health, eliminations with the engine's cause, a
   health-by-turn strip that doubles as the scrubber, the match score and the

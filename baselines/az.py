@@ -116,8 +116,8 @@ baselines, one process on cores 0-3, PPO's network:
   ``mcts-64`` (the raw network 3-13 s), so those four opponents take about
   8 minutes. With the DQN and Rainbow added (the default ``eval_opponents``),
   the evaluations of the 8.4M-step run (``baselines/checkpoints/az-duel-seed0``,
-  every opponent but ``random_legal``) took 11-17 minutes each (13 on average),
-  about a fifth of a default run.
+  every opponent but ``random_legal``) took 11-17 minutes each (13 on average);
+  the four of a default run take about a fifth of its time.
 
 On a GPU the same code runs unchanged; raise ``num_envs`` (the network's batch
 is ``2 * num_envs`` observations per simulation) and keep ``replay_ratio``.

@@ -14,7 +14,8 @@ standard rules), trained by self-play on slinky.
   3 cores), Rainbow on a thermally throttled laptop CPU, AlphaZero on the
   4-core cloud CPU; no GPU.
 - **AlphaZero** is scored as `az-64`: the network with 64 simulations of
-  search per move (7 ms per move). The raw network alone (`az-0`) scores
+  search per move (7 ms per move with 32 games in flight on one core). The
+  raw network alone (`az-0`) scores
   0.997 and 0.484. See [AlphaZero](#alphazero-azpy).
 - **Head-to-head:** PPO beats the DQN 0.868 over 1,024 games (888 / 2 / 134).
   See [the three compared](#the-three-compared) for all the pairings.
@@ -446,10 +447,13 @@ jitted chunk per log line, so the same file runs on a GPU unchanged (raise
   moves masked and a `tanh` value head: 312k parameters, evaluated for each
   snake from its own view.
 - **Search.** Decoupled PUCT in `slinky.mcts.search`: each snake picks its
-  own move at a node by `q + c_puct · P · sqrt(N) / (1 + n)`, with the
-  network's priors `P` and the network's value at the leaves (exact values
-  at finished positions). Unvisited moves start from the node's value minus
-  0.2 (first-play urgency). The network enters as a closure over traced
+  own move at a node by `q + c_puct · P · sqrt(max(N, 1)) / (1 + n)`, where
+  `q` is the move's mean value mapped to [0, 1] (so `c_puct` 0.5 is
+  AlphaZero's 1.0 on its [-1, 1] scale), `n` the move's visits and `N` the
+  snake's visits at the node. The priors `P` and the leaf values come from
+  the network (exact values at finished positions). Unvisited moves start
+  from the node's own value minus 0.2 on the [-1, 1] scale (first-play
+  urgency). The network enters as a closure over traced
   parameters, so new weights never recompile, and under `vmap` each
   simulation is one batched network call for every game in flight.
 - **Self-play.** 64 games, 64 simulations per move, Dirichlet noise in the
@@ -502,9 +506,10 @@ Wilson intervals; [`benchmarks/README.md`](../benchmarks/README.md#alphazero)):
   It beats PPO 0.581 and scores 0.484 against the heuristic, where PPO scores
   0.296; that is between MCTS-16 and MCTS-32 (0.321 and 0.528).
 - **Against the heuristic** `az-64` scores 0.853 (395 / 83 / 34), level with
-  MCTS at 2048–4096 simulations (0.846, 0.840) and below MCTS at 500 ms per
-  move (24,000 simulations, 0.875). `az-256` scores 0.872 and loses 7 games
-  of 512.
+  MCTS at 2048–4096 simulations (0.846, 0.840) and at 500 ms per move
+  (24,000 simulations, 0.875 over 128 games). Plain MCTS's score against the
+  heuristic has saturated there; head to head, MCTS at 500 ms still beats
+  `az-64` (below). `az-256` scores 0.872 and loses 7 games of 512.
 
 **During training** (the run's own evaluations: 128 games per cell, ± up to
 0.09; raw network / with 64 simulations):
@@ -525,11 +530,12 @@ Wilson intervals; [`benchmarks/README.md`](../benchmarks/README.md#alphazero)):
   Rainbow by 2M steps and is about level with PPO from 3M.
 - The search's scores against the heuristic and MCTS-64 level off early
   (0.68–0.86 from 1M steps on, within the ±0.09 of these evaluations), while
-  the plain-MCTS ladder below keeps showing gains.
+  the plain-MCTS ladder below shows gains until about 5M steps.
 
 **What the network is worth in plain simulations.** `az-64` against plain
 MCTS with more and more simulations, at each checkpoint (256 games per point
-for the snapshots, 512 for the final network): where a line crosses 0.5 is
+for the snapshots, 512 for the final network except 128 at 24,000
+simulations): where a line crosses 0.5 is
 how many plain simulations the network's 64 are worth.
 
 ![az-64 against plain MCTS by simulations, one line per checkpoint](../benchmarks/results/az_ladder.svg)
@@ -548,19 +554,18 @@ how many plain simulations the network's 64 are worth.
 - **The crossings are rough.** A 256-game point is ±0.06, about one doubling
   of plain simulations on these slopes. Read the column as: the network's
   worth grew about fivefold over the first 5M steps and then flattened.
-  The final crossing is blurred further because plain MCTS itself gains
-  little from 2048 to 4096 simulations (0.846 and 0.840 against the
-  heuristic), so `az-64` sits at 0.49–0.50 against both.
+  The final network sits at 0.49–0.50 against both MCTS-2048 and
+  MCTS-4096 (±0.043 each), so its crossing is no finer than 2,000–4,000.
 - **At equal time.** `az-64` takes 7.0 ms per move on one core with 32 games
   in flight, what plain MCTS spends on about 1,190 simulations. At 1M steps
   the network was worth half its time in plain search; it drew level by
   2–3M steps, and from 5M on it is worth 2–3 times its time.
 - **Against MCTS at 500 ms per move** (24,000 simulations, 27 times `az-64`'s
   time) `az-64` scores 0.387 [0.307, 0.473] over 128 games (36 / 27 / 65).
- 
-- On a GPU the balance shifts further towards the network: almost all of
-  `az-64`'s time is network evaluation (about 0.1 ms per simulation, against
-  5–8 µs for a plain simulation), which a GPU batches cheaply.
+- **On a GPU** the balance would likely shift further towards the network
+  (not measured): almost all of `az-64`'s time is network evaluation (about
+  0.1 ms per extra simulation, against 5–8 µs per extra plain simulation),
+  which a GPU batches cheaply.
 
 **Play-time settings** (final network; 512 games per cell, ± up to 0.045):
 
@@ -586,14 +591,15 @@ how many plain simulations the network's 64 are worth.
 - The value head explains 11–17% of the outcome variance (averaged per
   million steps; 12.7% over the last million). That is measured on the
   network's own games, which grow longer and closer as it improves, so it
-  understates progress: against a fixed yardstick the value head went from
-  0.09 behind the heuristic leaf to level with it.
+  understates progress. Measured against the heuristic leaf instead, the
+  value head went from 0.09 behind it (the 1M-step pilot network, against
+  MCTS-64) to level with it (the final network, against MCTS-1024).
 - The policy loss sits about 0.04 nats above the entropy of its targets
   (0.73 against 0.69): the network nearly matches its search's visit
   shares, and the search improves on the network by the margins above.
 
 **Pilots.** The configuration comes from 1M-step pilots on 2 cores each
-(about 75 minutes), scored over 256 games with 64 simulations:
+(about an hour each), scored over 256 games with 64 simulations:
 
 | pilot | vs heuristic | vs MCTS-64 | vs PPO |
 |---|---|---|---|
