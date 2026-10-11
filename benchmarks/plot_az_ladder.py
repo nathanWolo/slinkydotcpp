@@ -25,8 +25,8 @@ import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-W, H = 760, 430
-LEFT, RIGHT, TOP, BOTTOM = 64, 170, 24, 58
+W, H = 800, 430
+LEFT, RIGHT, TOP, BOTTOM = 64, 210, 24, 58
 AGENT = re.compile(r"az-64(?::(?P<path>[^:]*?/(?P<steps>\d+)))?(?::c_puct=(?P<c_puct>[0-9.]+))?")
 Key = tuple[int, str | None]  # (env steps, play-time c_puct or None)
 FINAL_STEPS = 8_388_608  # the committed checkpoint's training length

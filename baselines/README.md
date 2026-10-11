@@ -550,6 +550,7 @@ how many plain simulations the network's 64 are worth.
 | 6.29M | | | 0.543 | 0.459 | 2,900 |
 | 7.34M | | | 0.555 | 0.484 | 3,500 |
 | 8.39M (final) | 0.640 | 0.588 | 0.489 | 0.501 | 2,000–4,000 |
+| 8.39M, `c_puct` 0.25 at play time | | 0.664 | 0.612 | 0.592 | over 4,096 (0.574 against MCTS-24000) |
 
 - **The crossings are rough.** A 256-game point is ±0.06, about one doubling
   of plain simulations on these slopes. Read the column as: the network's
@@ -569,17 +570,21 @@ how many plain simulations the network's 64 are worth.
   0.1 ms per extra simulation, against 5–8 µs per extra plain simulation),
   which a GPU batches cheaply.
 
-**Play-time settings** (final network; 512 games per cell, ± up to 0.045):
+**Play-time settings** (final network; 512 games per cell, ± up to 0.045,
+except 128 games, ± up to 0.085, against MCTS-24000):
 
-| setting | vs MCTS-1024 | vs MCTS-2048 | vs MCTS-4096 | vs heuristic | vs PPO |
-|---|---|---|---|---|---|
-| default (`c_puct` 0.5, network leaf values) | 0.588 | 0.489 | 0.501 | 0.853 | 0.943 |
-| `c_puct=0.25` | 0.664 | 0.612 | 0.592 | 0.886 | 0.964 |
-| `leaf=heuristic` (network priors, heuristic leaf values) | 0.574 | | | | |
+| setting | vs MCTS-1024 | vs MCTS-2048 | vs MCTS-4096 | vs MCTS-24000 | vs heuristic | vs PPO |
+|---|---|---|---|---|---|---|
+| default (`c_puct` 0.5, network leaf values) | 0.588 | 0.489 | 0.501 | 0.387 | 0.853 | 0.943 |
+| `c_puct=0.25` | 0.664 | 0.612 | 0.592 | 0.574 | 0.886 | 0.964 |
+| `leaf=heuristic` (network priors, heuristic leaf values) | 0.574 | | | | | |
 
 - **A smaller `c_puct` plays better** than the 0.5 the network trained with:
-  higher in all five matchups, by 0.02 to 0.12. Whether
-  self-play with 0.25 also trains a better network is untested.
+  higher in all six matchups, by 0.02 to 0.19. Against MCTS at 500 ms per
+  move it scores 0.574 [0.488, 0.656] where the default scores 0.387
+  [0.307, 0.473]: `az-64` with `c_puct` 0.25 is level with a search that
+  takes 25 times as long. Whether self-play with 0.25 also trains a better
+  network is untested.
 - **The value head has caught up with the hand-written evaluation.** At 1M
   steps the heuristic leaf was worth +0.09 against MCTS-64 (pilots below);
   on the final network it is level within noise.

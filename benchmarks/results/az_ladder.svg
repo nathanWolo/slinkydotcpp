@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 430" width="760" height="430" font-family="Helvetica, Arial, sans-serif" font-size="12">
-<rect width="760" height="430" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 430" width="800" height="430" font-family="Helvetica, Arial, sans-serif" font-size="12">
+<rect width="800" height="430" fill="#ffffff"/>
 <line x1="64" x2="590" y1="372.0" y2="372.0" stroke="#e3e6ea"/>
 <text x="56" y="376.0" text-anchor="end" fill="#555b63">0</text>
 <line x1="64" x2="590" y1="285.0" y2="285.0" stroke="#e3e6ea"/>
@@ -117,13 +117,15 @@
 <circle cx="590.0" cy="237.4" r="3" fill="#08306b"><title>8.4M env steps, final: az-64 vs mcts-24000: 0.387 [0.307, 0.473], 36/27/65 over 128 games</title></circle>
 <line x1="602" x2="620" y1="180.0" y2="180.0" stroke="#08306b" stroke-width="2.6"/>
 <text x="626" y="184.0" fill="#08306b" font-weight="bold">8.4M env steps, final</text>
-<path d="M310.1,140.9 L371.6,158.9 L433.1,166.1" fill="none" stroke="#08306b" stroke-width="2.6" stroke-dasharray="6 4"/>
+<path d="M310.1,140.9 L371.6,158.9 L433.1,166.1 L590.0,172.2" fill="none" stroke="#08306b" stroke-width="2.6" stroke-dasharray="6 4"/>
 <line x1="310.1" x2="310.1" y1="127.1" y2="155.5" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
 <circle cx="310.1" cy="140.9" r="3" fill="#08306b"><title>8.4M env steps, final, c_puct 0.25: az-64 vs mcts-1024: 0.664 [0.622, 0.704], 277/126/109 over 512 games</title></circle>
 <line x1="371.6" x2="371.6" y1="144.6" y2="173.8" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
 <circle cx="371.6" cy="158.9" r="3" fill="#08306b"><title>8.4M env steps, final, c_puct 0.25: az-64 vs mcts-2048: 0.612 [0.569, 0.654], 256/115/141 over 512 games</title></circle>
 <line x1="433.1" x2="433.1" y1="151.5" y2="181.1" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
 <circle cx="433.1" cy="166.1" r="3" fill="#08306b"><title>8.4M env steps, final, c_puct 0.25: az-64 vs mcts-4096: 0.592 [0.549, 0.634], 250/106/156 over 512 games</title></circle>
+<line x1="590.0" x2="590.0" y1="143.5" y2="202.3" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
+<circle cx="590.0" cy="172.2" r="3" fill="#08306b"><title>8.4M env steps, final, c_puct 0.25: az-64 vs mcts-24000: 0.574 [0.488, 0.656], 56/35/37 over 128 games</title></circle>
 <line x1="602" x2="620" y1="198.0" y2="198.0" stroke="#08306b" stroke-width="2.6" stroke-dasharray="6 4"/>
 <text x="626" y="202.0" fill="#08306b" font-weight="bold">8.4M env steps, final</text>
 <text x="626" y="216.0" fill="#08306b" font-weight="bold">c_puct 0.25 at play time</text>

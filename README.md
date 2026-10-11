@@ -174,7 +174,9 @@ results and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md)
     scoring 0.588 against MCTS-1024.
   - With 256 simulations (`az-256`, 26 ms per move measured the same way) it
     is level with or slightly ahead of MCTS at 500 ms per move: 0.586
-    [0.499, 0.668] over 128 games, at a seventh of the time.
+    [0.499, 0.668] over 128 games, at a seventh of the time. So is `az-64`
+    with `c_puct` 0.25 at play time instead of the training's 0.5: 0.574
+    [0.488, 0.656], at a 25th of the time.
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 

@@ -265,7 +265,7 @@ the heuristic, with 32 games in flight on one pinned core.
 | MCTS-1024 | | 0.588 [0.545, 0.630] | 0.664 [0.622, 0.704] | |
 | MCTS-2048 | | 0.489 [0.446, 0.532] | 0.612 [0.569, 0.654] | |
 | MCTS-4096 | | 0.501 [0.458, 0.544] | 0.592 [0.549, 0.634] | 0.662 [0.602, 0.717] (256 games) |
-| MCTS-24000 (500 ms, 128 games) | | 0.387 [0.307, 0.473] | | 0.586 [0.499, 0.668] |
+| MCTS-24000 (500 ms, 128 games) | | 0.387 [0.307, 0.473] | 0.574 [0.488, 0.656] | 0.586 [0.499, 0.668] |
 
 ![az-64 against plain MCTS by simulations, one line per checkpoint](results/az_ladder.svg)
 
@@ -273,7 +273,8 @@ the heuristic, with 32 games in flight on one pinned core.
   `az-64` is level with both MCTS-2048 (0.489) and MCTS-4096 (0.501), each
   ±0.043, so the data place the crossing no more finely than that.
   (MCTS-4096 against MCTS-2048 was not played; their scores against the
-  heuristic, 0.846 and 0.840, have saturated.)
+  heuristic, 0.846 and 0.840, have saturated.) With `c_puct` 0.25 at play
+  time it is worth more (below).
 - **At equal time it wins.** On this CPU `az-64` takes 7.0 ms per move, what
   plain MCTS spends on about 1,190 simulations (the orange dashed line), and
   it beats MCTS-1024 0.588. Almost all of its time is the network: each extra
@@ -302,7 +303,12 @@ the heuristic, with 32 games in flight on one pinned core.
 - **`c_puct` 0.25 at play time** (the network trained with 0.5) scored higher
   in every matchup: 0.664, 0.612 and 0.592 against MCTS-1024, 2048 and 4096
   (the default: 0.588, 0.489, 0.501), 0.886 against the heuristic (0.853) and
-  0.964 against PPO (0.943). Its crossing is above 4,096.
+  0.964 against PPO (0.943). Its line never crosses 0.5: against MCTS at
+  500 ms per move it scores 0.574 [0.488, 0.656] (56 / 35 / 37, 9 games cut
+  off), where the default scored 0.387 [0.307, 0.473]. That is level with a
+  search that takes 25 times as long per move (7.5 ms against 186 ms). The
+  value 0.25 comes from the 1M-step pilot's play-time sweep, and this
+  matchup was played after the choice, so it tests it afresh.
 - **The heuristic's evaluation at the leaves** instead of the network's value
   (`az-64:leaf=heuristic`) scores 0.574 [0.531, 0.616] against MCTS-1024,
   level with the network's own values (0.588).
@@ -310,8 +316,9 @@ the heuristic, with 32 games in flight on one pinned core.
 ### Reproducing
 
 Results are in `results/strength.jsonl`; the snapshot rows are in
-`results/az_ladder.jsonl`. The matchups ran on the same 4-core machine, in
-four pinned single-worker processes taking matchups from a queue:
+`results/az_ladder.jsonl`. The matchups took about 31 core-hours (24 for the
+final network, 7 for the snapshots) on the same 4-core machine, in four
+pinned single-worker processes taking matchups from a queue:
 
 ```bash
 python benchmarks/strength.py --a az-0,az-64,az-256 --b random_legal,dqn,rainbow,ppo,heuristic --games 512
