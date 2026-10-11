@@ -12,7 +12,8 @@ benchmark machine (from the two agents' timing probes against the heuristic)::
 
 Rows ``az-64:<dir>/<env steps>`` are training snapshots (``results/az_ladder.jsonl``;
 the snapshots themselves are not committed) and plain ``az-64`` is the committed
-checkpoint, ``baselines/checkpoints/az-duel-seed0``.
+checkpoint, ``baselines/checkpoints/az-duel-seed0``. A ``:c_puct=<x>`` play-time
+setting gets its own dashed line.
 """
 
 from __future__ import annotations
@@ -26,16 +27,17 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 W, H = 760, 430
 LEFT, RIGHT, TOP, BOTTOM = 64, 170, 24, 58
-AGENT = re.compile(r"az-64(?::(?P<path>[^:]*?/(?P<steps>\d+)))?")
+AGENT = re.compile(r"az-64(?::(?P<path>[^:]*?/(?P<steps>\d+)))?(?::c_puct=(?P<c_puct>[0-9.]+))?")
+Key = tuple[int, str | None]  # (env steps, play-time c_puct or None)
 FINAL_STEPS = 8_388_608  # the committed checkpoint's training length
 
 
-def load(paths: list[Path], seed: int) -> tuple[dict[int, dict[int, dict]], dict[str, dict]]:
-    """``(env steps -> {mcts sims -> record}, {agent name -> record vs heuristic})``.
+def load(paths: list[Path], seed: int) -> tuple[dict[Key, dict[int, dict]], dict[str, dict]]:
+    """``((env steps, c_puct) -> {mcts sims -> record}, {agent name -> record vs heuristic})``.
 
     The newest line wins, as in ``strength.py``'s tables.
     """
-    series: dict[int, dict[int, dict]] = {}
+    series: dict[Key, dict[int, dict]] = {}
     vs_heuristic: dict[str, dict] = {}
     for path in paths:
         for line in path.read_text().splitlines():
@@ -51,7 +53,8 @@ def load(paths: list[Path], seed: int) -> tuple[dict[int, dict[int, dict]], dict
             agent, opponent = AGENT.fullmatch(a), re.fullmatch(r"mcts-(\d+)", b)
             if agent and opponent:
                 steps = int(agent["steps"]) if agent["steps"] else FINAL_STEPS
-                series.setdefault(steps, {})[int(opponent.group(1))] = rec
+                key = (steps, agent["c_puct"])
+                series.setdefault(key, {})[int(opponent.group(1))] = rec
     return series, vs_heuristic
 
 
@@ -76,9 +79,10 @@ def equal_time_sims(vs_heuristic: dict[str, dict]) -> float | None:
     return None
 
 
-def steps_label(steps: int) -> str:
-    text = f"{steps / 1e6:.1f}M env steps"
-    return text + ", final" if steps == FINAL_STEPS else text
+def steps_label(key: Key) -> str:
+    steps, c_puct = key
+    text = f"{steps / 1e6:.1f}M env steps" + (", final" if steps == FINAL_STEPS else "")
+    return text + f", c_puct {c_puct}" if c_puct else text
 
 
 def colour(i: int, count: int) -> str:
@@ -89,7 +93,7 @@ def colour(i: int, count: int) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def render(series: dict[int, dict[int, dict]], equal_time: float | None) -> str:
+def render(series: dict[Key, dict[int, dict]], equal_time: float | None) -> str:
     sims = sorted({n for pts in series.values() for n in pts})
     lo, hi = math.log2(sims[0]), math.log2(sims[-1])
     pw, ph = W - LEFT - RIGHT, H - TOP - BOTTOM
@@ -147,16 +151,20 @@ def render(series: dict[int, dict[int, dict]], equal_time: float | None) -> str:
     )
 
     out.append(f'<text x="{LEFT + pw + 12}" y="{TOP + 12}" fill="#30353b">checkpoint</text>')
-    ordered = sorted(series)
-    for i, steps in enumerate(ordered):
-        pts = sorted(series[steps].items())
-        c, final = colour(i, len(ordered)), steps == FINAL_STEPS
+    ordered = sorted(series, key=lambda k: (k[0], k[1] or ""))
+    checkpoints = sorted({steps for steps, _ in series})
+    for i, key in enumerate(ordered):
+        pts = sorted(series[key].items())
+        steps, variant = key
+        c = colour(checkpoints.index(steps), len(checkpoints))
+        final = steps == FINAL_STEPS
         width = 2.6 if final else 1.6
+        dash = ' stroke-dasharray="6 4"' if variant else ""
         path = " ".join(
             f"{'M' if j == 0 else 'L'}{x(n):.1f},{y(r['score']):.1f}"
             for j, (n, r) in enumerate(pts)
         )
-        out.append(f'<path d="{path}" fill="none" stroke="{c}" stroke-width="{width}"/>')
+        out.append(f'<path d="{path}" fill="none" stroke="{c}" stroke-width="{width}"{dash}/>')
         for n, r in pts:
             lo_s, hi_s = r.get("ci95_low", r["score"]), r.get("ci95_high", r["score"])
             out.append(
@@ -165,7 +173,7 @@ def render(series: dict[int, dict[int, dict]], equal_time: float | None) -> str:
             )
             out.append(
                 f'<circle cx="{x(n):.1f}" cy="{y(r["score"]):.1f}" r="3" fill="{c}">'
-                f"<title>{steps_label(steps)}: az-64 vs mcts-{n}: {r['score']:.3f} "
+                f"<title>{steps_label(key)}: az-64 vs mcts-{n}: {r['score']:.3f} "
                 f"[{lo_s:.3f}, {hi_s:.3f}], {r['wins']}/{r['draws']}/{r['losses']} over "
                 f"{r['games']} games</title></circle>"
             )
@@ -174,12 +182,18 @@ def render(series: dict[int, dict[int, dict]], equal_time: float | None) -> str:
         weight = ' font-weight="bold"' if final else ""
         out.append(
             f'<line x1="{LEFT + pw + 12}" x2="{LEFT + pw + 30}" y1="{ly:.1f}" y2="{ly:.1f}" '
-            f'stroke="{c}" stroke-width="{width}"/>'
+            f'stroke="{c}" stroke-width="{width}"{dash}/>'
         )
+        label = steps_label(key)
+        lines = label.split(", c_puct ")  # a play-time variant gets a second line
         out.append(
-            f'<text x="{LEFT + pw + 36}" y="{ly + 4:.1f}" fill="{c}"{weight}>'
-            f"{steps_label(steps)}</text>"
+            f'<text x="{LEFT + pw + 36}" y="{ly + 4:.1f}" fill="{c}"{weight}>{lines[0]}</text>'
         )
+        if len(lines) > 1:
+            out.append(
+                f'<text x="{LEFT + pw + 36}" y="{ly + 18:.1f}" fill="{c}"{weight}>'
+                f"c_puct {lines[1]} at play time</text>"
+            )
     out.append("</svg>")
     return "\n".join(out) + "\n"
 
