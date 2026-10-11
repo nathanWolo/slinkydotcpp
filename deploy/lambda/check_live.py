@@ -34,7 +34,7 @@ DUEL = GameConfig()
 
 
 def to_request(d: dict, game_id: str, turn: int) -> dict:
-    snakes = [
+    every = [
         {
             "id": s["id"],
             "name": s["id"],
@@ -46,7 +46,10 @@ def to_request(d: dict, game_id: str, turn: int) -> dict:
             "shout": "",
         }
         for s in d["snakes"]
-        if not s.get("eliminated_cause")
+    ]
+    # The board lists the living snakes; "you" is seat 0 even once it is out (at /end).
+    snakes = [
+        s for s, raw in zip(every, d["snakes"], strict=True) if not raw.get("eliminated_cause")
     ]
     return {
         "game": {
@@ -64,7 +67,7 @@ def to_request(d: dict, game_id: str, turn: int) -> dict:
             "hazards": [{"x": x, "y": y} for x, y in d["hazards"]],
             "snakes": snakes,
         },
-        "you": snakes[0],
+        "you": every[0],
     }
 
 
