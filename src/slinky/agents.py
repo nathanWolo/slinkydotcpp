@@ -34,6 +34,19 @@ Names:
   (``baselines/reinforce.py``), default checkpoint
   ``baselines/checkpoints/reinforce-duel-seed0``, with the same modes as
   ``ppo`` (``reinforce-greedy``, ``reinforce-sample``; greedy by default).
+* ``az-<n>`` or ``az-<n>:<run dir>``: the AlphaZero baseline (``baselines/az.py``),
+  default checkpoint ``baselines/checkpoints/az-duel-seed0``. ``az-0`` plays the raw
+  network (the legal argmax of its policy logits); ``az-<n>`` with ``n >= 1`` plays the
+  move of a decoupled PUCT search of ``n`` simulations guided by the network (priors
+  and leaf values; no root noise; the most visited move). The search constants
+  (``c_puct``, ``fpu_reduction``, ``draw_value``) are the run's, from its
+  ``config.json``; ``:field=value`` items set any of
+  ``baselines/az.py``'s ``AGENT_SEARCH_FIELDS`` instead (``az-64:c_puct=1:leaf=heuristic``).
+  An item with ``=`` is a setting, any other item the run dir (so a run dir can contain
+  neither ``:`` nor ``=``). The agent builds both snakes' observations from the state
+  itself, so it does not need ``needs_obs``, but like ``dqn`` it only plays the board
+  size it was trained on and needs a checkout of the repository. Parsing reads no
+  files, so a setting equal to the run's own value still shows in the name.
 * ``mcts-<n>``: simultaneous-move MCTS (:func:`slinky.mcts.mcts`) with ``n``
   simulations per move and the default :class:`slinky.mcts.MCTSConfig`. Other
   fields are set with dash-separated shorthands (``mcts-256-rm-c0.5``; the list
@@ -51,8 +64,10 @@ parses back to the same config, so two different configs never share a name
 ``mcts-64-rollout10``). A field set twice is an error, and so is a setting
 with no effect on the search, which would otherwise give one agent two names:
 ``gamma`` without ``rm``; ``c``, ``noise`` or ``tuned`` with ``rm``; ``c``
-with ``tuned``; ``rollout_policy`` without rollout steps; ``depth`` above the
-number of simulations (the search caps it there).
+with ``tuned``; ``c`` or ``tuned`` with ``:selection=puct``; ``c_puct``,
+``fpu_reduction`` or ``root_dirichlet_alpha`` without it (and the alpha
+without ``root_noise_frac``); ``rollout_policy`` without rollout steps;
+``depth`` above the number of simulations (the search caps it there).
 
 Agents are cached per ``(canonical name, config)``: calling :func:`make_agent`
 twice returns the same policy object, which keeps ``play_match``'s jit cache
@@ -92,6 +107,8 @@ RAINBOW_SCRIPT = REPO_ROOT / "baselines" / "rainbow.py"
 DEFAULT_RAINBOW_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "rainbow-duel-seed0"
 REINFORCE_SCRIPT = REPO_ROOT / "baselines" / "reinforce.py"
 DEFAULT_REINFORCE_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "reinforce-duel-seed0"
+AZ_SCRIPT = REPO_ROOT / "baselines" / "az.py"
+DEFAULT_AZ_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "az-duel-seed0"
 # How ``ppo`` and ``reinforce`` play: "greedy" (legal argmax of the logits) or "sample"
 # (from the policy).
 PPO_MODES = ("greedy", "sample")
@@ -101,7 +118,7 @@ AGENT_NAMES = (
     "random_legal", "random", "heuristic", "dqn", "dqn:<run dir>",
     "ppo[-greedy|-sample]", "ppo[-greedy|-sample]:<run dir>", "rainbow", "rainbow:<run dir>",
     "reinforce[-greedy|-sample]", "reinforce[-greedy|-sample]:<run dir>",
-    "mcts-<n>[-shorthand...][:field=value...]",
+    "az-<n>[:<run dir>][:field=value...]", "mcts-<n>[-shorthand...][:field=value...]",
 )  # fmt: skip
 SIMPLE_AGENTS = ("random_legal", "random", "heuristic")
 
@@ -132,12 +149,19 @@ class AgentSpec:
     Attributes:
       name: the canonical name (see the module docstring).
       kind: ``"random_legal"``, ``"random"``, ``"heuristic"``, ``"dqn"``, ``"ppo"``,
-        ``"rainbow"``, ``"reinforce"`` or ``"mcts"``.
-      mcts: the search settings of an ``mcts`` agent.
+        ``"rainbow"``, ``"reinforce"``, ``"az"`` or ``"mcts"``.
+      mcts: the search settings of an ``mcts`` agent. For an ``az`` agent with a
+        search, what the name fixes: the simulations, PUCT with network priors,
+        the leaf and the ``overrides`` on top of ``MCTSConfig``'s defaults (enough
+        for cost and memory models); the run's own search constants replace the
+        defaults when the agent is built (see :func:`agent_config`). None for
+        ``az-0``.
       checkpoint: the resolved run directory of a trained baseline (``dqn``, ``ppo``,
-        ``rainbow`` or ``reinforce``).
+        ``rainbow``, ``reinforce`` or ``az``).
       greedy: how a ``ppo`` or ``reinforce`` agent plays: the legal argmax of its
         logits (True) or a move sampled from its policy (False). None for other agents.
+      overrides: an ``az`` agent's ``:field=value`` search settings, in
+        ``MCTSConfig`` field order.
     """
 
     name: str
@@ -145,6 +169,7 @@ class AgentSpec:
     mcts: Any = None  # slinky.mcts.MCTSConfig (imported lazily)
     checkpoint: Path | None = None
     greedy: bool | None = None
+    overrides: tuple[tuple[str, Any], ...] = ()
 
     @property
     def sims(self) -> int:
@@ -175,6 +200,8 @@ def parse_agent(name: str) -> AgentSpec:
         return _parse_policy_gradient(name, "reinforce")
     if name.startswith("mcts-"):
         return _parse_mcts(name)
+    if name == "az" or name.startswith(("az-", "az:", "az@")):
+        return _parse_az(name)
     raise ValueError(f"unknown agent {name!r}; known agents: {', '.join(AGENT_NAMES)}")
 
 
@@ -188,8 +215,8 @@ def make_agent(name: str | AgentSpec, config: GameConfig | None = None) -> Agent
 
     Raises:
       ValueError: unknown name, bad ``mcts`` setting, or a game the agent can't play.
-      FileNotFoundError: a trained baseline (``dqn``, ``ppo``, ``rainbow`` or
-        ``reinforce``) without its script in ``baselines/`` or its checkpoint.
+      FileNotFoundError: a trained baseline (``dqn``, ``ppo``, ``rainbow``,
+        ``reinforce`` or ``az``) without its script in ``baselines/`` or its checkpoint.
     """
     config = config or GameConfig()
     spec = parse_agent(name) if isinstance(name, str) else name
@@ -214,11 +241,11 @@ def check_game(spec: AgentSpec, config: GameConfig) -> None:
 
     Raises ``FileNotFoundError`` for a trained baseline without its checkpoint.
     """
-    if spec.kind == "mcts":
+    if spec.kind == "mcts" or (spec.kind == "az" and spec.mcts is not None):
         mcts = importlib.import_module("slinky.mcts")
         if config.num_snakes > mcts.MAX_SNAKES:
             raise ValueError(f"{spec.name}: MCTS supports at most {mcts.MAX_SNAKES} snakes")
-    elif spec.kind in BASELINES:
+    if spec.kind in BASELINES:
         trained = _run_config(spec).game
         if (config.width, config.height) != (trained.width, trained.height) or (
             config.ruleset.wrapped != trained.ruleset.wrapped
@@ -234,9 +261,11 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
     """Everything that defines the agent's play, as plain JSON data.
 
     The full config, not only the non-default settings: every ``MCTSConfig``
-    field, the heuristic weights, a trained baseline's run config
-    (network included), how it picks moves and a hash of its parameters. Benchmarks
-    hash it to tell results of different agents apart.
+    field (but see :func:`_mcts_fields`), the heuristic weights, a trained baseline's
+    run config (network included), how it picks moves and a hash of its parameters;
+    an ``az`` agent also gets its simulations and, if it searches, the resolved search
+    (``search``: the ``MCTSConfig`` fields, from its run and name). Benchmarks hash it
+    to tell results of different agents apart.
     """
     if spec.kind in ("random_legal", "random"):
         config: dict[str, Any] = {"type": spec.kind}
@@ -253,11 +282,31 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
             "params_sha256": hashlib.sha256(params.read_bytes()).hexdigest()[:16],
             "network": dataclasses.asdict(_run_config(spec)),
         }
+        if spec.kind == "az":
+            search = _az_search(spec)
+            config["simulations"] = spec.sims
+            config["search"] = None if search is None else _mcts_fields(search)
     else:
-        fields = {f.name: getattr(spec.mcts, f.name) for f in dataclasses.fields(spec.mcts)}
-        fields = {k: v._asdict() if hasattr(v, "_asdict") else v for k, v in fields.items()}
-        config = {"type": "mcts", **fields}
+        config = {"type": "mcts", **_mcts_fields(spec.mcts)}
     return json.loads(json.dumps(config, sort_keys=True))  # as it reads back from JSON
+
+
+# ``MCTSConfig`` fields that only PUCT reads. Without PUCT they are always at their
+# defaults (``MCTSConfig`` refuses ``prior`` and the noise, and :func:`_inert_settings` the
+# rest), and leaving them out keeps the identity of every DUCT and RM result stored before
+# they were added (``benchmarks/results/strength.jsonl``), so the benchmark does not re-run
+# them. A field added later should likewise be left out where it has no effect.
+_PUCT_ONLY_FIELDS = ("c_puct", "fpu_reduction", "prior", "root_noise_frac", "root_dirichlet_alpha")
+
+
+def _mcts_fields(config: Any) -> dict[str, Any]:
+    """An ``MCTSConfig``'s fields as JSON-friendly data (without PUCT's own when not PUCT)."""
+    fields = {
+        f.name: getattr(config, f.name)
+        for f in dataclasses.fields(config)
+        if config.selection == "puct" or f.name not in _PUCT_ONLY_FIELDS
+    }
+    return {k: v._asdict() if hasattr(v, "_asdict") else v for k, v in fields.items()}
 
 
 def _build(spec: AgentSpec, config: GameConfig) -> Agent:
@@ -281,6 +330,8 @@ def _build(spec: AgentSpec, config: GameConfig) -> Agent:
         return _rainbow_agent(spec)
     if spec.kind == "reinforce":
         return _reinforce_agent(spec)
+    if spec.kind == "az":
+        return _az_agent(spec, config)
     return _mcts_agent(spec, env)
 
 
@@ -292,7 +343,7 @@ def _random(env: BattlesnakeEnv) -> Policy:
     return policy
 
 
-# --- Trained baselines (DQN, PPO, Rainbow, REINFORCE) ------------------------------
+# --- Trained baselines (DQN, PPO, Rainbow, REINFORCE, AlphaZero) -------------------
 
 # kind -> (script in baselines/, module name it is imported as, default checkpoint)
 BASELINES = {
@@ -300,9 +351,12 @@ BASELINES = {
     "ppo": (PPO_SCRIPT, "baselines_ppo", DEFAULT_PPO_CHECKPOINT),
     "rainbow": (RAINBOW_SCRIPT, "baselines_rainbow", DEFAULT_RAINBOW_CHECKPOINT),
     "reinforce": (REINFORCE_SCRIPT, "baselines_reinforce", DEFAULT_REINFORCE_CHECKPOINT),
+    "az": (AZ_SCRIPT, "baselines_az", DEFAULT_AZ_CHECKPOINT),
 }
 # For messages ("no DQN checkpoint in ...").
-BASELINE_LABELS = {"dqn": "DQN", "ppo": "PPO", "rainbow": "Rainbow", "reinforce": "REINFORCE"}
+BASELINE_LABELS = {
+    "dqn": "DQN", "ppo": "PPO", "rainbow": "Rainbow", "reinforce": "REINFORCE", "az": "AlphaZero",
+}  # fmt: skip
 
 
 @functools.cache
@@ -346,6 +400,11 @@ def load_rainbow_module() -> ModuleType:
 def load_reinforce_module() -> ModuleType:
     """Import ``baselines/reinforce.py`` from the repository."""
     return load_baseline_module("reinforce")
+
+
+def load_az_module() -> ModuleType:
+    """Import ``baselines/az.py`` from the repository."""
+    return load_baseline_module("az")
 
 
 def _run_dir(kind: str, text: str | None) -> Path:
@@ -417,10 +476,11 @@ def _checkpoint_files(spec: AgentSpec) -> tuple[Path, Path]:
 def _run_config(spec: AgentSpec) -> Any:
     """The training config saved with a trained baseline's checkpoint.
 
-    They all save the same files. A config that names its algorithm (``rainbow.py``
-    and ``reinforce.py`` write ``"algorithm"``) must match the agent's kind, so
-    ``dqn:<Rainbow run>`` is refused here rather than failing on a parameter shape
-    later.
+    They all save the same files. A config that names its algorithm (``rainbow.py``,
+    ``reinforce.py`` and ``az.py`` write ``"algorithm"``) must match the agent's kind,
+    so ``dqn:<Rainbow run>`` is refused here rather than failing on a parameter shape
+    later (``rainbow.py``, ``reinforce.py`` and ``az.py`` also refuse configs without
+    their name).
     """
     config = _checkpoint_files(spec)[1]
     try:
@@ -428,9 +488,10 @@ def _run_config(spec: AgentSpec) -> Any:
     except (OSError, ValueError, AttributeError):
         algorithm = None  # let load_config report the problem
     if algorithm in BASELINES and algorithm != spec.kind:
+        article, name = ("an", "az-<n>") if algorithm == "az" else ("a", algorithm)
         raise ValueError(
-            f"{spec.name}: {_display_path(spec.checkpoint)} is a {algorithm} run; "
-            f"write {algorithm}:<run dir>"
+            f"{spec.name}: {_display_path(spec.checkpoint)} is {article} {algorithm} run; "
+            f"write {name}:<run dir>"
         )
     return load_baseline_module(spec.kind).load_config(str(spec.checkpoint))
 
@@ -471,6 +532,105 @@ def _reinforce_agent(spec: AgentSpec) -> Agent:
     how = "greedy" if spec.greedy else "sampled"
     desc = f"{how} self-play REINFORCE ({spec.checkpoint.name})"
     return Agent(spec.name, reinforce.make_policy(params, cfg, bool(spec.greedy)), True, desc)
+
+
+def _parse_az(name: str) -> AgentSpec:
+    head, *items = name.split(":")
+    syntax = "write az-<n>[:<run dir>][:field=value...], with n >= 0"
+    match = re.fullmatch(r"az-(\d+)", head)
+    if match is None:
+        raise ValueError(f"bad az agent name {name!r}; {syntax}")
+    sims = int(match[1])
+    run_text: str | None = None
+    given: dict[str, str] = {}  # field -> value text
+    items_by_field: dict[str, str] = {}  # field -> the item that set it
+    for item in items:
+        if "=" not in item:
+            if not item.strip():
+                raise ValueError(f"{name!r}: empty item; {syntax}")
+            if run_text is not None:
+                raise ValueError(f"{name!r}: two run dirs ({run_text!r} and {item!r})")
+            run_text = item
+            continue
+        field, _, text = item.partition("=")
+        field = field.strip()
+        if field in given:
+            raise ValueError(f"{name!r}: {items_by_field[field]!r} and {item!r} both set {field}")
+        given[field], items_by_field[field] = text.strip(), item
+    if sims == 0 and given:
+        raise ValueError(f"{name!r}: az-0 plays the raw network; search settings have no effect")
+    mcts = importlib.import_module("slinky.mcts")
+    defaults = mcts.MCTSConfig()
+    allowed = _az_search_fields()
+    overrides: dict[str, Any] = {}
+    for field in [f.name for f in dataclasses.fields(mcts.MCTSConfig) if f.name in given]:
+        if field not in allowed:  # (dataclass order, so the canonical name is too)
+            raise ValueError(f"az option {field!r} in {name!r} can't be set; known: "
+                             f"{', '.join(allowed)}")  # fmt: skip
+        overrides[field] = _coerce(field, given[field], getattr(defaults, field))
+    if unknown := set(given) - set(overrides):
+        raise ValueError(
+            f"unknown az option {sorted(unknown)[0]!r} in {name!r}; known: {', '.join(allowed)}"
+        )
+    config = None
+    if sims > 0:
+        if "max_depth" in overrides and overrides["max_depth"] > sims:
+            raise ValueError(
+                f"{name!r}: max_depth={overrides['max_depth']} has no effect: the search caps "
+                f"the depth at the number of simulations ({sims})"
+            )
+        structure = {"selection": "puct", "prior": "network", "leaf": "network"}
+        try:
+            config = mcts.MCTSConfig(num_simulations=sims, **{**structure, **overrides})
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{name!r}: {e}") from None
+    path = _run_dir("az", run_text)
+    base = f"az-{sims}"
+    text = _with_run_dir(base, "az", path) + "".join(
+        f":{k}={_override_text(v)}" for k, v in overrides.items()
+    )
+    return AgentSpec(text, "az", mcts=config, checkpoint=path, overrides=tuple(overrides.items()))
+
+
+def _az_search_fields() -> tuple[str, ...]:
+    """The ``MCTSConfig`` fields an ``az`` name may set (``baselines/az.py`` has the list).
+
+    Duplicated here so that parsing a name never imports the training script.
+    """
+    return ("c_puct", "fpu_reduction", "tie_noise", "leaf", "max_depth", "final", "draw_value",
+            "spawn_food")  # fmt: skip
+
+
+def _override_text(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)):
+        return format_number(value)
+    return str(value)
+
+
+def _az_search(spec: AgentSpec) -> Any:
+    """The search an ``az`` agent plays with: its run's settings plus its overrides."""
+    if spec.mcts is None:
+        return None
+    return load_az_module().agent_search(_run_config(spec), spec.sims, **dict(spec.overrides))
+
+
+def _az_agent(spec: AgentSpec, config: GameConfig) -> Agent:
+    az = load_az_module()
+    cfg = _run_config(spec)
+    params = az.load_params(str(spec.checkpoint), cfg)
+    search = _az_search(spec)
+    policy = az.make_policy(params, cfg, config, spec.sims, search)
+    if search is None:
+        desc = f"raw AlphaZero network, legal argmax of its policy ({spec.checkpoint.name})"
+    else:
+        extra = "".join(f", {k}={v}" for k, v in spec.overrides)
+        desc = (
+            f"AlphaZero network with decoupled PUCT, {spec.sims} simulations"
+            f"{extra} ({spec.checkpoint.name})"
+        )
+    return Agent(spec.name, policy, False, desc)
 
 
 # --- MCTS ------------------------------------------------------------------------
@@ -686,8 +846,20 @@ def _inert_settings(c: Any, d: Any) -> list[str]:
         ]
     elif changed("rm_gamma"):
         out.append("gamma (rm_gamma) has no effect without rm")
-    if c.selection != "rm" and c.ucb1_tuned and changed("exploration"):
+    if c.selection == "duct" and c.ucb1_tuned and changed("exploration"):
         out.append("c (exploration) has no effect with tuned")
+    if c.selection == "puct":
+        duct_only = (("c", "exploration"), ("tuned", "ucb1_tuned"))
+        out += [
+            f"{what} ({field}) has no effect with puct"
+            for what, field in duct_only
+            if changed(field)
+        ]
+        if c.root_noise_frac == 0 and changed("root_dirichlet_alpha"):
+            out.append("root_dirichlet_alpha has no effect without root_noise_frac")
+    else:  # (MCTSConfig itself refuses prior and root_noise_frac without PUCT)
+        puct_only = ("c_puct", "fpu_reduction", "root_dirichlet_alpha")
+        out += [f"{field} has no effect without puct" for field in puct_only if changed(field)]
     if c.rollout_steps == 0 and changed("rollout_policy"):
         out.append("rollout_policy has no effect without rollout steps")
     sims = c.num_simulations

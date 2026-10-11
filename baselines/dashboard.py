@@ -92,8 +92,8 @@ def read_records(run: Path) -> list[dict[str, Any]]:
 
 
 def algorithm(config: dict[str, Any]) -> str:
-    # dqn.py's and ppo.py's config.json have no "algorithm" key (rainbow.py's and
-    # reinforce.py's do).
+    # dqn.py's and ppo.py's config.json have no "algorithm" key (rainbow.py's,
+    # reinforce.py's and az.py's do).
     if not config:
         return "unknown"
     return str(config.get("algorithm") or ("ppo" if "gae_lambda" in config else "dqn"))
@@ -122,15 +122,16 @@ def total_steps(config: dict[str, Any]) -> int | None:
 
 
 def is_headline_eval(record: dict[str, Any]) -> bool:
-    """An eval of the greedy policy against ``random_legal``, which every baseline logs.
+    """An eval of the main agent against ``random_legal``, which every baseline logs.
 
-    PPO and REINFORCE also evaluate against other opponents and with a sampled
-    policy; DQN and Rainbow records have neither field.
+    The main agent is the greedy policy, or for AlphaZero the network with search
+    (mode "search"). PPO and REINFORCE also evaluate against other opponents and with
+    a sampled policy, AlphaZero also the raw network; DQN and Rainbow records have
+    neither field.
     """
-    return (
-        record.get("opponent", "random_legal") == "random_legal"
-        and record.get("mode", "greedy") == "greedy"
-    )
+    return record.get("opponent", "random_legal") == "random_legal" and record.get(
+        "mode", "greedy"
+    ) in ("greedy", "search")
 
 
 def read_run(run: Path) -> tuple[list[dict[str, Any]], float, str]:

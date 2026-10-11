@@ -63,6 +63,16 @@ CANONICAL = {
     "reinforce": "reinforce",
     "reinforce-greedy": "reinforce",
     "reinforce-sample:/nonexistent/run": "reinforce-sample:/nonexistent/run",
+    "az-64": "az-64",
+    "az-0": "az-0",
+    f"az-64:{agents_mod.DEFAULT_AZ_CHECKPOINT}": "az-64",
+    "az-0:/nonexistent/run": "az-0:/nonexistent/run",
+    # Settings after the run dir, in MCTSConfig field order, numbers in their shortest form.
+    "az-64:c_puct=1.0:/nonexistent/run": "az-64:/nonexistent/run:c_puct=1",
+    "az-8:final=sample:/nonexistent/run:leaf=heuristic:c_puct=0.25": (
+        "az-8:/nonexistent/run:c_puct=0.25:leaf=heuristic:final=sample"
+    ),
+    "az-16:spawn_food=yes:max_depth=16": "az-16:max_depth=16:spawn_food=true",
     "random_legal": "random_legal",
     "heuristic": "heuristic",
 }
@@ -159,6 +169,20 @@ def test_format_number():
         ("reinforce:", "write reinforce:<run dir>"),
         ("reinforce@seed0", "write reinforce:<run dir>"),
         ("reinforce-bogus", "unknown reinforce mode 'bogus'"),
+        ("az", "bad az agent name"),
+        ("az-x", "bad az agent name"),
+        ("az@seed0", "bad az agent name"),
+        ("az-64:", "empty item"),
+        ("az-64::c_puct=1", "empty item"),
+        ("az-64:/a:/b", "two run dirs"),
+        ("az-0:c_puct=1", "az-0 plays the raw network"),
+        ("az-64:bogus=1", "unknown az option 'bogus'"),
+        ("az-64:selection=duct", "az option 'selection' in 'az-64:selection=duct' can't be set"),
+        ("az-64:root_noise_frac=0.25", "can't be set"),
+        ("az-64:c_puct=1:c_puct=2", "'c_puct=1' and 'c_puct=2' both set c_puct"),
+        ("az-64:leaf=foo", "leaf must be one of"),
+        ("az-64:c_puct=lots", "expected a float"),
+        ("az-16:max_depth=20", "caps the depth"),
     ],
 )
 def test_bad_names(name, message):
@@ -169,14 +193,25 @@ def test_bad_names(name, message):
 def test_agent_configs_are_complete_json():
     cfg = agent_config(parse_agent("mcts-64-rm"))
     fields = {f.name for f in dataclasses.fields(mcts.MCTSConfig)}
-    assert set(cfg) == fields | {"type"} and cfg["selection"] == "rm"
+    puct_only = set(agents_mod._PUCT_ONLY_FIELDS)
+    assert set(cfg) == fields - puct_only | {"type"} and cfg["selection"] == "rm"
     assert isinstance(cfg["weights"], dict) and json.loads(json.dumps(cfg)) == cfg
+    assert set(agent_config(parse_agent("mcts-64:selection=puct"))) == fields | {"type"}
+    # Without PUCT the config, and so every stored DUCT and RM benchmark result's identity,
+    # is what it was before PUCT's fields existed.
+    assert set(agent_config(parse_agent("mcts-64"))) == {
+        "draw_value", "exploration", "final", "leaf", "max_depth", "num_simulations",
+        "rm_gamma", "rollout_policy", "rollout_steps", "selection", "spawn_food", "tie_noise",
+        "type", "ucb1_tuned", "weights",
+    }  # fmt: skip
     assert agent_config(parse_agent("random")) == {"type": "random"}
     assert set(agent_config(parse_agent("heuristic"))["weights"]) >= {"territory", "contempt"}
     with pytest.raises(FileNotFoundError, match="no DQN checkpoint"):
         agent_config(parse_agent("dqn:/nonexistent/run"))
     with pytest.raises(FileNotFoundError, match="no PPO checkpoint"):
         agent_config(parse_agent("ppo-sample:/nonexistent/run"))
+    with pytest.raises(FileNotFoundError, match="no AlphaZero checkpoint"):
+        agent_config(parse_agent("az-64:/nonexistent/run"))
 
 
 def test_agents_registry():
@@ -341,6 +376,67 @@ def test_reinforce_agent_plays_from_observations(tmp_path):
     # ... and a REINFORCE run is not a PPO run: refused before anything is built.
     with pytest.raises(ValueError, match="is a reinforce run; write reinforce:<run dir>"):
         check_game(parse_agent(f"ppo:{tmp_path}"), CONFIG)
+
+
+def test_az_names():
+    spec = parse_agent("az-64:c_puct=0.75")
+    assert (spec.kind, spec.sims, spec.overrides) == ("az", 64, (("c_puct", 0.75),))
+    assert spec.checkpoint == agents_mod.DEFAULT_AZ_CHECKPOINT.resolve()
+    # The name fixes the search's structure (enough for the benchmark's cost and memory models).
+    assert (spec.mcts.selection, spec.mcts.prior, spec.mcts.leaf) == ("puct", "network", "network")
+    assert spec.mcts.num_simulations == 64 and spec.mcts.c_puct == 0.75
+    raw = parse_agent("az-0")
+    assert raw.mcts is None and raw.sims == 0 and raw.overrides == ()
+
+
+def _tiny_az_checkpoint(run_dir: Path, **kw) -> Path:
+    az = agents_mod.load_az_module()
+    cfg = az.AZConfig(conv_channels=(4,), conv_strides=(2,), hidden=16, **kw)
+    run_dir.mkdir()
+    az.save_config(str(run_dir), cfg)
+    az.save_checkpoint(str(run_dir), az.init_network(jax.random.key(0), cfg))
+    return run_dir
+
+
+def test_az_agents_play_raw_or_with_search(tmp_path):
+    pytest.importorskip("optax")
+    run = _tiny_az_checkpoint(tmp_path / "az-run", c_puct=0.3, draw_value=-0.25)
+    raw, searched = make_agent(f"az-0:{run}", CONFIG), make_agent(f"az-4:{run}", CONFIG)
+    assert not raw.needs_obs and not searched.needs_obs  # observations come from the state
+    assert "raw AlphaZero network" in raw.description
+    assert "4 simulations" in searched.description
+    assert make_agent(f"az-4:{run}", CONFIG) is searched
+    # The search uses the run's constants, and the name's settings over them.
+    info = agent_config(parse_agent(searched.name))
+    assert info["type"] == "az" and info["simulations"] == 4 and info["network"]["hidden"] == 16
+    assert (info["search"]["c_puct"], info["search"]["draw_value"]) == (0.3, -0.25)
+    assert info["search"]["root_noise_frac"] == 0.0 and info["search"]["final"] == "max"
+    assert agent_config(parse_agent(f"az-4:{run}:c_puct=0.7"))["search"]["c_puct"] == 0.7
+    assert agent_config(parse_agent(raw.name))["search"] is None
+    assert info["params_sha256"] == agent_config(parse_agent(raw.name))["params_sha256"]
+    with pytest.raises(ValueError, match="trained on 11x11"):
+        make_agent(f"az-4:{run}", GameConfig(width=7, height=7))
+    with pytest.raises(ValueError, match="at most 4 snakes"):
+        check_game(parse_agent(f"az-4:{run}"), GameConfig(num_snakes=5))
+    with pytest.raises(FileNotFoundError, match="no AlphaZero checkpoint"):
+        make_agent("az-4:/nonexistent/run", CONFIG)
+    # An AlphaZero run is not a PPO run, and a PPO run is not an AlphaZero run.
+    with pytest.raises(ValueError, match="is an az run; write az-<n>:<run dir>"):
+        check_game(parse_agent(f"ppo:{run}"), CONFIG)
+    ppo_run = _tiny_ppo_checkpoint(tmp_path / "ppo-run")
+    with pytest.raises(ValueError, match="not an AlphaZero run"):
+        make_agent(f"az-0:{ppo_run}", CONFIG)
+    r = record_games(CONFIG, [searched, raw], jax.random.key(0), 2, max_turns=6)
+    assert r["agents"] == [searched.name, raw.name]
+
+
+def test_az_without_its_default_checkpoint(tmp_path, monkeypatch):
+    script, module, _ = agents_mod.BASELINES["az"]
+    monkeypatch.setitem(agents_mod.BASELINES, "az", (script, module, tmp_path / "missing"))
+    spec = parse_agent("az-8")
+    assert spec.name == "az-8" and spec.checkpoint == (tmp_path / "missing").resolve()
+    with pytest.raises(FileNotFoundError, match="no AlphaZero checkpoint in .*missing"):
+        make_agent("az-8", GameConfig(max_turns=7))
 
 
 def test_mcts_agents():

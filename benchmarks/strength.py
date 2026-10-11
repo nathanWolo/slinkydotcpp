@@ -12,9 +12,11 @@ the harness only, and the agents do not know about it.
 Agents (``--a`` and ``--b`` take comma-separated lists) are names from the registry in
 :mod:`slinky.agents`: ``random_legal``, ``random``, ``heuristic``, ``dqn`` (the checkpoint
 in ``baselines/checkpoints/dqn-duel-seed0``) or ``dqn:<run dir>``, ``ppo`` (greedy; the
-checkpoint in ``baselines/checkpoints/ppo-duel-seed0``), ``ppo-sample`` or
-``ppo:<run dir>``, ``rainbow`` or ``rainbow:<run dir>``, ``reinforce`` (greedy),
-``reinforce-sample`` or ``reinforce:<run dir>``, and
+checkpoint in ``baselines/checkpoints/ppo-duel-seed0``), ``ppo-sample`` or ``ppo:<run dir>``,
+``rainbow`` or ``rainbow:<run dir>``, ``reinforce`` (greedy), ``reinforce-sample`` or
+``reinforce:<run dir>``, ``az-<sims>`` or ``az-<sims>:<run dir>`` (the AlphaZero network
+with that many simulations of network-guided search; ``az-0`` is the raw network; default
+checkpoint ``baselines/checkpoints/az-duel-seed0``), and
 ``mcts-<sims>[-shorthand...][:field=value...]``, e.g. ``mcts-64-rollout``,
 ``mcts-256-rm-c0.5`` or ``mcts-128:exploration=0.5`` (the shorthands are listed by
 ``--help``). Names are printed and stored in their canonical form, which lists only the
@@ -42,7 +44,7 @@ crashed sweep resumes by running the same command. The identity covers *configs*
 search, the heuristic or the rules does not. Each line records the code that produced
 it (``git_commit``, ``git_dirty`` and ``code_fingerprint``, a hash of the ``slinky``
 modules the process loaded, the baseline scripts (``baselines/dqn.py``, ``ppo.py``,
-``rainbow.py``, ``reinforce.py``) and this script, all captured when the
+``rainbow.py``, ``reinforce.py``, ``az.py``) and this script, all captured when the
 process started); the sweep warns when it skips lines made by other code, and
 ``--rerun`` plays the selected matchups again (the new line is preferred by ``--table``;
 the old one stays in the file). A line is
@@ -190,9 +192,15 @@ PROGRESS_SECONDS = 15.0  # at most one progress line per this many seconds
 # --dry-run's rough model of one game-turn on one pinned core of a 2.1 GHz Xeon, fitted to
 # mcts-64 ... mcts-24000 against the heuristic with 32 slots: 0.06 ms plus 0.0055 ms per
 # simulation of the matchup's searches, growing by sims / 48000 (bigger trees cost more per
-# node), plus 0.25 ms per DQN move and about 0.15 per PPO move (smaller network). Games
+# node), plus 0.25 ms per DQN move and about 0.15 per PPO move (smaller network). An
+# AlphaZero move costs a PPO-sized network evaluation (the raw network, or the search's
+# root) plus about 0.085 ms more per simulation for the network leaf: PUCT with that
+# network took 85-89 us per simulation batched against DUCT's 4.9 (slinky.mcts). Games
 # against random agents are short. --estimate measures instead.
-ROUGH_MS = {"fixed": 0.06, "per_sim": 0.0055, "sim_scale": 48000.0, "dqn": 0.25, "ppo": 0.15}
+ROUGH_MS = {
+    "fixed": 0.06, "per_sim": 0.0055, "sim_scale": 48000.0, "dqn": 0.25, "ppo": 0.15,
+    "az": 0.15, "az_per_sim": 0.085,
+}  # fmt: skip
 ROUGH_TURNS_PER_GAME = 120
 ROUGH_TURNS_VS_RANDOM = 40
 COMPILE_SECONDS = 10.0  # about what compiling a matchup takes
@@ -361,6 +369,8 @@ class Matchup:
         ms += ROUGH_MS["dqn"] * (kinds.count("dqn") + kinds.count("rainbow"))
         # REINFORCE plays with PPO's network.
         ms += ROUGH_MS["ppo"] * (kinds.count("ppo") + kinds.count("reinforce"))
+        ms += ROUGH_MS["az"] * kinds.count("az")
+        ms += ROUGH_MS["az_per_sim"] * sum(x.sims for x in (self.a, self.b) if x.spec.kind == "az")
         random = {"random", "random_legal"} & set(kinds)
         turns = ROUGH_TURNS_VS_RANDOM if random else ROUGH_TURNS_PER_GAME
         return self.games * turns * ms / 1e3
@@ -406,18 +416,20 @@ def tree_bytes_per_game(agent: Agent, game: GameConfig) -> int:
 
     Per node: the game state, the joint-action children table, the legal mask,
     the leaf value, and per player and own move a visit count and a value sum
-    (regret matching and UCB1-Tuned keep more). In the 11x11 duel this gives
-    1.04 KB (1.30 KB with regret matching), as measured for ``slinky.mcts``.
+    (regret matching and UCB1-Tuned keep more, PUCT its priors). In the 11x11 duel this
+    gives 1.04 KB (1.30 KB with regret matching), as measured for ``slinky.mcts``.
     """
     cfg, n = agent.spec.mcts, game.num_snakes
     if cfg is None:
         return 0
     j = 4**n
     node = state_bytes(game) + 4 * j + 4 * n + 1 + 4 * n + 32 * n
-    if cfg.ucb1_tuned:
+    if cfg.ucb1_tuned and cfg.selection == "duct":  # (only DUCT keeps the squared values)
         node += 16 * n
     if cfg.selection == "rm":
         node += 32 * n + 4 * j + 4 * j * n
+    if cfg.selection == "puct":
+        node += 16 * n  # the priors, float32[N, 4]
     sims = cfg.num_simulations
     return (sims + 1) * node + sims * n * 4 * 4  # plus the pre-drawn selection noise
 
@@ -1059,6 +1071,8 @@ def estimate(s: Settings, matchups: list[Matchup], out: Path, assume_turns: int)
 def agent_sort_key(name: str) -> tuple[int, int, str]:
     if name in registry.SIMPLE_AGENTS:
         return registry.SIMPLE_AGENTS.index(name), 0, name
+    if match := re.match(r"az-(\d+)", name):  # the trained baselines, AlphaZero by simulations
+        return 3, int(match[1]), name
     if name.startswith(("dqn", "ppo", "rainbow", "reinforce")):
         return 3, 0, name
     if match := re.match(r"mcts-(\d+)(.*)", name):

@@ -377,6 +377,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog="Agents: random_legal, random, heuristic, dqn, dqn:<run dir>, "
         "ppo[-greedy|-sample], ppo:<run dir>, rainbow, rainbow:<run dir>, "
         "reinforce[-greedy|-sample], reinforce:<run dir>, "
+        "az-<n>[:<run dir>] (az-0: the raw network), "
         "mcts-<n>[-shorthand...][:field=value...], e.g. mcts-256-rm or "
         "mcts-128:exploration=0.5 (see slinky.agents).",
     )

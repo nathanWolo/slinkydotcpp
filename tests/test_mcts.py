@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import re
 
@@ -14,22 +15,66 @@ from helpers import DUEL, board, both_seats, env_for, rollout_states
 from slinky import mcts as M
 from slinky.env import BattlesnakeEnv
 from slinky.evaluate import play_match, random_legal
+from slinky.observations import make_obs_fn
 from slinky.types import DOWN, LEFT, NUM_ACTIONS, RIGHT, UP, GameConfig, State
 
 DEFAULT = M.MCTSConfig(num_simulations=128)
 
 
 @functools.cache
-def batched_search(game: GameConfig, config: M.MCTSConfig):
+def batched_search(game: GameConfig, config: M.MCTSConfig, evaluator: M.Evaluator | None = None):
     """jit(vmap(search)) over keys, for one unbatched state."""
     env = env_for(game)
-    return jax.jit(jax.vmap(lambda k, s: M.search(k, s, env, config), in_axes=(0, None)))
+    return jax.jit(jax.vmap(lambda k, s: M.search(k, s, env, config, evaluator), in_axes=(0, None)))
 
 
-def run(state: State, config: M.MCTSConfig = DEFAULT, game: GameConfig = DUEL, n_keys: int = 4):
+def run(
+    state: State,
+    config: M.MCTSConfig = DEFAULT,
+    game: GameConfig = DUEL,
+    n_keys: int = 4,
+    evaluator: M.Evaluator | None = None,
+):
     """SearchOutput (numpy) with a leading axis of ``n_keys`` independent searches."""
     keys = jax.random.split(jax.random.key(0), n_keys)
-    return jax.tree.map(np.asarray, batched_search(game, config)(keys, state))
+    return jax.tree.map(np.asarray, batched_search(game, config, evaluator)(keys, state))
+
+
+@functools.cache
+def constant_evaluator(value: tuple[float, ...] = (0.3, -0.2), logits: tuple = ((0.0,) * 4,) * 2):
+    """An evaluator that ignores the state (cached, so ``batched_search`` compiles it once)."""
+
+    def evaluator(state: State) -> tuple[jax.Array, jax.Array]:
+        return jnp.asarray(value, jnp.float32), jnp.asarray(logits, jnp.float32)
+
+    return evaluator
+
+
+def tiny_params(key: jax.Array) -> dict[str, jax.Array]:
+    k_conv, k_value, k_policy = jax.random.split(key, 3)
+    return {
+        "conv": jax.random.normal(k_conv, (3, 3, 13, 8)) * 0.3,
+        "value": jax.random.normal(k_value, (8,)),
+        "policy": jax.random.normal(k_policy, (8, NUM_ACTIONS)),
+    }
+
+
+def tiny_network(params: dict[str, jax.Array]) -> M.Evaluator:
+    """A small network on egocentric observations, closing over (possibly traced) params."""
+    obs_fn = make_obs_fn(DUEL)
+
+    def evaluator(state: State) -> tuple[jax.Array, jax.Array]:
+        x = jax.lax.conv_general_dilated(
+            obs_fn(state),
+            params["conv"],
+            (2, 2),
+            "SAME",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+        )
+        x = jnp.mean(jax.nn.relu(x), axis=(1, 2))  # [N, 8]
+        return jnp.tanh(x @ params["value"]), x @ params["policy"]
+
+    return evaluator
 
 
 @functools.cache
@@ -58,6 +103,16 @@ def test_config_validation_and_digits():
         dict(rm_gamma=1.5),
         dict(rm_gamma=-0.1),
         dict(draw_value=-2.0),
+        dict(prior="heuristic"),
+        dict(selection="puct", c_puct=-1.0),
+        dict(selection="puct", c_puct=float("nan")),
+        dict(selection="puct", fpu_reduction=float("nan")),
+        dict(selection="puct", root_noise_frac=1.5),
+        dict(selection="puct", root_dirichlet_alpha=0.0),
+        dict(prior="network"),  # priors and root noise need PUCT
+        dict(selection="rm", root_noise_frac=0.25),
+        dict(selection="puct", ucb1_tuned=True),  # DUCT's variance bound
+        dict(leaf="network", rollout_steps=10),
     ]:
         with pytest.raises(ValueError):
             M.MCTSConfig(**bad)
@@ -66,7 +121,18 @@ def test_config_validation_and_digits():
     assert d.shape == (16, 2) and d[3 + 4 * 2].tolist() == [3, 2]
 
 
-@pytest.mark.parametrize("selection", ["duct", "rm"])
+def test_only_ucb1_tuned_duct_keeps_squared_values():
+    env, state = env_for(DUEL), mid_game_state()
+    for kwargs, kept in [
+        (dict(ucb1_tuned=True), True),
+        (dict(selection="rm", ucb1_tuned=True), False),  # accepted, but RM never reads them
+        (dict(), False),
+    ]:
+        tree = M._init_tree(state, env, M.MCTSConfig(num_simulations=4, **kwargs), 5)
+        assert (tree.value_sq is not None) == kept, kwargs
+
+
+@pytest.mark.parametrize("selection", ["duct", "rm", "puct"])
 def test_root_statistics_are_consistent(selection):
     config = M.MCTSConfig(num_simulations=64, selection=selection)
     states = rollout_states(DUEL, batch=16)
@@ -99,8 +165,11 @@ def test_root_statistics_are_consistent(selection):
     np.testing.assert_array_equal(
         np.take_along_axis(q, action, -1)[..., 0], np.where(top, q, -np.inf).max(-1)
     )
-    if selection == "duct":  # the policy is the root visit distribution
+    if selection != "rm":  # the policy is the root visit distribution
         np.testing.assert_allclose(policy, out.visits[alive_root] / 64, rtol=1e-6)
+    # Without network priors or root noise, the root priors are uniform over the moves.
+    legal = np.asarray(jax.vmap(lambda s: M._legal(s, env.action_mask(s), DUEL))(states))
+    np.testing.assert_allclose(out.root_prior, legal / legal.sum(-1, keepdims=True), rtol=1e-6)
 
 
 def test_deterministic_given_key():
@@ -110,6 +179,46 @@ def test_deterministic_given_key():
         np.testing.assert_array_equal(x, y)
     # The keys differ across the batch, so the searches do too.
     assert not np.array_equal(a.visits[0], a.visits[1])
+
+
+# Root visits, moves and values of two searches of ``mid_game_state()`` (keys split from
+# ``key(0)``), recorded with the search as it was before PUCT, priors and network leaves
+# were added (commit 45ec415). The configs that existed then must keep their exact results.
+# (A JAX or XLA upgrade that changes float rounding could change them too: re-record only
+# after checking that the search itself did not change.)
+RECORDED = {
+    "default": (
+        M.MCTSConfig(num_simulations=32),
+        [[[0, 0, 12, 20], [0, 10, 14, 8]], [[0, 0, 13, 19], [0, 10, 14, 8]]],
+        [[3, 2], [3, 2]],
+        [[-0.259293, 0.259293], [-0.279073, 0.247823]],
+    ),
+    "rm": (
+        M.MCTSConfig(num_simulations=32, selection="rm"),
+        [[[0, 0, 7, 25], [0, 2, 27, 3]], [[0, 0, 5, 27], [0, 6, 23, 3]]],
+        [[3, 2], [3, 2]],
+        [[-0.296204, 0.296204], [-0.280412, 0.249162]],
+    ),
+    "tuned_sample": (
+        M.MCTSConfig(num_simulations=32, ucb1_tuned=True, final="sample"),
+        [[[0, 0, 13, 19], [0, 10, 12, 10]], [[0, 0, 13, 19], [0, 10, 13, 9]]],
+        [[3, 3], [3, 2]],
+        [[-0.246915, 0.215665], [-0.271789, 0.240539]],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RECORDED))
+def test_existing_configs_reproduce_recorded_searches(name):
+    config, visits, action, value = RECORDED[name]
+    out = run(mid_game_state(), config, n_keys=2)
+    np.testing.assert_array_equal(out.visits, visits)
+    np.testing.assert_array_equal(out.action, action)
+    np.testing.assert_allclose(out.value, value, atol=2e-6)
+    # PUCT's settings do nothing outside PUCT.
+    inert = dataclasses.replace(config, c_puct=3.0, fpu_reduction=-0.5, root_dirichlet_alpha=0.1)
+    for x, y in zip(run(mid_game_state(), inert, n_keys=2), out, strict=True):
+        np.testing.assert_array_equal(x, y)
 
 
 def test_finished_game_returns_valid_moves():
@@ -283,22 +392,30 @@ def tree_copies(fn, *args, num_nodes: int) -> list[str]:
     return copies
 
 
+@pytest.mark.parametrize("network", [False, True])
 @pytest.mark.parametrize("batch", [None, 1, 2])
-def test_tree_is_updated_in_place(batch):
+def test_tree_is_updated_in_place(batch, network):
     # XLA compiled one unbatched game (and a vmap of one) with a copy of every
     # Tree.state array on every simulation, about 1 MB per copy at 1024 simulations,
     # so the search was quadratic in num_simulations. 41 nodes: a size no other axis has.
+    # ``network``: PUCT with network priors, a network leaf and root noise, with the
+    # network's parameters traced (an argument of the jitted function).
     config = M.MCTSConfig(num_simulations=40)
+    if network:
+        config = dataclasses.replace(
+            config, selection="puct", prior="network", leaf="network", root_noise_frac=0.25
+        )
     env, key, state = env_for(DUEL), jax.random.key(0), mid_game_state()
+    params = tiny_params(jax.random.key(1))
 
-    def search(k, s):
-        return M.search(k, s, env, config)
+    def search(k, s, p):
+        return M.search(k, s, env, config, tiny_network(p) if network else None)
 
     if batch is not None:
-        search = jax.vmap(search)
+        search = jax.vmap(search, in_axes=(0, 0, None))
         key = jax.random.split(key, batch)
         state = jax.tree.map(lambda x: jnp.stack([x] * batch), state)
-    assert tree_copies(search, key, state, num_nodes=41) == []
+    assert tree_copies(search, key, state, params, num_nodes=41) == []
 
 
 def test_spawn_free_transition_matches_env_step():
@@ -328,10 +445,184 @@ def test_spawn_free_transition_matches_env_step():
         np.testing.assert_array_equal(x, y)
 
 
+# --- PUCT, priors, network leaves and root noise -----------------------------------------
+
+# Far apart (8 moves between the heads), so no game can end within 3 moves of the root.
+APART = ([(1, 5), (1, 4), (1, 3)], [(9, 5), (9, 4), (9, 3)])
+# Both snakes' only move is onto the same cell at equal length: a mutual elimination.
+COLLIDE = (
+    [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
+    [(0, 2), (1, 2), (1, 3), (0, 3), (0, 4)],
+)
+
+
+def test_node_priors_are_distributions_over_the_legal_moves():
+    legal = jnp.array([[True, False, True, True], [True, False, False, False]])
+    logits = jnp.array([[1.0, 50.0, 0.0, -1.0], [0.0, 0.0, 9.0, 0.0]])
+    puct = M.MCTSConfig(selection="puct")
+    uniform = np.asarray(M._node_prior(logits, legal, puct))
+    np.testing.assert_allclose(uniform, [[1 / 3, 0, 1 / 3, 1 / 3], [1, 0, 0, 0]], rtol=1e-6)
+    network = dataclasses.replace(puct, prior="network")
+    prior = np.asarray(M._node_prior(logits, legal, network))
+    e = np.exp([1.0, 0.0, -1.0])
+    np.testing.assert_allclose(prior, [[*(e / e.sum())[:1], 0, *(e / e.sum())[1:]], [1, 0, 0, 0]])
+    # Infinite logits on every legal move: uniform over them (or over the +inf ones), not NaN.
+    for row, expected in [
+        ([-np.inf, 0.0, -np.inf, -np.inf], [1 / 3, 0, 1 / 3, 1 / 3]),
+        ([np.inf, 0.0, np.inf, 1.0], [0.5, 0, 0.5, 0]),
+    ]:
+        logits = jnp.array([row, [-np.inf] * 4])
+        prior = np.asarray(M._node_prior(logits, legal, network))
+        np.testing.assert_allclose(prior, [expected, [1, 0, 0, 0]], rtol=1e-6)
+    # ... also through the search, at every node (a forced row included).
+    evaluator = constant_evaluator((0.0, 0.0), ((-np.inf,) * 4,) * 2)
+    config = M.MCTSConfig(num_simulations=16, selection="puct", prior="network")
+    for state, _ in both_seats(list(COLLIDE)) + [(mid_game_state(), None)]:
+        out = run(state, config, evaluator=evaluator)
+        assert np.isfinite(out.root_prior).all() and np.isfinite(out.q).all()
+        np.testing.assert_allclose(out.root_prior.sum(-1), 1.0, rtol=1e-6)
+
+
+def test_puct_with_uniform_priors_is_deterministic_and_legal():
+    config = M.MCTSConfig(num_simulations=48, selection="puct")
+    state = mid_game_state()
+    a, b = run(state, config), run(state, config)
+    for x, y in zip(a, b, strict=True):
+        np.testing.assert_array_equal(x, y)
+    assert not np.array_equal(a.visits[0], a.visits[1])  # different keys, different searches
+    legal = np.asarray(M._legal(state, env_for(DUEL).action_mask(state), DUEL))
+    np.testing.assert_array_equal(a.visits.sum(-1), 48)
+    assert np.all(a.visits[:, ~legal] == 0)
+    assert legal[np.arange(2), a.action].all()
+
+
+@pytest.mark.parametrize("target", [LEFT, RIGHT])
+def test_a_concentrated_prior_gets_the_most_visits(target):
+    # Both snakes can go UP, LEFT or RIGHT (DOWN is the neck). A prior of about 0.95 on
+    # one move makes it the most visited at a small budget, whichever it is.
+    logits = np.zeros((2, NUM_ACTIONS))
+    logits[:, target] = 4.0
+    logits[:, DOWN] = 9.0  # masked: the prior of an illegal move is 0 whatever its logit
+    evaluator = constant_evaluator((0.0, 0.0), tuple(map(tuple, logits)))
+    config = M.MCTSConfig(num_simulations=16, selection="puct", prior="network")
+    for state, _ in both_seats(list(APART)):
+        out = run(state, config, evaluator=evaluator)
+        assert np.all(out.visits.argmax(-1) == target)
+        assert np.all(out.root_prior[..., DOWN] == 0)
+        np.testing.assert_allclose(out.root_prior[..., target], np.exp(4) / (np.exp(4) + 2))
+
+
+@pytest.mark.parametrize("selection", ["duct", "puct"])
+def test_network_leaf_uses_the_evaluator_value(selection):
+    config = M.MCTSConfig(num_simulations=32, selection=selection, leaf="network", max_depth=3)
+    evaluator = constant_evaluator((0.3, -0.2))
+    out = run(board(list(APART)), config, evaluator=evaluator)
+    expected = np.broadcast_to(np.array([0.3, -0.2])[:, None], out.q.shape)
+    np.testing.assert_allclose(out.value, expected[..., 0], atol=1e-6)
+    visited = out.visits > 0
+    np.testing.assert_allclose(out.q[visited], expected[visited], atol=1e-6)
+    # Exact outcomes still override the evaluator: every line here is a mutual elimination.
+    for state, _ in both_seats(list(COLLIDE)):
+        np.testing.assert_array_equal(run(state, config, evaluator=evaluator).value, -0.5)
+
+
+def test_evaluator_is_batched_and_params_are_traced():
+    env, config = env_for(DUEL), M.MCTSConfig(num_simulations=16, selection="puct")
+    config = dataclasses.replace(config, prior="network", leaf="network")
+    shapes = []
+
+    def evaluator(params):
+        def fn(state):
+            shapes.append(state.length.shape)  # what the evaluator sees, at trace time
+            return tiny_network(params)(state)
+
+        return fn
+
+    @jax.jit
+    def batched(keys, states, params):
+        return jax.vmap(lambda k, s: M.search(k, s, env, config, evaluator(params)))(keys, states)
+
+    states = rollout_states(DUEL, batch=4)
+    keys = jax.random.split(jax.random.key(5), 4)
+    a = batched(keys, states, tiny_params(jax.random.key(1)))
+    traced = len(shapes)
+    # One unbatched state per call (the root and the simulation loop), batched by vmap.
+    assert traced >= 2 and set(shapes) == {(2,)}
+    b = batched(keys, states, tiny_params(jax.random.key(2)))
+    assert len(shapes) == traced  # new parameters, no new trace
+    assert not np.allclose(a.root_prior, b.root_prior)
+    # Each game of the batch got its own evaluation: the same root priors as alone.
+    single = jax.jit(lambda k, s, p: M.search(k, s, env, config, evaluator(p)))
+    for g in range(4):
+        out = single(
+            keys[g], jax.tree.map(lambda x, g=g: x[g], states), tiny_params(jax.random.key(1))
+        )
+        np.testing.assert_allclose(out.root_prior, a.root_prior[g], atol=1e-5)
+
+
+def test_root_noise_keeps_the_priors_on_the_legal_moves():
+    state = mid_game_state()
+    legal = np.asarray(M._legal(state, env_for(DUEL).action_mask(state), DUEL))
+    uniform = legal / legal.sum(-1, keepdims=True)
+    config = M.MCTSConfig(num_simulations=16, selection="puct", root_noise_frac=0.5)
+    out = run(state, config)
+    prior = out.root_prior
+    np.testing.assert_allclose(prior.sum(-1), 1.0, rtol=1e-6)
+    assert np.all(prior[:, ~legal] == 0) and np.all(prior >= 0.5 * uniform - 1e-6)
+    multi = legal.sum(-1) > 1
+    assert multi.any()
+    assert not np.allclose(prior[:, multi], uniform[multi], atol=1e-3)  # it changed
+    assert not np.allclose(prior[0], prior[1], atol=1e-3)  # and differs across keys
+    # Off, the priors are uniform; a player with one legal move keeps its 1 either way.
+    off = run(state, dataclasses.replace(config, root_noise_frac=0.0))
+    np.testing.assert_allclose(off.root_prior, np.broadcast_to(uniform, prior.shape), rtol=1e-6)
+    for forced, _ in both_seats(list(COLLIDE)):
+        mask = np.asarray(env_for(DUEL).action_mask(forced))
+        np.testing.assert_array_equal(
+            run(forced, config).root_prior, np.broadcast_to(mask, prior.shape)
+        )
+
+
+@pytest.mark.parametrize("alpha", [0.003, 0.01, 0.5, 30.0])
+def test_root_noise_is_a_distribution_for_any_alpha(alpha):
+    # Below alpha 0.1 every Gamma draw of a row can underflow float32; normalizing the
+    # draws themselves left 5% of the rows at alpha 0.01 summing to less than 0.999.
+    legal = jnp.array([[True, True, True, False], [True, False, False, False]])
+    prior = legal / jnp.sum(legal, -1, keepdims=True)
+    config = M.MCTSConfig(selection="puct", root_noise_frac=1.0, root_dirichlet_alpha=alpha)
+    keys = jax.random.split(jax.random.key(0), 4096)
+    noise = np.asarray(jax.vmap(lambda k: M._noisy_root_prior(k, prior, legal, config))(keys))
+    assert np.isfinite(noise).all() and np.all(noise[:, ~np.asarray(legal)] == 0)
+    np.testing.assert_allclose(noise.sum(-1), 1.0, rtol=1e-5)
+    np.testing.assert_array_equal(noise[:, 1], np.broadcast_to([1, 0, 0, 0], (4096, 4)))
+    np.testing.assert_allclose(noise[:, 0, :3].mean(0), 1 / 3, atol=0.03)  # E[Dirichlet]
+
+
+def test_network_configs_need_an_evaluator():
+    env, state, key = env_for(DUEL), mid_game_state(), jax.random.key(0)
+    for config in [
+        M.MCTSConfig(num_simulations=4, leaf="network"),
+        M.MCTSConfig(num_simulations=4, selection="puct", prior="network"),
+    ]:
+        assert config.uses_evaluator
+        with pytest.raises(ValueError, match="needs an evaluator"):
+            M.search(key, state, env, config)
+        with pytest.raises(ValueError, match="needs an evaluator"):  # no cached Policy
+            M.mcts(env, config)
+    with pytest.raises(ValueError, match="does not use it"):
+        M.search(key, state, env, M.MCTSConfig(num_simulations=4), constant_evaluator())
+    with pytest.raises(ValueError, match="must return"):
+
+        def flat(state):
+            return jnp.zeros(2), jnp.zeros(NUM_ACTIONS)
+
+        M.search(key, state, env, M.MCTSConfig(num_simulations=4, leaf="network"), flat)
+
+
 # --- Tactics (hero in both seats, several keys) ----------------------------------------
 
 
-@pytest.mark.parametrize("selection", ["duct", "rm"])
+@pytest.mark.parametrize("selection", ["duct", "rm", "puct"])
 def test_avoids_head_to_head_with_a_longer_snake(selection):
     config = M.MCTSConfig(num_simulations=128, selection=selection)
     hero = [(5, 5), (5, 4), (5, 3), (5, 2)]
@@ -340,7 +631,7 @@ def test_avoids_head_to_head_with_a_longer_snake(selection):
         assert UP not in set(run(state, config).action[:, seat])
 
 
-@pytest.mark.parametrize("selection", ["duct", "rm"])
+@pytest.mark.parametrize("selection", ["duct", "rm", "puct"])
 def test_takes_a_forced_kill_of_a_shorter_snake(selection):
     # The short snake's only legal move is (1, 2), which the hero's head can also reach.
     config = M.MCTSConfig(num_simulations=64, selection=selection)

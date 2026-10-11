@@ -114,7 +114,7 @@ python baselines/dashboard.py        # then open http://127.0.0.1:8050
 ```
 
 `dashboard.py` serves a page that lists every run under `runs/` and
-`baselines/checkpoints/` (DQN, PPO, Rainbow and REINFORCE alike) and re-reads its
+`baselines/checkpoints/` (DQN, PPO, Rainbow, REINFORCE and AlphaZero alike) and re-reads its
 `metrics.jsonl` every 5 seconds, so a run in progress updates as it trains.
 
 - **Run cards** show live / finished / stopped, progress and an ETA, and the
@@ -124,12 +124,14 @@ python baselines/dashboard.py        # then open http://127.0.0.1:8050
 - **Charts** (over env steps, one shared axis):
   - greedy score against each evaluation opponent, with its 95% interval:
     `random_legal` for every run, plus the heuristic and the DQN for PPO and
-    REINFORCE;
-  - training loss (log scale; DQN's Huber loss and Rainbow's KL are not
-    comparable), or PPO's and REINFORCE's value loss;
+    REINFORCE; AlphaZero runs plot their network-plus-search agent against the
+    heuristic, the DQN, Rainbow, PPO and MCTS-64;
+  - training loss (log scale; DQN's Huber loss, Rainbow's KL and
+    AlphaZero's cross-entropy plus value error are not comparable), and
+    PPO's, REINFORCE's or AlphaZero's value loss;
   - the value estimate: mean Q of the moves taken, or the mean value-head
-    estimate;
-  - PPO's and REINFORCE's policy entropy;
+    output;
+  - PPO's, REINFORCE's and AlphaZero's policy entropy;
   - self-play game length and draw rate, and throughput;
   - ε or the noisy-net σ.
 - **Death causes**: the share of self-play eliminations by cause, per run.
