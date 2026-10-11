@@ -8,13 +8,19 @@ standard rules), trained by self-play on slinky.
 | Double DQN | `dqn.py` | 31 min, 1.28M env steps | 0.998 | 0.053 | `checkpoints/dqn-duel-seed0/` |
 | PPO | `ppo.py` | 67 min, 5.24M env steps | 0.998 | 0.296 | `checkpoints/ppo-duel-seed0/` |
 | Rainbow DQN | `rainbow.py` | 81 min, 1.28M env steps | 0.983 | 0.084 | `checkpoints/rainbow-duel-seed0/` |
+| AlphaZero (`az-64`) | `az.py` | 9.7 h, 8.39M env steps | 0.999 | 0.853 | `checkpoints/az-duel-seed0/` |
 
 - **Hardware:** the DQN and PPO trained on a 4-core cloud CPU (PPO pinned to
-  3 cores), Rainbow on a thermally throttled laptop CPU; no GPU.
+  3 cores), Rainbow on a thermally throttled laptop CPU, AlphaZero on the
+  4-core cloud CPU; no GPU.
+- **AlphaZero** is scored as `az-64`: the network with 64 simulations of
+  search per move (7 ms per move). The raw network alone (`az-0`) scores
+  0.997 and 0.484. See [AlphaZero](#alphazero-azpy).
 - **Head-to-head:** PPO beats the DQN 0.868 over 1,024 games (888 / 2 / 134).
   See [the three compared](#the-three-compared) for all the pairings.
 - **Sources:** the DQN and PPO scores are from the strength benchmark
-  ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games each).
+  ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games each), as
+  are AlphaZero's (512 games each).
   Rainbow is not in that benchmark; its scores are from its own evaluation
   (5,000 games against `random_legal`, 1,000 against the heuristic). In its
   own 5,000-game evaluation below, the DQN scores 0.993 against
@@ -63,6 +69,7 @@ python baselines/dqn.py --eval-only runs/dqn-<timestamp> --eval-games 5000
 python baselines/dqn.py --resume runs/dqn-<timestamp>   # continue an interrupted run
 python baselines/rainbow.py          # Rainbow DQN; same flags, plus its own
 python baselines/rainbow.py --n-step 1 --per-alpha 0    # ablate components
+python baselines/az.py               # AlphaZero, 4-4.5 h on 4 cores (see below)
 python baselines/dashboard.py        # live training dashboard (see below)
 ```
 
@@ -70,9 +77,10 @@ Each run writes to `runs/` (gitignored):
 
 - `config.json`;
 - `metrics.jsonl`, one record per log chunk (16k env steps for the DQN, 32k
-  for PPO) plus the evaluations;
+  for PPO and AlphaZero) plus the evaluations;
 - `params.npz`, the latest network;
-- `runner.npz`, the full training state used by `--resume`.
+- `runner.npz`, the full training state used by `--resume` (AlphaZero also
+  saves its replay buffer, `replay.npz`).
 
 ## Watching training live
 
@@ -423,3 +431,197 @@ The final network is kept in
 [`checkpoints/rainbow-duel-seed0/`](checkpoints/rainbow-duel-seed0/) (5.5 MB)
 as the `rainbow` agent of `slinky.agents`:
 `python baselines/rainbow.py --eval-only baselines/checkpoints/rainbow-duel-seed0`.
+
+## AlphaZero (`az.py`)
+
+AlphaZero (Silver et al., 2018) on top of `slinky.mcts`: one network gives
+move priors and position values, the simultaneous-move search plays with
+them, and the network learns from the search's own self-play games. It is
+all JAX in one process: self-play, search, replay and learning run as one
+jitted chunk per log line, so the same file runs on a GPU unchanged (raise
+`--num-envs`). The file is self-contained: it shares no code with `ppo.py`.
+
+- **Network.** PPO's torso (the same `21×21×13` egocentric observation,
+  convolutions 16 → 32 → 32, dense 256), a 4-logit policy head with illegal
+  moves masked and a `tanh` value head: 312k parameters, evaluated for each
+  snake from its own view.
+- **Search.** Decoupled PUCT in `slinky.mcts.search`: each snake picks its
+  own move at a node by `q + c_puct · P · sqrt(N) / (1 + n)`, with the
+  network's priors `P` and the network's value at the leaves (exact values
+  at finished positions). Unvisited moves start from the node's value minus
+  0.2 (first-play urgency). The network enters as a closure over traced
+  parameters, so new weights never recompile, and under `vmap` each
+  simulation is one batched network call for every game in flight.
+- **Self-play.** 64 games, 64 simulations per move, Dirichlet noise in the
+  root priors (25%, α = 0.5). The first 16 turns sample each snake's move
+  from its root visit counts, later turns play the most visited move.
+- **Targets.** Each living snake's root visit shares (policy) and its game's
+  outcome (value): win +1, loss -1, a mutual elimination -0.5 (the search's
+  draw value, so the network and the tree agree), a cut-off game 0.
+- **Replay.** Positions are stored as compact game states (under 1 KB) with
+  their visit shares; a game's outcome goes into a side table when it ends,
+  and positions of games still running are skipped when sampled. Each
+  sampled position gets a random one of the 8 board symmetries (the rules,
+  observations and legal masks commute with all 8 exactly; tested).
+- **Learning.** Cross-entropy to the visit shares plus the value MSE, AdamW
+  at 1e-3 decayed linearly to 1e-4, 512 positions (1,024 samples) per
+  gradient step, about 4 uses of each stored position.
+
+```bash
+python baselines/az.py               # default run: 4.2M env steps, 4-4.5 h on 4 cores
+python baselines/az.py --total-env-steps 8388608 --buffer-capacity 262144 \
+    --eval-opponents heuristic,dqn,rainbow,ppo,mcts-64 --run-dir runs/az-duel-seed0   # the run below
+python baselines/az.py --eval-only baselines/checkpoints/az-duel-seed0 --eval-simulations 256
+```
+
+The trained network plays as `az-<n>` in `slinky.agents`: `n` simulations
+of PUCT search per move, or `az-0` for the raw network (the legal argmax of
+its policy). Search settings can be changed at play time, for example
+`az-64:c_puct=0.25` or `az-64:leaf=heuristic`.
+
+### Results
+
+Seed 0, 8.39M env steps (about 39,000 self-play games, 65,296 gradient
+steps). It took **9.7 hours** on a 4-core cloud CPU: 8.0 hours of training
+and 1.7 hours of evaluations. Training ran at about 350 env steps/s for
+the first 2M steps and 250–290 after, while benchmarks shared the machine.
+
+**Final checkpoint in the strength benchmark** (512 games per cell, 95%
+Wilson intervals; [`benchmarks/README.md`](../benchmarks/README.md#alphazero)):
+
+| agent | vs `random_legal` | vs DQN | vs Rainbow | vs PPO | vs heuristic | ms per move |
+|---|---|---|---|---|---|--:|
+| `az-0` (raw network) | 0.997 [0.987, 0.999] | 0.844 [0.810, 0.873] | 0.714 [0.673, 0.751] | 0.581 [0.538, 0.623] | 0.484 [0.441, 0.528] | 0.26 |
+| `az-64` | 0.999 [0.991, 1.000] | 0.994 [0.983, 0.998] | 0.984 [0.969, 0.992] | 0.943 [0.920, 0.960] | 0.853 [0.819, 0.881] | 7.0 |
+| `az-256` | 0.999 [0.991, 1.000] | 0.995 [0.984, 0.998] | 1.000 [0.993, 1.000] | 0.987 [0.973, 0.994] | 0.872 [0.840, 0.898] | 26.3 |
+
+- **With search it beats every learned baseline almost every game.**
+  `az-256` won all 512 games against Rainbow and lost one in 512 to PPO
+  (500 / 11 / 1).
+- **The raw network, with no search, is the strongest learned policy here.**
+  It beats PPO 0.581 and scores 0.484 against the heuristic, where PPO scores
+  0.296; that is between MCTS-16 and MCTS-32 (0.321 and 0.528).
+- **Against the heuristic** `az-64` scores 0.853 (395 / 83 / 34), level with
+  MCTS at 2048–4096 simulations (0.846, 0.840) and below MCTS at 500 ms per
+  move (24,000 simulations, 0.875). `az-256` scores 0.872 and loses 7 games
+  of 512.
+
+**During training** (the run's own evaluations: 128 games per cell, ± up to
+0.09; raw network / with 64 simulations):
+
+| env steps | vs heuristic | vs DQN | vs Rainbow | vs PPO | vs MCTS-64 |
+|--:|---|---|---|---|---|
+| 1.05M | 0.391 / 0.805 | 0.641 / 0.930 | 0.516 / 0.859 | 0.336 / 0.781 | 0.301 / 0.793 |
+| 2.10M | 0.430 / 0.793 | 0.734 / 0.984 | 0.695 / 0.938 | 0.457 / 0.863 | 0.332 / 0.730 |
+| 3.15M | 0.434 / 0.832 | 0.766 / 1.000 | 0.695 / 0.992 | 0.492 / 0.918 | 0.324 / 0.680 |
+| 4.19M | 0.418 / 0.832 | 0.797 / 0.992 | 0.715 / 1.000 | 0.465 / 0.938 | 0.348 / 0.863 |
+| 5.24M | 0.477 / 0.824 | 0.734 / 0.984 | 0.676 / 0.969 | 0.520 / 0.895 | 0.477 / 0.816 |
+| 6.29M | 0.480 / 0.855 | 0.840 / 1.000 | 0.676 / 0.984 | 0.457 / 0.953 | 0.344 / 0.805 |
+| 7.34M | 0.504 / 0.816 | 0.781 / 0.977 | 0.750 / 0.953 | 0.535 / 0.930 | 0.395 / 0.805 |
+| 8.39M | 0.488 / 0.844 | 0.820 / 0.992 | 0.703 / 0.984 | 0.523 / 0.969 | 0.402 / 0.852 |
+
+- After 1M steps (about 50 minutes) the network with search already beats
+  PPO, which trained for 5.24M steps. The raw network passes the DQN and
+  Rainbow by 2M steps and is about level with PPO from 3M.
+- The search's scores against the heuristic and MCTS-64 level off early
+  (0.68–0.86 from 1M steps on, within the ±0.09 of these evaluations), while
+  the plain-MCTS ladder below keeps showing gains.
+
+**What the network is worth in plain simulations.** `az-64` against plain
+MCTS with more and more simulations, at each checkpoint (256 games per point
+for the snapshots, 512 for the final network): where a line crosses 0.5 is
+how many plain simulations the network's 64 are worth.
+
+![az-64 against plain MCTS by simulations, one line per checkpoint](../benchmarks/results/az_ladder.svg)
+
+| checkpoint | vs MCTS-512 | vs MCTS-1024 | vs MCTS-2048 | vs MCTS-4096 | worth about |
+|--:|---|---|---|---|---|
+| 1.05M | 0.520 | 0.445 | 0.340 | 0.344 | 600 simulations |
+| 2.10M | 0.557 | 0.523 | | | a little over 1,000 |
+| 3.15M | 0.578 | 0.516 | | | a little over 1,000 |
+| 4.19M | | 0.555 | 0.463 | | 1,500 |
+| 5.24M | | 0.590 | 0.531 | 0.459 | 2,800 |
+| 6.29M | | | 0.543 | 0.459 | 2,900 |
+| 7.34M | | | 0.555 | 0.484 | 3,500 |
+| 8.39M (final) | 0.640 | 0.588 | 0.489 | 0.501 | 2,000–4,000 |
+
+- **The crossings are rough.** A 256-game point is ±0.06, about one doubling
+  of plain simulations on these slopes. Read the column as: the network's
+  worth grew about fivefold over the first 5M steps and then flattened.
+  The final crossing is blurred further because plain MCTS itself gains
+  little from 2048 to 4096 simulations (0.846 and 0.840 against the
+  heuristic), so `az-64` sits at 0.49–0.50 against both.
+- **At equal time.** `az-64` takes 7.0 ms per move on one core with 32 games
+  in flight, what plain MCTS spends on about 1,190 simulations. At 1M steps
+  the network was worth half its time in plain search; it drew level by
+  2–3M steps, and from 5M on it is worth 2–3 times its time.
+- **Against MCTS at 500 ms per move** (24,000 simulations, 27 times `az-64`'s
+  time) `az-64` scores 0.387 [0.307, 0.473] over 128 games (36 / 27 / 65).
+ 
+- On a GPU the balance shifts further towards the network: almost all of
+  `az-64`'s time is network evaluation (about 0.1 ms per simulation, against
+  5–8 µs for a plain simulation), which a GPU batches cheaply.
+
+**Play-time settings** (final network; 512 games per cell, ± up to 0.045):
+
+| setting | vs MCTS-1024 | vs MCTS-2048 | vs MCTS-4096 | vs heuristic | vs PPO |
+|---|---|---|---|---|---|
+| default (`c_puct` 0.5, network leaf values) | 0.588 | 0.489 | 0.501 | 0.853 | 0.943 |
+| `c_puct=0.25` | 0.664 | 0.612 | 0.592 | 0.886 | 0.964 |
+| `leaf=heuristic` (network priors, heuristic leaf values) | 0.574 | | | | |
+
+- **A smaller `c_puct` plays better** than the 0.5 the network trained with:
+  higher in all five matchups, by 0.02 to 0.12. Whether
+  self-play with 0.25 also trains a better network is untested.
+- **The value head has caught up with the hand-written evaluation.** At 1M
+  steps the heuristic leaf was worth +0.09 against MCTS-64 (pilots below);
+  on the final network it is level within noise.
+
+**Self-play dynamics.**
+
+- Games between the two copies grew from about 180 turns (first million
+  steps) to 240. Self-collisions are about half the deaths and head-to-heads
+  a third (43% early on); draws stay at 1.4–3.2%: no collapse into opening
+  head-on draws.
+- The value head explains 11–17% of the outcome variance (averaged per
+  million steps; 12.7% over the last million). That is measured on the
+  network's own games, which grow longer and closer as it improves, so it
+  understates progress: against a fixed yardstick the value head went from
+  0.09 behind the heuristic leaf to level with it.
+- The policy loss sits about 0.04 nats above the entropy of its targets
+  (0.73 against 0.69): the network nearly matches its search's visit
+  shares, and the search improves on the network by the margins above.
+
+**Pilots.** The configuration comes from 1M-step pilots on 2 cores each
+(about 75 minutes), scored over 256 games with 64 simulations:
+
+| pilot | vs heuristic | vs MCTS-64 | vs PPO |
+|---|---|---|---|
+| **from scratch** | **0.803** | **0.695** | **0.908** |
+| expert iteration (0.5M steps learning from heuristic-leaf MCTS-256), then AlphaZero | 0.732 | 0.693 | 0.848 |
+| the same, phasing the heuristic leaf out over the AlphaZero half | 0.715 | 0.660 | 0.812 |
+| expert iteration only (0.5M steps) | 0.596 | 0.549 | 0.588 |
+
+- **Learning from scratch was best.** Starting from a heuristic-MCTS teacher
+  gave a fast start (0.305 raw against the heuristic after 24 minutes) but
+  plateaued, and its value head carried over poorly.
+- **`c_puct`** 0.25–0.5 at play time scored alike in the pilot (0.719 and
+  0.695 against MCTS-64); 1.0 was clearly worse (0.609).
+- **The value head was the bottleneck at 1M steps:** the heuristic leaf
+  scored 0.783 against MCTS-64 where the network's own values scored 0.695.
+
+### Caveats
+
+- **One seed** and one network size (PPO's); a bigger network, more
+  simulations in self-play or a longer run are untested.
+- **CPU only.** Self-play is about 95% network evaluation on this CPU; the
+  time comparisons above are for this machine.
+- **The training evaluations are noisy** (128 games); the strength benchmark
+  above has 512 games per cell.
+- **The training snapshots are not committed**, only the final network; the
+  ladder's snapshot rows are in `benchmarks/results/az_ladder.jsonl` with
+  their parameter hashes.
+
+The final network is kept in
+[`checkpoints/az-duel-seed0/`](checkpoints/az-duel-seed0/) (1.3 MB) as the
+default `az-<n>` agent.

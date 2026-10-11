@@ -120,8 +120,8 @@ own core, which is the fast path on a 4-core machine.
 
 ## Baselines
 
-Reference opponents for the 1v1 duel, from weakest to strongest. Full results
-and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
+Reference opponents for the 1v1 duel, roughly from weakest to strongest. Full
+results and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
 
 - **`random_legal`** (`slinky.evaluate`): uniformly random among the moves
   that don't certainly die next turn.
@@ -159,6 +159,17 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
     one core, at p90) it scores 0.875 against the heuristic and 0.949 against PPO.
   - It costs about 3.5–6 µs per simulation per CPU core in batches (up to
     4096 simulations), and about 18 µs for one game alone.
+- **AlphaZero** (`baselines/az.py`, see
+  [`baselines/README.md`](baselines/README.md#alphazero-azpy)): a network
+  trained by self-play through `slinky.mcts`'s PUCT search, all in JAX. It
+  trained for 9.7 hours on a 4-core CPU (8.39M env steps).
+  - The raw network (`az-0`) is the strongest learned policy here. It beats
+    PPO 0.581 and scores 0.484 against the heuristic, like MCTS with 32
+    simulations.
+  - With 64 simulations per move (`az-64`, 7 ms per move) it beats PPO 0.943
+    and the heuristic 0.853. It is level with plain MCTS at 2048–4096
+    simulations, so the network makes each simulation worth 30–60 plain ones.
+    At equal time it beats plain MCTS (0.588 against MCTS-1024).
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 
@@ -177,10 +188,11 @@ python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --
   `benchmarks/strength.py`): `random_legal`, `random`, `heuristic`, `dqn`
   (the checkpoint in `baselines/checkpoints/`) or `dqn:<run dir>`, `ppo`
   (greedy), `ppo-sample` or `ppo:<run dir>`, `rainbow` or `rainbow:<run dir>`,
-  and `mcts-<simulations>` with dash shorthands and/or `:field=value`
-  overrides of `MCTSConfig`, e.g. `mcts-256-rm`, `mcts-64-rollout` or
-  `mcts-128:exploration=0.5`. Names are shown in a canonical form that lists
-  only non-default settings.
+  `az-<simulations>` or `az-<simulations>:<run dir>` (the AlphaZero network
+  with PUCT search; `az-0` is the raw network), and `mcts-<simulations>`
+  with dash shorthands and/or `:field=value` overrides of `MCTSConfig`, e.g.
+  `mcts-256-rm`, `mcts-64-rollout` or `mcts-128:exploration=0.5`. Names are
+  shown in a canonical form that lists only non-default settings.
 - **The viewer** shows the board (API coordinates, `(0, 0)` bottom-left),
   each snake's length and health, eliminations with the engine's cause, a
   health-by-turn strip that doubles as the scrubber, the match score and the
@@ -288,7 +300,7 @@ should scale much better with batch size.
    - self-play PPO (done; see `baselines/`);
    - population or league training;
    - AlphaZero-style search with a learned value and policy, on top of
-     `slinky.mcts`.
+     `slinky.mcts` (done; see `baselines/` and `benchmarks/README.md`).
 
 ## Layout
 
@@ -297,8 +309,8 @@ src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   engine_json, policies, evaluate (matches between policies),
                   heuristic (hand-written snake), mcts (simultaneous-move MCTS),
                   agents (named-agent registry), replay (+ viewer.html)
-baselines/        RL baselines (self-play DQN, PPO and Rainbow DQN), their checkpoints
-                  and a live training dashboard (dashboard.py)
+baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN and AlphaZero), their
+                  checkpoints and a live training dashboard (dashboard.py)
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
 benchmarks/       throughput and strength benchmarks, results/ (strength sweep data)

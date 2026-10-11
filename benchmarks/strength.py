@@ -1315,7 +1315,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--round-games",
         type=int,
         default=64,
-        help="with --target-ci: games per round, i.e. between stop tests (default 64)",
+        help="games per round: between --target-ci's stop tests, and the round size of "
+        "network searches (az-<n>, n > 0), which bounds their memory (default 64)",
     )
     p.add_argument(
         "--slots",
