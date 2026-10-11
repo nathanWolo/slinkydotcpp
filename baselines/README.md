@@ -8,6 +8,7 @@ standard rules), trained by self-play on slinky.
 | Double DQN | `dqn.py` | 31 min, 1.28M env steps | 0.998 | 0.053 | `checkpoints/dqn-duel-seed0/` |
 | PPO | `ppo.py` | 67 min, 5.24M env steps | 0.998 | 0.296 | `checkpoints/ppo-duel-seed0/` |
 | Rainbow DQN | `rainbow.py` | 81 min, 1.28M env steps | 0.983 | 0.084 | `checkpoints/rainbow-duel-seed0/` |
+| Rainbow DQN, trained on | `rainbow.py --extend-to` | 5.9 h, 4.61M env steps | 0.986 | 0.158 | `checkpoints/rainbow-long-seed0/` |
 
 - **Hardware:** the DQN and PPO trained on a 4-core cloud CPU (PPO pinned to
   3 cores), Rainbow on a thermally throttled laptop CPU; no GPU.
@@ -16,13 +17,14 @@ standard rules), trained by self-play on slinky.
 - **Sources:** the DQN and PPO scores are from the strength benchmark
   ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games each).
   Rainbow is not in that benchmark; its scores are from its own evaluation
-  (5,000 games against `random_legal`, 1,000 against the heuristic). In its
+  (5,000 games against `random_legal`, 1,000 against the heuristic; see
+  [training on](#training-on) for the longer run). In its
   own 5,000-game evaluation below, the DQN scores 0.993 against
   `random_legal`.
 
 ### The three compared
 
-The three committed checkpoints in one harness (`slinky.evaluate.play_match`:
+The committed checkpoints in one harness (`slinky.evaluate.play_match`:
 seats alternate, greedy play, the same seed 2026 for every match; score is
 win + ½ draw with its 95% interval):
 
@@ -31,12 +33,23 @@ win + ½ draw with its 95% interval):
 | PPO vs DQN | 1,000 | 872 / 1 / 127 | 0.873 ± 0.021 |
 | PPO vs Rainbow | 1,000 | 751 / 5 / 244 | 0.753 ± 0.027 |
 | Rainbow vs DQN | 1,000 | 499 / 10 / 491 | 0.504 ± 0.031 |
+| PPO vs Rainbow 4.61M | 1,000 | 555 / 8 / 437 | 0.559 ± 0.031 |
+| Rainbow 4.61M vs DQN | 1,000 | 689 / 7 / 304 | 0.693 ± 0.028 |
+| Rainbow 4.61M vs Rainbow | 1,000 | 608 / 10 / 382 | 0.613 ± 0.030 |
 
 | agent | vs `random_legal` (5,000 games) | vs heuristic (1,000 games) |
 |---|---|---|
 | DQN | 0.992 ± 0.002 (4951 / 16 / 33) | 0.047 ± 0.013 (45 / 4 / 951) |
 | PPO | **0.996 ± 0.002** (4967 / 22 / 11) | **0.286 ± 0.025** (196 / 181 / 623) |
 | Rainbow | 0.983 ± 0.003 (4896 / 33 / 71) | 0.084 ± 0.017 (78 / 12 / 910) |
+| Rainbow 4.61M | 0.986 ± 0.003 (4927 / 10 / 63) | 0.158 ± 0.023 (156 / 3 / 841) |
+
+"Rainbow" is the committed 1.28M-step run; "Rainbow 4.61M" is the same run
+trained on (see [training on](#training-on)). Its checkpoint was picked as
+the best of 18 snapshots on these same seed-2026 games against PPO and the
+heuristic, so those two of its scores are biased upward a little. On 2,000
+fresh games (seed 7) it scores 0.419 ± 0.022 against PPO and 0.167 ± 0.016
+against the heuristic.
 
 - **PPO is the strongest of the three** on every count. It beats both DQNs
   head to head and scores 3–6 times as much as either against the heuristic.
@@ -51,7 +64,10 @@ win + ½ draw with its 95% interval):
   were already ahead: 0.615 against the DQN and 0.119 against the heuristic
   at 1.05M steps, where Rainbow and the DQN at 1.28M score 0.504 against each
   other and 0.084 and 0.047 against the heuristic. An equal-budget comparison
-  would need longer DQN and Rainbow runs.
+  would need longer DQN and Rainbow runs. Rainbow trained on to 4.61M env
+  steps (close to PPO's 5.24M; see [training on](#training-on)) narrows the gap but does not close it: PPO
+  still beats it (0.559 here, 0.581 on fresh games) and scores about
+  1.8 times as much against the heuristic (0.286 against 0.158).
 - **One seed each**, so the run-to-run spread of each algorithm is unknown.
 
 ```bash
@@ -63,6 +79,8 @@ python baselines/dqn.py --eval-only runs/dqn-<timestamp> --eval-games 5000
 python baselines/dqn.py --resume runs/dqn-<timestamp>   # continue an interrupted run
 python baselines/rainbow.py          # Rainbow DQN; same flags, plus its own
 python baselines/rainbow.py --n-step 1 --per-alpha 0    # ablate components
+python baselines/rainbow.py --resume runs/rainbow-<timestamp> --extend-to 5000000
+                                     # train a finished run on, to 5M env steps
 python baselines/dashboard.py        # live training dashboard (see below)
 ```
 
@@ -104,8 +122,8 @@ python baselines/dashboard.py        # then open http://127.0.0.1:8050
   link to it with `#games=<file>`. Record games for it with, e.g.:
 
   ```bash
-  python -m slinky.replay --a rainbow --b ppo --games 8 --seed 2026 --max-turns 1000 \
-      --out replays/rainbow/rainbow-vs-ppo.json
+  python -m slinky.replay --a rainbow:baselines/checkpoints/rainbow-long-seed0 --b ppo \
+      --games 8 --seed 2026 --max-turns 1000 --out replays/rainbow/rainbow-vs-ppo.json
   ```
 - Hover (or focus a chart and use ←/→) for exact values; every chart also has
   a table view.
@@ -415,16 +433,98 @@ gaps are outside the 95% intervals.
   therefore oversampled for its first replays. Using the buffer's current
   maximum instead is a variant worth trying.
 
+### Training on
+
+The heuristic score was still rising at 1.28M steps, so the same run was
+trained on with `--resume … --extend-to`. Extending keeps PER's β schedule at
+its original length (β stays at 1); the noise has no schedule. Every 256k
+env steps the network was snapshotted and played 1,000 games against PPO and
+1,000 against the heuristic (seed 2026, the same games for every snapshot).
+A plateau rule was to stop the run once the mean of the last four snapshots
+beat the mean of the four before by at most 0.02 against both opponents.
+
+The first extension, to PPO's 5.25M env steps, ended on its budget with the
+score against PPO still rising. A second extension (to 8.06M) stopped at the
+next snapshot, 5.38M, by the rule. The last-four window there spans
+4.86M–5.38M.
+
+| env steps | vs PPO | vs heuristic |
+|--:|---|---|
+| 1.28M | 0.247 | 0.084 |
+| 1.54M | 0.326 | 0.095 |
+| 1.79M | 0.307 | 0.099 |
+| 2.05M | 0.300 | 0.100 |
+| 2.30M | 0.304 | 0.128 |
+| 2.56M | 0.275 | 0.120 |
+| 2.82M | 0.323 | 0.114 |
+| 3.07M | 0.346 | 0.150 |
+| 3.33M | 0.355 | 0.150 |
+| 3.58M | 0.333 | 0.151 |
+| 3.84M | 0.351 | 0.131 |
+| 4.10M | 0.350 | 0.150 |
+| 4.35M | 0.418 | 0.157 |
+| **4.61M** | **0.441** | 0.158 |
+| 4.86M | 0.340 | 0.117 |
+| 5.12M | 0.426 | **0.162** |
+| 5.25M | 0.378 | 0.156 |
+| 5.38M | 0.326 | 0.140 |
+
+Each score has a 95% interval of about ±0.03 against PPO and ±0.02 against
+the heuristic. The six snapshots from 4.35M on were played again on 2,000
+fresh games (seed 7):
+
+| snapshot | vs PPO | vs heuristic |
+|--:|---|---|
+| 4.35M | 0.414 ± 0.022 | 0.162 ± 0.016 |
+| **4.61M** | **0.419 ± 0.022** | **0.167 ± 0.016** |
+| 4.86M | 0.309 ± 0.020 | 0.131 ± 0.014 |
+| 5.12M | 0.413 ± 0.022 | 0.154 ± 0.016 |
+| 5.25M | 0.412 ± 0.022 | 0.142 ± 0.015 |
+| 5.38M | 0.315 ± 0.020 | 0.123 ± 0.014 |
+
+- **Against the heuristic** Rainbow levelled off at about 0.15 from 3M steps.
+- **Against PPO** it climbed to about 0.41 by 4.35M steps. After that the
+  network swings between snapshots: four score about 0.41 on fresh games and
+  two (4.86M and 5.38M) about 0.31, far outside their intervals. Training is
+  no longer improving the policy, only moving it, and the plateau rule fired
+  on a weak snapshot.
+- **Picking a snapshot therefore matters** as much as training longer. On the
+  shared games the four good snapshots ranged from 0.378 to 0.441; on fresh
+  games they are level against PPO (0.412–0.419), and 4.61M is best against
+  the heuristic.
+
+The 4.61M snapshot is kept as
+[`checkpoints/rainbow-long-seed0/`](checkpoints/rainbow-long-seed0/) (5.5 MB;
+its `metrics.jsonl` stops at 4.61M). The run to 4.61M took 5.7 hours of
+training on the same laptop (5.9 hours with its built-in evaluations): about
+265 env-steps/s for the first 1.28M and about 205 for the extension, which
+shared the CPU with the snapshot evaluations. In
+[the three compared](#the-three-compared):
+
+- **It beats the 1.28M Rainbow** 0.613 ± 0.030 and **the DQN** 0.693 ± 0.028,
+  and nearly doubles the heuristic score (0.158 against 0.084).
+- **PPO is still stronger** at a similar budget (5.24M env steps): 0.559 ±
+  0.031 here, 0.581 on fresh games.
+- **Self-play changed little** after 1.28M steps. Games grow from about 240
+  to 270 turns. Head-to-head deaths fall from about a third to 28% and
+  self-collisions rise to 47%. The mean Q stays between +0.02 and +0.04, and
+  the noise σ shrinks slowly (0.0084 to 0.0069, from 0.0104 at the start).
+  The largest PER priority grows from 12 to about 22.
+
 ### Caveats and next steps
 
 - **One seed**, as for the DQN, and the default hyperparameters were not
   tuned. A 320k-step pilot with the same settings scored 0.931–0.945
   against `random_legal`.
-- **The heuristic score was still rising** at 1.28M steps. A longer run is
-  the obvious next experiment, followed by ablations of the six components
-  (the flags above).
+- **The policy oscillates late in training** with a constant learning rate
+  and hard target-network copies. A decaying learning rate, softer or less
+  frequent target updates, or averaging the weights of recent snapshots are
+  the next things to try; then a larger network, more updates per step, and
+  ablations of the six components (the flags above).
 
-The final network is kept in
+The 1.28M network is kept in
 [`checkpoints/rainbow-duel-seed0/`](checkpoints/rainbow-duel-seed0/) (5.5 MB)
 as the `rainbow` agent of `slinky.agents`:
 `python baselines/rainbow.py --eval-only baselines/checkpoints/rainbow-duel-seed0`.
+The longer run is the agent
+`rainbow:baselines/checkpoints/rainbow-long-seed0`.

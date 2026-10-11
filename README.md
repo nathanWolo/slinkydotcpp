@@ -143,7 +143,10 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
   0.084 against the heuristic, against the DQN's 0.992 and 0.047. PPO, trained
   on 4 times the env steps, beats it 0.753 ± 0.027 (and the DQN 0.873 ±
   0.021 in the same harness); see
-  [the three compared](baselines/README.md#the-three-compared).
+  [the three compared](baselines/README.md#the-three-compared). Trained on
+  to 4.61M env steps, Rainbow beats its 1.28M self 0.613 and the DQN 0.693,
+  and scores 0.158 against the heuristic, but PPO still beats it 0.559 ±
+  0.031 ([training on](baselines/README.md#training-on)).
 - **Heuristic** (`slinky.heuristic`): a hand-written snake.
   - It uses time-aware flood fills, Voronoi territory and food control.
   - It picks moves with a one-ply simultaneous-move search over the exact
