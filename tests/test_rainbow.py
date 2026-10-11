@@ -723,6 +723,14 @@ def test_epsilon_and_beta_schedules():
         assert float(rb.epsilon(cfg, jnp.int32(t))) == 0.0  # noisy nets explore instead
     beta = [float(rb.per_beta(cfg, jnp.int32(t))) for t in (0, 250, 500, 1000, 3000)]
     np.testing.assert_allclose(beta, [0.4, 0.55, 0.7, 1.0, 1.0], rtol=1e-6)
+    # An extended run keeps its beta schedule (per_beta_steps).
+    longer = rb.extend(cfg, 4000)
+    assert longer.total_env_steps == 4000 and longer.per_beta_steps == 1000
+    beta = [float(rb.per_beta(longer, jnp.int32(t))) for t in (0, 500, 1000, 3000)]
+    np.testing.assert_allclose(beta, [0.4, 0.7, 1.0, 1.0], rtol=1e-6)
+    assert rb.extend(longer, 8000).per_beta_steps == 1000  # extending twice
+    with pytest.raises(ValueError, match="below"):
+        rb.extend(cfg, 500)
     cfg = dataclasses.replace(cfg, noisy=False, eps_decay_fraction=0.5, eps_end=0.1)
     eps = [float(rb.epsilon(cfg, jnp.int32(t))) for t in (0, 250, 500, 1000)]
     np.testing.assert_allclose(eps, [1.0, 0.55, 0.1, 0.1], rtol=1e-6)
@@ -872,6 +880,34 @@ def test_resume_continues_exactly(tmp_path, monkeypatch):
     assert records(cut_dir) == records(full_dir)  # no duplicated or missing records
 
 
+def test_extend_a_finished_run(tmp_path):
+    def argv(run_dir, total):
+        return [
+            "--num-envs", "4", "--total-env-steps", str(total), "--log-every", "200",
+            "--checkpoint-every", "200", "--learning-starts", "60", "--batch-size", "8",
+            "--buffer-capacity", "300", "--conv-channels", "4", "--conv-strides", "2",
+            "--hidden", "16", "--num-atoms", "11", "--target-update-period", "20",
+            "--eval-every", "400", "--eval-games", "0", "--run-dir", run_dir,
+        ]  # fmt: skip
+
+    # Train 400 steps, then extend to 800: the same as one 800-step run whose beta
+    # schedule ends at 400.
+    ext_dir, full_dir = str(tmp_path / "extended"), str(tmp_path / "full")
+    rb.train(rb.parse_args(argv(ext_dir, 400))[0])
+    rb.main(["--resume", ext_dir, "--extend-to", "800"])
+    _, full = rb.train(rb.parse_args([*argv(full_dir, 800), "--per-beta-steps", "400"])[0])
+
+    for a, b in zip(jax.tree.leaves(rb.load_params(ext_dir)), jax.tree.leaves(full), strict=True):
+        np.testing.assert_array_equal(a, b)
+    cfg = rb.load_config(ext_dir)
+    assert cfg.total_env_steps == 800 and cfg.per_beta_steps == 400
+    lines = [json.loads(x) for x in Path(ext_dir, "metrics.jsonl").read_text().splitlines()]
+    assert [r["env_steps"] for r in lines] == [200, 400, 600, 800]
+    assert [r["beta"] for r in lines[1:]] == pytest.approx([1.0, 1.0, 1.0])
+    with pytest.raises(SystemExit, match="needs --resume"):
+        rb.main(["--extend-to", "800"])
+
+
 def test_load_config_rejects_a_dqn_run(tmp_path):
     dqn = _load("baselines_dqn", "dqn.py")
     dqn.save_config(str(tmp_path), dqn.DQNConfig())
@@ -898,6 +934,7 @@ def test_load_config_rejects_a_dqn_run(tmp_path):
         ({"per_alpha": -0.1}, "per_alpha"),
         ({"per_beta_start": 1.5}, "per_beta"),
         ({"per_eps": 0.0}, "per_eps"),
+        ({"per_beta_steps": -1}, "per_beta_steps"),
         ({"num_envs": 64, "buffer_capacity": 32, "learning_starts": 0}, "buffer_capacity"),
     ],
 )

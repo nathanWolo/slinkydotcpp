@@ -98,6 +98,15 @@ python baselines/dashboard.py        # then open http://127.0.0.1:8050
   - self-play game length and draw rate, and throughput;
   - ε or the noisy-net σ.
 - **Death causes**: the share of self-play eliminations by cause, per run.
+- **Games tab**: recorded games in the replay viewer. It lists every
+  `slinky-replay/1` file under `replays/` (gitignored; `--replays DIR` for
+  others) with its matchup, score and game length; pick one to play it, or
+  link to it with `#games=<file>`. Record games for it with, e.g.:
+
+  ```bash
+  python -m slinky.replay --a rainbow --b ppo --games 8 --seed 2026 --max-turns 1000 \
+      --out replays/rainbow/rainbow-vs-ppo.json
+  ```
 - Hover (or focus a chart and use ←/→) for exact values; every chart also has
   a table view.
 

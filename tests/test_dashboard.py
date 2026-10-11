@@ -64,6 +64,53 @@ def runs(tmp_path):
     return tmp_path
 
 
+def write_replay(path: Path, agents: list[str], winners: list[int | None], **extra) -> None:
+    games = [
+        {
+            "id": i,
+            "seats": agents if i % 2 == 0 else agents[::-1],
+            "result": {"winner": w, "draw": w is None, "truncated": False, "turns": 10 * (i + 1),
+                       "elims": []},
+            "frames": [],
+        }
+        for i, w in enumerate(winners)
+    ]  # fmt: skip
+    replay = {
+        "format": "slinky-replay/1", "board": {"width": 11, "height": 11},
+        "ruleset": "standard", "map": "standard", "agents": agents, "max_turns": 500,
+        "games": games, **extra,
+    }  # fmt: skip
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(replay))
+
+
+@pytest.fixture
+def replays(tmp_path):
+    root = tmp_path / "replays"
+    # Seats alternate: game 0 seats (a, b), game 1 (b, a). Winner seats 0, 0, None:
+    # rainbow wins game 0, ppo game 1, game 2 is a draw.
+    write_replay(root / "rainbow" / "r-vs-p.json", ["rainbow", "ppo"], [0, 0, None])
+    write_replay(root / "evil.json", ["</script><script>alert(1)</script>", "x"], [1])
+    (root / "notes.json").write_text('{"format": "something-else"}')
+    (root / "broken.json").write_text("{not json")
+    return root
+
+
+def test_replay_listing_and_summary(replays):
+    found = dash.find_replays([replays])
+    assert sorted(p.name for p in found.values()) == [
+        "broken.json", "evil.json", "notes.json", "r-vs-p.json",
+    ]  # fmt: skip
+    ok = {p.name: dash.read_replay(p) for p in found.values()}
+    assert ok["notes.json"] is None and ok["broken.json"] is None
+    rid, path = next((i, p) for i, p in found.items() if p.name == "r-vs-p.json")
+    s = dash.replay_summary(rid, path, ok["r-vs-p.json"])
+    assert s["wins"] == {"rainbow": 1, "ppo": 1} and s["draws"] == 1 and s["games"] == 3
+    assert s["mean_turns"] == 20 and s["board"] == "11×11" and s["name"] == "r-vs-p"
+    # A file root is a replay too.
+    assert list(dash.find_replays([path]).values()) == [path]
+
+
 def test_total_steps_rounds_up_to_whole_chunks():
     # Chunks of 300 // 4 * 4 = 300 steps: 1000 -> 1200, as dqn.py and rainbow.py round.
     assert dash.total_steps({"total_env_steps": 1000, "log_every": 300, "num_envs": 4}) == 1200
@@ -113,8 +160,9 @@ def test_live_window_follows_slow_runs(runs, monkeypatch):
     assert dash.run_summary("x", run)["live"]
 
 
-def test_http_api(runs):
+def test_http_api(runs, replays):
     dash.Handler.roots = [runs]
+    dash.Handler.replay_roots = [replays]
     server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_port}"
@@ -125,7 +173,7 @@ def test_http_api(runs):
 
     try:
         status, kind, body = get("/")
-        assert status == 200 and kind.startswith("text/html") and b"Training runs" in body
+        assert status == 200 and kind.startswith("text/html") and b"Training dashboard" in body
         _, _, body = get("/api/runs")
         listed = {r["name"]: r for r in json.loads(body)}
         assert set(listed) == {"rainbow-a", "dqn-b", "ppo-c"}
@@ -135,6 +183,23 @@ def test_http_api(runs):
         assert kind == "application/json" and data["config"]["total_env_steps"] == 600
         assert [r["loss"] for r in data["records"] if r["type"] == "train"] == [0.1, None]
         for bad in ("/api/metrics?run=../../etc", "/api/metrics", "/nope"):
+            with pytest.raises(urllib.error.HTTPError) as err:
+                get(bad)
+            assert err.value.code == 404
+        # Games tab: only the replay files, newest first; each one in the viewer.
+        _, _, body = get("/api/replays")
+        listed = {r["name"]: r for r in json.loads(body)}
+        assert set(listed) == {"r-vs-p", "evil"}
+        status, kind, page = get(f"/viewer?replay={urllib.request.quote(listed['r-vs-p']['id'])}")
+        assert status == 200 and kind.startswith("text/html")
+        page = page.decode()
+        start = page.index('id="replay-data">') + len('id="replay-data">')
+        embedded = json.loads(page[start : page.index("</script>", start)])
+        assert embedded["agents"] == ["rainbow", "ppo"] and len(embedded["games"]) == 3
+        # A name with "</script>" can't close the data tag early.
+        _, _, page = get(f"/viewer?replay={urllib.request.quote(listed['evil']['id'])}")
+        assert b"</script><script>alert" not in page
+        for bad in ("/viewer?replay=../../etc/passwd", "/viewer", "/viewer?replay=notes.json"):
             with pytest.raises(urllib.error.HTTPError) as err:
                 get(bad)
             assert err.value.code == 404
