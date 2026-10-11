@@ -14,3 +14,7 @@ tools/oracle/bin/
 runs/
 # Recorded replays (python -m slinky.replay)
 replays/
+
+# Lambda package (deploy/lambda/build.sh)
+deploy/lambda/build/
+deploy/lambda/dist/
