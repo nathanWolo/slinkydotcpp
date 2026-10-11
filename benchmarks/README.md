@@ -265,7 +265,7 @@ the heuristic, with 32 games in flight on one pinned core.
 | MCTS-1024 | | 0.588 [0.545, 0.630] | 0.664 [0.622, 0.704] | |
 | MCTS-2048 | | 0.489 [0.446, 0.532] | 0.612 [0.569, 0.654] | |
 | MCTS-4096 | | 0.501 [0.458, 0.544] | 0.592 [0.549, 0.634] | 0.662 [0.602, 0.717] (256 games) |
-| MCTS-24000 (500 ms, 128 games) | | 0.387 [0.307, 0.473] | | |
+| MCTS-24000 (500 ms, 128 games) | | 0.387 [0.307, 0.473] | | 0.586 [0.499, 0.668] |
 
 ![az-64 against plain MCTS by simulations, one line per checkpoint](results/az_ladder.svg)
 
@@ -295,7 +295,10 @@ the heuristic, with 32 games in flight on one pinned core.
   beats MCTS-4096 0.662 and loses 7 games in 512 to the heuristic, where
   `az-64` loses 34.
 - **MCTS at 500 ms per move** (186 ms per move here, 27 times `az-64`'s
-  time) still beats `az-64`, 0.613 to 0.387.
+  time) still beats `az-64`, 0.613 to 0.387. `az-256`, at a seventh of its
+  time (26.3 ms), scores 0.586 [0.499, 0.668] against it (57 / 36 / 35; the
+  7 games cut off at 500 turns count as draws): level or slightly ahead, as
+  the interval just reaches 0.5.
 - **`c_puct` 0.25 at play time** (the network trained with 0.5) scored higher
   in every matchup: 0.664, 0.612 and 0.592 against MCTS-1024, 2048 and 4096
   (the default: 0.588, 0.489, 0.501), 0.886 against the heuristic (0.853) and

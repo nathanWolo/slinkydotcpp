@@ -172,6 +172,9 @@ results and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md)
     simulations, so the network makes each simulation worth 30–60 plain ones.
     At equal time (about 1,190 plain simulations) it beats plain MCTS,
     scoring 0.588 against MCTS-1024.
+  - With 256 simulations (`az-256`, 26 ms per move measured the same way) it
+    is level with or slightly ahead of MCTS at 500 ms per move: 0.586
+    [0.499, 0.668] over 128 games, at a seventh of the time.
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 

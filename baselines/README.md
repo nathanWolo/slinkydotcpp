@@ -562,6 +562,8 @@ how many plain simulations the network's 64 are worth.
   2–3M steps, and from 5M on it is worth 2–3 times its time.
 - **Against MCTS at 500 ms per move** (24,000 simulations, 27 times `az-64`'s
   time) `az-64` scores 0.387 [0.307, 0.473] over 128 games (36 / 27 / 65).
+  `az-256`, at a seventh of that MCTS's time, scores 0.586 [0.499, 0.668]
+  (57 / 36 / 35): level or slightly ahead.
 - **On a GPU** the balance would likely shift further towards the network
   (not measured): almost all of `az-64`'s time is network evaluation (about
   0.1 ms per extra simulation, against 5–8 µs per extra plain simulation),
