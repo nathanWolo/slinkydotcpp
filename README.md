@@ -202,6 +202,28 @@ python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --
   250 bytes per turn in a duel. `replay.game_from_states` turns a sequence of
   states from your own loop into a game record.
 
+## Playing on play.battlesnake.com
+
+`slinky.server` serves any registry agent over the official Battlesnake API,
+so it can play real games (for example on the Duels leaderboard: 11×11, two
+snakes, 500 ms per move):
+
+```bash
+python -m slinky.server --agent ppo --port 8000   # binds 127.0.0.1
+```
+
+- **Who plays.** The trained baselines play only the game they learned, the
+  11×11 duel. Other standard games get the heuristic (`--fallback`), compiled
+  for that board in the background; other rulesets, and a new board until it
+  has compiled, get a simple safe-move picker.
+- **Speed.** A duel move takes about 2 ms of compute on a laptop CPU, and
+  about 4 ms round trip locally; 16 games' moves arriving together are all
+  answered within 60 ms.
+- **Reaching it.** Battlesnake's servers call the snake's URL, so a machine
+  behind NAT needs a tunnel (e.g. `cloudflared tunnel --url
+  http://127.0.0.1:8000`) or a forwarded port. Register that URL as a
+  Battlesnake on play.battlesnake.com.
+
 ## How it works
 
 Each snake is stored as a **countdown grid**. For snake `i`,
