@@ -229,7 +229,14 @@ class AZConfig:
     log_every: int = 32_768  # env steps per jitted chunk (one log line), whole iterations
     eval_every: int = 1_048_576  # env steps between evaluations (and checkpoints)
     eval_games: int = 128  # per opponent and mode
-    eval_opponents: tuple[str, ...] = ("random_legal", "heuristic", "ppo", "mcts-64")
+    eval_opponents: tuple[str, ...] = (
+        "random_legal",
+        "heuristic",
+        "dqn",
+        "rainbow",
+        "ppo",
+        "mcts-64",
+    )
     eval_modes: tuple[str, ...] = EVAL_MODES
     eval_simulations: int = 64
     checkpoint_every: int = 262_144  # env steps between full checkpoints (for --resume)

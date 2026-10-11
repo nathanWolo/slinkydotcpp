@@ -375,7 +375,8 @@ th:first-child, td:first-child { text-align: left; }
   const CHARTS = [
     evalChart("random_legal", "Greedy policy (AlphaZero: with search); win = 1, draw = ½. Band: 95% confidence interval."),
     evalChart("heuristic", "PPO and AlphaZero runs; greedy policy or search. Band: 95% confidence interval."),
-    evalChart("dqn", "PPO runs, against the committed DQN; greedy policy. Band: 95% confidence interval."),
+    evalChart("dqn", "PPO and AlphaZero runs, against the committed DQN; greedy policy or search. Band: 95% confidence interval."),
+    evalChart("rainbow", "AlphaZero runs, against the committed Rainbow; with search. Band: 95% confidence interval."),
     evalChart("ppo", "AlphaZero runs, against the committed PPO; with search. Band: 95% confidence interval."),
     evalChart("mcts-64", "AlphaZero runs, against 64-iteration MCTS; with search. Band: 95% confidence interval."),
     { id: "loss", title: "Training loss", sub: "DQN, Rainbow and AlphaZero: mean over the updates in each chunk (log scale).",
