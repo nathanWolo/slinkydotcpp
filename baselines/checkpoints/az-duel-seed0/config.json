@@ -1,0 +1,60 @@
+{
+  "algorithm": "az",
+  "max_turns": 1000,
+  "num_envs": 64,
+  "num_steps": 32,
+  "total_env_steps": 8388608,
+  "num_simulations": 64,
+  "temperature_turns": 16,
+  "root_noise_frac": 0.25,
+  "root_dirichlet_alpha": 0.5,
+  "c_puct": 0.5,
+  "fpu_reduction": 0.2,
+  "draw_value": -0.5,
+  "teacher_env_steps": 0,
+  "teacher_simulations": 256,
+  "blend_start": 1.0,
+  "blend_env_steps": 0,
+  "buffer_capacity": 262144,
+  "learning_starts": 32768,
+  "batch_size": 512,
+  "replay_ratio": 4.0,
+  "augment": true,
+  "lr": 0.001,
+  "final_lr_frac": 0.1,
+  "weight_decay": 0.0001,
+  "max_grad_norm": 1.0,
+  "adam_eps": 1e-08,
+  "value_coef": 1.0,
+  "conv_channels": [
+    16,
+    32,
+    32
+  ],
+  "conv_strides": [
+    2,
+    2,
+    1
+  ],
+  "hidden": 256,
+  "init_from": null,
+  "seed": 0,
+  "log_every": 32768,
+  "eval_every": 1048576,
+  "eval_games": 128,
+  "eval_opponents": [
+    "heuristic",
+    "dqn",
+    "rainbow",
+    "ppo",
+    "mcts-64"
+  ],
+  "eval_modes": [
+    "raw",
+    "search"
+  ],
+  "eval_simulations": 64,
+  "checkpoint_every": 262144,
+  "save_replay": true,
+  "run_dir": null
+}
