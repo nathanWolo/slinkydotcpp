@@ -28,6 +28,8 @@
 <line x1="590.0" x2="590.0" y1="372" y2="377" stroke="#555b63"/>
 <text x="590.0" y="391" text-anchor="middle" fill="#555b63">24000</text>
 <line x1="64" x2="590" y1="372" y2="372" stroke="#555b63"/>
+<line x1="323.4" x2="323.4" y1="24" y2="372" stroke="#d4580f" stroke-dasharray="3 3"/>
+<text x="328.4" y="36" fill="#d4580f">same time per move as az-64 (~1,190)</text>
 <text x="327.0" y="416" text-anchor="middle" fill="#30353b">plain MCTS simulations per move (log scale)</text>
 <text transform="translate(18 198.0) rotate(-90)" text-anchor="middle" fill="#30353b">score of az-64 (win 1, draw ½, loss 0)</text>
 <text x="602" y="36" fill="#30353b">checkpoint</text>
@@ -91,7 +93,15 @@
 <circle cx="433.1" cy="212.3" r="3" fill="#214a7f"><title>6.3M env steps: az-64 vs mcts-4096: 0.459 [0.399, 0.520], 103/29/124 over 256 games</title></circle>
 <line x1="602" x2="620" y1="144.0" y2="144.0" stroke="#214a7f" stroke-width="1.6"/>
 <text x="626" y="148.0" fill="#214a7f">6.3M env steps</text>
-<path d="M371.6,201.7 L433.1,197.7 L590.0,237.4" fill="none" stroke="#08306b" stroke-width="2.6"/>
+<path d="M64.0,83.8 L187.0,116.4 L248.5,149.4 L310.1,167.4 L371.6,201.7 L433.1,197.7 L590.0,237.4" fill="none" stroke="#08306b" stroke-width="2.6"/>
+<line x1="64.0" x2="64.0" y1="73.3" y2="96.0" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
+<circle cx="64.0" cy="83.8" r="3" fill="#08306b"><title>8.4M env steps, final: az-64 vs mcts-64: 0.828 [0.793, 0.858], 393/62/57 over 512 games</title></circle>
+<line x1="187.0" x2="187.0" y1="103.8" y2="130.3" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
+<circle cx="187.0" cy="116.4" r="3" fill="#08306b"><title>8.4M env steps, final: az-64 vs mcts-256: 0.734 [0.694, 0.771], 333/86/93 over 512 games</title></circle>
+<line x1="248.5" x2="248.5" y1="135.3" y2="164.2" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
+<circle cx="248.5" cy="149.4" r="3" fill="#08306b"><title>8.4M env steps, final: az-64 vs mcts-512: 0.640 [0.597, 0.680], 289/77/146 over 512 games</title></circle>
+<line x1="310.1" x2="310.1" y1="152.9" y2="182.4" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
+<circle cx="310.1" cy="167.4" r="3" fill="#08306b"><title>8.4M env steps, final: az-64 vs mcts-1024: 0.588 [0.545, 0.630], 255/92/165 over 512 games</title></circle>
 <line x1="371.6" x2="371.6" y1="186.7" y2="216.7" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
 <circle cx="371.6" cy="201.7" r="3" fill="#08306b"><title>8.4M env steps, final: az-64 vs mcts-2048: 0.489 [0.446, 0.532], 206/89/217 over 512 games</title></circle>
 <line x1="433.1" x2="433.1" y1="182.6" y2="212.7" stroke="#08306b" stroke-width="1.2" opacity="0.6"/>
