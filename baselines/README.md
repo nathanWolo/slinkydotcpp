@@ -9,20 +9,21 @@ standard rules), trained by self-play on slinky.
 | PPO | `ppo.py` | 67 min, 5.24M env steps | 0.998 | 0.296 | `checkpoints/ppo-duel-seed0/` |
 | Rainbow DQN | `rainbow.py` | 81 min, 1.28M env steps | 0.983 | 0.084 | `checkpoints/rainbow-duel-seed0/` |
 | Rainbow DQN, trained on | `rainbow.py --extend-to` | 5.9 h, 4.61M env steps | 0.986 | 0.158 | `checkpoints/rainbow-long-seed0/` |
+| REINFORCE | `reinforce.py` | 73 min, 5.25M env steps | 0.944 | 0.013 | `checkpoints/reinforce-duel-seed0/` |
 
 - **Hardware:** the DQN and PPO trained on a 4-core cloud CPU (PPO pinned to
-  3 cores), Rainbow on a thermally throttled laptop CPU; no GPU.
+  3 cores), Rainbow and REINFORCE on a thermally throttled laptop CPU; no GPU.
 - **Head-to-head:** PPO beats the DQN 0.868 over 1,024 games (888 / 2 / 134).
-  See [the three compared](#the-three-compared) for all the pairings.
+  See [the baselines compared](#the-baselines-compared) for all the pairings.
 - **Sources:** the DQN and PPO scores are from the strength benchmark
   ([`benchmarks/README.md`](../benchmarks/README.md); 1,024 games each).
-  Rainbow is not in that benchmark; its scores are from its own evaluation
-  (5,000 games against `random_legal`, 1,000 against the heuristic; see
-  [training on](#training-on) for the longer run). In its
+  Rainbow and REINFORCE are not in that benchmark; their scores are from the
+  comparison below (5,000 games against `random_legal`, 1,000 against the
+  heuristic; see [training on](#training-on) for the longer Rainbow run). In its
   own 5,000-game evaluation below, the DQN scores 0.993 against
   `random_legal`.
 
-### The three compared
+### The baselines compared
 
 The committed checkpoints in one harness (`slinky.evaluate.play_match`:
 seats alternate, greedy play, the same seed 2026 for every match; score is
@@ -36,6 +37,10 @@ win + ½ draw with its 95% interval):
 | PPO vs Rainbow 4.61M | 1,000 | 555 / 8 / 437 | 0.559 ± 0.031 |
 | Rainbow 4.61M vs DQN | 1,000 | 689 / 7 / 304 | 0.693 ± 0.028 |
 | Rainbow 4.61M vs Rainbow | 1,000 | 608 / 10 / 382 | 0.613 ± 0.030 |
+| REINFORCE vs DQN | 1,000 | 327 / 4 / 669 | 0.329 ± 0.029 |
+| REINFORCE vs PPO | 1,000 | 53 / 4 / 943 | 0.055 ± 0.014 |
+| REINFORCE vs Rainbow | 1,000 | 282 / 4 / 714 | 0.284 ± 0.028 |
+| REINFORCE vs Rainbow 4.61M | 1,000 | 149 / 2 / 849 | 0.150 ± 0.022 |
 
 | agent | vs `random_legal` (5,000 games) | vs heuristic (1,000 games) |
 |---|---|---|
@@ -43,6 +48,7 @@ win + ½ draw with its 95% interval):
 | PPO | **0.996 ± 0.002** (4967 / 22 / 11) | **0.286 ± 0.025** (196 / 181 / 623) |
 | Rainbow | 0.983 ± 0.003 (4896 / 33 / 71) | 0.084 ± 0.017 (78 / 12 / 910) |
 | Rainbow 4.61M | 0.986 ± 0.003 (4927 / 10 / 63) | 0.158 ± 0.023 (156 / 3 / 841) |
+| REINFORCE | 0.944 ± 0.006 (4703 / 38 / 259) | 0.013 ± 0.007 (13 / 0 / 987) |
 
 "Rainbow" is the committed 1.28M-step run; "Rainbow 4.61M" is the same run
 trained on (see [training on](#training-on)). Its checkpoint was picked as
@@ -51,8 +57,9 @@ heuristic, so those two of its scores are biased upward a little. On 2,000
 fresh games (seed 7) it scores 0.419 ± 0.022 against PPO and 0.167 ± 0.016
 against the heuristic.
 
-- **PPO is the strongest of the three** on every count. It beats both DQNs
-  head to head and scores 3–6 times as much as either against the heuristic.
+- **PPO is the strongest** on every count. It beats both DQNs and REINFORCE
+  head to head and scores 3–6 times as much as either DQN against the
+  heuristic.
   These agree with the strength benchmark (PPO vs DQN 0.868, PPO vs heuristic
   0.296).
 - **Rainbow and the DQN are level** head to head, but Rainbow holds up
@@ -68,6 +75,11 @@ against the heuristic.
   steps (close to PPO's 5.24M; see [training on](#training-on)) narrows the gap but does not close it: PPO
   still beats it (0.559 here, 0.581 on fresh games) and scores about
   1.8 times as much against the heuristic (0.286 against 0.158).
+- **REINFORCE is the weakest** on every count, on the same network and env
+  steps as PPO. It loses to the DQN 0.329 and to PPO 0.055, wins 13 of 1,000
+  games against the heuristic, and loses 5.2% of its games to
+  `random_legal`, where every other baseline loses under 1.5%. See [REINFORCE](#reinforce-reinforcepy)
+  for why.
 - **One seed each**, so the run-to-run spread of each algorithm is unknown.
 
 ```bash
@@ -78,6 +90,8 @@ python baselines/dqn.py --help       # every hyperparameter is a flag (same for 
 python baselines/dqn.py --eval-only runs/dqn-<timestamp> --eval-games 5000
 python baselines/dqn.py --resume runs/dqn-<timestamp>   # continue an interrupted run
 python baselines/rainbow.py          # Rainbow DQN; same flags, plus its own
+python baselines/reinforce.py        # REINFORCE with a value baseline, ~75 min
+python baselines/reinforce.py --baseline none   # plain REINFORCE
 python baselines/rainbow.py --n-step 1 --per-alpha 0    # ablate components
 python baselines/rainbow.py --resume runs/rainbow-<timestamp> --extend-to 5000000
                                      # train a finished run on, to 5M env steps
@@ -88,7 +102,8 @@ Each run writes to `runs/` (gitignored):
 
 - `config.json`;
 - `metrics.jsonl`, one record per log chunk (16k env steps for the DQN, 32k
-  for PPO) plus the evaluations;
+  for PPO, 32 updates for REINFORCE, about 23k env steps) plus the
+  evaluations;
 - `params.npz`, the latest network;
 - `runner.npz`, the full training state used by `--resume`.
 
@@ -99,7 +114,7 @@ python baselines/dashboard.py        # then open http://127.0.0.1:8050
 ```
 
 `dashboard.py` serves a page that lists every run under `runs/` and
-`baselines/checkpoints/` (DQN, PPO and Rainbow alike) and re-reads its
+`baselines/checkpoints/` (DQN, PPO, Rainbow and REINFORCE alike) and re-reads its
 `metrics.jsonl` every 5 seconds, so a run in progress updates as it trains.
 
 - **Run cards** show live / finished / stopped, progress and an ETA, and the
@@ -108,11 +123,13 @@ python baselines/dashboard.py        # then open http://127.0.0.1:8050
   the committed checkpoints are shown at first.
 - **Charts** (over env steps, one shared axis):
   - greedy score against each evaluation opponent, with its 95% interval:
-    `random_legal` for every run, plus the heuristic and the DQN for PPO;
+    `random_legal` for every run, plus the heuristic and the DQN for PPO and
+    REINFORCE;
   - training loss (log scale; DQN's Huber loss and Rainbow's KL are not
-    comparable), or PPO's value loss;
-  - the value estimate: mean Q of the moves taken, or PPO's mean critic value;
-  - PPO's policy entropy;
+    comparable), or PPO's and REINFORCE's value loss;
+  - the value estimate: mean Q of the moves taken, or the mean value-head
+    estimate;
+  - PPO's and REINFORCE's policy entropy;
   - self-play game length and draw rate, and throughput;
   - ε or the noisy-net σ.
 - **Death causes**: the share of self-play eliminations by cause, per run.
@@ -345,6 +362,132 @@ The final network from this run is kept in
 default `ppo` agent:
 `python baselines/ppo.py --eval-only baselines/checkpoints/ppo-duel-seed0`.
 
+## REINFORCE (`reinforce.py`)
+
+Williams' (1992) REINFORCE with a learned value baseline: the textbook
+policy gradient, on PPO's network and self-play setup (one network plays both
+snakes, illegal moves masked out). It is the control for PPO: the same model
+and env steps, without GAE, sample reuse or the clipped objective. The file is
+self-contained.
+
+- **Whole games.** Each update plays 8 fresh games to the end, in one jitted
+  loop that stops once every game is over. Nothing is cut off mid-game or
+  bootstrapped. A game that reached `max_turns` would end with return 0, like
+  a draw; none did.
+- **Returns.** Every move is weighted by its discounted Monte Carlo return
+  G_t = r_t + γ G_{t+1}, minus the value head's estimate V(s_t). With
+  `--baseline none` it is plain REINFORCE. The reward is the sparse win/loss
+  reward, unshaped.
+- **One gradient step per batch.** The loss is the mean over every move of
+  every game (about 1,460 agent samples per batch), and each sample is used
+  once. Adam at 3e-3, constant; gradient clipping at 0.5; γ = 0.95; value
+  coefficient 0.5; entropy coefficient 0.001.
+- **Memory.** The games are stored as compact game states (under 1 KB per
+  turn). The update rebuilds the observations 50 turns at a time and skips
+  the blocks after the longest game.
+- **Network.** PPO's: convolutions 16 → 32 → 32 with strides 2, 2, 1, dense
+  256, a policy head and a value head (312k parameters), with the same
+  hand-written convolution backward pass.
+- **Play mode.** Like PPO, the `reinforce` agent plays greedily and
+  `reinforce-sample` samples. The two are within noise of each other (below).
+
+### Results
+
+Default config, seed 0, 5.25M env steps (10.5M agent samples, 7,200 gradient
+steps). It took **73 minutes** on a thermally throttled 12-thread laptop CPU,
+five evaluation rounds included: about 1,200 env steps/s overall, 1,310
+while training.
+
+**During training** (256 games per cell, greedy / sampled score; ± is at most
+0.06):
+
+| env steps | vs `random_legal` | vs DQN | vs heuristic | W / D / L vs heuristic (greedy) |
+|--:|---|---|---|---|
+| 1.06M | 0.994 / 0.992 | 0.379 / 0.402 | 0.057 / 0.084 | 7 / 15 / 234 |
+| 2.10M | 0.955 / 0.961 | 0.246 / 0.293 | 0.014 / 0.029 | 3 / 1 / 252 |
+| 3.17M | 0.965 / 0.959 | 0.381 / 0.404 | 0.031 / 0.027 | 3 / 10 / 243 |
+| 4.20M | 0.887 / 0.871 | 0.064 / 0.062 | 0.008 / 0.008 | 2 / 0 / 254 |
+| 5.25M | 0.959 / 0.943 | 0.316 / 0.275 | 0.012 / 0.039 | 3 / 0 / 253 |
+
+**Final checkpoint** (the harness of [the baselines compared](#the-baselines-compared):
+seed 2026, seats alternating; greedy / sampled):
+
+| opponent | games | greedy W / D / L | greedy | sampled |
+|---|--:|---|---|---|
+| `random_legal` | 5,000 | 4703 / 38 / 259 | 0.944 ± 0.006 | 0.948 ± 0.006 |
+| heuristic | 1,000 | 13 / 0 / 987 | 0.013 ± 0.007 | 0.022 ± 0.009 |
+| DQN | 1,000 | 327 / 4 / 669 | 0.329 ± 0.029 | 0.286 ± 0.028 |
+| PPO | 1,000 | 53 / 4 / 943 | 0.055 ± 0.014 | 0.045 ± 0.013 |
+| Rainbow | 1,000 | 282 / 4 / 714 | 0.284 ± 0.028 | |
+| Rainbow 4.61M | 1,000 | 149 / 2 / 849 | 0.150 ± 0.022 | |
+
+- **It stopped improving after about 1M env steps.** No later evaluation
+  round beat the first by more than noise; the scores swing from round to
+  round instead of rising (0.38, 0.25, 0.38, 0.06 and 0.32 against the DQN).
+- **The policy collapsed to near-determinism.** Its entropy fell from 0.92
+  nats to 0.10 by 1M steps and averaged 0.07 over the last million (PPO ends
+  at 0.24). Self-play between two copies of a near-deterministic policy keeps
+  switching between strategies that beat the previous one, and the
+  evaluations swing with it.
+- **The value baseline barely helps.** Its explained variance peaked at
+  about 0.3 near 0.5M steps and averaged 0.04 over the last million.
+
+**Self-play dynamics.**
+
+- For its first ~200k steps it played almost uniformly (entropy 0.92), with
+  72% of deaths head-to-head and games about 70 turns long. So did every
+  pilot but one (lr 3e-3 with no entropy bonus, below).
+- Head-to-heads were still 69% of deaths at about 1M steps. Over the last
+  million they fell to 46%, with running into its own body (29%) and the
+  other snake's (18%) taking the rest, and games lasted about 117 turns. PPO
+  ends at about 20% head-to-heads and 195-turn games.
+
+**Why it is so far behind PPO.** The most obvious difference is how much
+learning each sample buys: REINFORCE takes about a third as many gradient
+steps (7,200 against 20,480), and each sample feeds one step where PPO's
+feeds four. Short pilots (one seed each, 210–860k env steps) are only weakly
+suggestive, and one of them cuts the other way:
+
+- **PPO cut to one gradient step per batch** (16 envs × 64 turns, 1 epoch,
+  1 minibatch, clipping off, lr 1e-3) lost default PPO's steady decline.
+  Once it started learning, at about 260k steps, its entropy swung between
+  0.43 and 0.83 up to 410k and its games between 48 and 98 turns. Default
+  PPO's entropy fell steadily from 0.58 to about 0.47 over the same steps.
+- **Fewer games per update** (4 instead of 8, at γ 0.99, lr 1e-3 and no
+  entropy bonus) did not start learning any sooner per env step: still
+  uniform at 244k steps after 864 updates, like its 8-game counterpart at
+  213k after 384. Twice the gradient steps bought nothing there, though each
+  step averaged half as many games.
+
+The pilots also set the defaults:
+
+- **Slow start.** At lr 1e-3, γ 0.9 and 0.95 started learning at about
+  270–290k steps; at lr 3e-3 (γ 0.99) learning had started by 243k. The
+  γ 0.99 pilots at lr 1e-3 stopped at about 230k, still uniform, too soon to
+  compare γ. The defaults take lr 3e-3, and γ 0.95 to concentrate the credit
+  on the last ~20 moves, like PPO's GAE λ = 0.95.
+- **No entropy bonus collapses it.** At lr 3e-3 and entropy coefficient 0,
+  entropy fell to 0.14 by 127k steps and 0.05 by 171k, with many starvation
+  deaths, then swung for the rest of the 858k-step pilot. A coefficient of
+  0.003 was still uniform when its pilot stopped at 250k steps (0.01 at the
+  same lr and γ had started by 243k, so when learning starts is noisy). The
+  default 0.001 keeps a small bonus.
+
+### Caveats
+
+- **One seed.**
+- **Snapshot luck.** The scores swing between evaluation rounds, and only the
+  last network was kept, so the checkpoint is one point of an oscillation. The
+  first round (1.06M steps) was about as strong as any.
+- **Not tuned to the end.** The pilots were short and single-seed. Larger
+  batches, a decaying learning rate or a stronger entropy bonus might hold off
+  the collapse; none was tried at full length.
+
+The final network is kept in
+[`checkpoints/reinforce-duel-seed0/`](checkpoints/reinforce-duel-seed0/) (1.3
+MB) as the default `reinforce` agent:
+`python baselines/reinforce.py --eval-only baselines/checkpoints/reinforce-duel-seed0`.
+
 ## Rainbow DQN (`rainbow.py`)
 
 All six extensions of Rainbow (Hessel et al., 2018) on top of the same
@@ -499,7 +642,7 @@ its `metrics.jsonl` stops at 4.61M). The run to 4.61M took 5.7 hours of
 training on the same laptop (5.9 hours with its built-in evaluations): about
 265 env-steps/s for the first 1.28M and about 205 for the extension, which
 shared the CPU with the snapshot evaluations. In
-[the three compared](#the-three-compared):
+[the baselines compared](#the-baselines-compared):
 
 - **It beats the 1.28M Rainbow** 0.613 ± 0.030 and **the DQN** 0.693 ± 0.028,
   and nearly doubles the heuristic score (0.158 against 0.084).

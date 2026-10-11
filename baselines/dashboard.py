@@ -92,7 +92,8 @@ def read_records(run: Path) -> list[dict[str, Any]]:
 
 
 def algorithm(config: dict[str, Any]) -> str:
-    # dqn.py's and ppo.py's config.json have no "algorithm" key.
+    # dqn.py's and ppo.py's config.json have no "algorithm" key (rainbow.py's and
+    # reinforce.py's do).
     if not config:
         return "unknown"
     return str(config.get("algorithm") or ("ppo" if "gae_lambda" in config else "dqn"))
@@ -103,7 +104,14 @@ def total_steps(config: dict[str, Any]) -> int | None:
 
     A chunk is whole env-step batches (``num_envs`` each; ``num_envs * num_steps``
     for PPO's iterations), as many as fit in ``log_every`` and at least one.
+    REINFORCE's chunks are whole batches of games, of varying length: its runs
+    stop at the first chunk that reaches ``total_env_steps``.
     """
+    if config.get("algorithm") == "reinforce":
+        try:
+            return int(config["total_env_steps"])
+        except (KeyError, TypeError, ValueError):
+            return None
     try:
         total, every, envs = (int(config[k]) for k in ("total_env_steps", "log_every", "num_envs"))
         step = max(envs, 1) * max(int(config.get("num_steps", 1)), 1)
@@ -116,8 +124,8 @@ def total_steps(config: dict[str, Any]) -> int | None:
 def is_headline_eval(record: dict[str, Any]) -> bool:
     """An eval of the greedy policy against ``random_legal``, which every baseline logs.
 
-    PPO also evaluates against other opponents and with a sampled policy; DQN and
-    Rainbow records have neither field.
+    PPO and REINFORCE also evaluate against other opponents and with a sampled
+    policy; DQN and Rainbow records have neither field.
     """
     return (
         record.get("opponent", "random_legal") == "random_legal"

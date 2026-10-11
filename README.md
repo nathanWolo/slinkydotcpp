@@ -125,6 +125,13 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
 
 - **`random_legal`** (`slinky.evaluate`): uniformly random among the moves
   that don't certainly die next turn.
+- **REINFORCE** (`baselines/reinforce.py`, see
+  [`baselines/README.md`](baselines/README.md#reinforce-reinforcepy)):
+  Monte Carlo policy gradient with a value baseline, on PPO's network and env
+  steps (73 minutes on a laptop CPU). It is the weakest learned baseline: it
+  scores 0.944 against `random_legal`, 0.329 against the DQN, 0.055 against
+  PPO and 0.013 against the heuristic. Its policy collapsed to
+  near-determinism after about 1M env steps and stopped improving.
 - **DQN** (`baselines/dqn.py`, see [`baselines/README.md`](baselines/README.md)):
   self-play Double DQN with one shared network playing both snakes. After 31
   minutes of training on a 4-core CPU, it scores 0.993 ± 0.002 against
@@ -143,7 +150,7 @@ and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
   0.084 against the heuristic, against the DQN's 0.992 and 0.047. PPO, trained
   on 4 times the env steps, beats it 0.753 ± 0.027 (and the DQN 0.873 ±
   0.021 in the same harness); see
-  [the three compared](baselines/README.md#the-three-compared). Trained on
+  [the baselines compared](baselines/README.md#the-baselines-compared). Trained on
   to 4.61M env steps, Rainbow beats its 1.28M self 0.613 and the DQN 0.693,
   and scores 0.158 against the heuristic, but PPO still beats it 0.559 ±
   0.031 ([training on](baselines/README.md#training-on)).
@@ -180,7 +187,8 @@ python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --
   `benchmarks/strength.py`): `random_legal`, `random`, `heuristic`, `dqn`
   (the checkpoint in `baselines/checkpoints/`) or `dqn:<run dir>`, `ppo`
   (greedy), `ppo-sample` or `ppo:<run dir>`, `rainbow` or `rainbow:<run dir>`,
-  and `mcts-<simulations>` with dash shorthands and/or `:field=value`
+  `reinforce` (greedy), `reinforce-sample` or `reinforce:<run dir>`, and
+  `mcts-<simulations>` with dash shorthands and/or `:field=value`
   overrides of `MCTSConfig`, e.g. `mcts-256-rm`, `mcts-64-rollout` or
   `mcts-128:exploration=0.5`. Names are shown in a canonical form that lists
   only non-default settings.
@@ -288,7 +296,7 @@ should scale much better with batch size.
      `baselines/`);
    - heuristic snake and simultaneous-move MCTS, with a strength-vs-simulations
      benchmark (done; see `benchmarks/README.md`);
-   - self-play PPO (done; see `baselines/`);
+   - self-play PPO and REINFORCE (done; see `baselines/`);
    - population or league training;
    - AlphaZero-style search with a learned value and policy, on top of
      `slinky.mcts`.
@@ -300,7 +308,7 @@ src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   engine_json, policies, evaluate (matches between policies),
                   heuristic (hand-written snake), mcts (simultaneous-move MCTS),
                   agents (named-agent registry), replay (+ viewer.html)
-baselines/        RL baselines (self-play DQN, PPO and Rainbow DQN), their checkpoints
+baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN, REINFORCE), checkpoints
                   and a live training dashboard (dashboard.py)
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)

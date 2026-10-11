@@ -60,6 +60,9 @@ def runs(tmp_path):
         for e in ppo_evals
     ]
     write_run(tmp_path, "ppo-c", {**ppo, "gae_lambda": 0.95}, [train(32_768), *ppo_lines])
+    # REINFORCE: whole games per update, so its last chunk overshoots the budget.
+    reinforce = {"algorithm": "reinforce", "total_env_steps": 10_000, "num_envs": 32}
+    write_run(tmp_path, "reinforce-d", reinforce, [train(6_123), train(10_480)])
     (tmp_path / "not-a-run").mkdir()
     return tmp_path
 
@@ -122,11 +125,14 @@ def test_total_steps_rounds_up_to_whole_chunks():
     assert dash.total_steps(ppo) == 65_536
     assert dash.total_steps({**ppo, "log_every": 1000}) == 40_960
     assert dash.total_steps({}) is None
+    # REINFORCE: the budget itself (chunks are whole batches of games, of any length).
+    assert dash.total_steps({"algorithm": "reinforce", "total_env_steps": 5000}) == 5000
+    assert dash.total_steps({"algorithm": "reinforce"}) is None
 
 
 def test_find_runs_and_summaries(runs):
     found = dash.find_runs([runs])
-    assert sorted(p.name for p in found.values()) == ["dqn-b", "ppo-c", "rainbow-a"]
+    assert sorted(p.name for p in found.values()) == ["dqn-b", "ppo-c", "rainbow-a", "reinforce-d"]
     by_name = {p.name: dash.run_summary(i, p) for i, p in found.items()}
     a, b = by_name["rainbow-a"], by_name["dqn-b"]
     assert a["algorithm"] == "rainbow" and b["algorithm"] == "dqn"
@@ -138,6 +144,8 @@ def test_find_runs_and_summaries(runs):
     c = by_name["ppo-c"]
     assert c["algorithm"] == "ppo" and c["total_steps"] == 65_536
     assert c["last_eval"]["score"] == 0.99
+    d = by_name["reinforce-d"]
+    assert d["algorithm"] == "reinforce" and d["total_steps"] == 10_000 and d["finished"]
 
     # The version changes with every append (the page refetches on it).
     run = found[a["id"]]
@@ -176,7 +184,7 @@ def test_http_api(runs, replays):
         assert status == 200 and kind.startswith("text/html") and b"Training dashboard" in body
         _, _, body = get("/api/runs")
         listed = {r["name"]: r for r in json.loads(body)}
-        assert set(listed) == {"rainbow-a", "dqn-b", "ppo-c"}
+        assert set(listed) == {"rainbow-a", "dqn-b", "ppo-c", "reinforce-d"}
         run_id = listed["dqn-b"]["id"]
         _, kind, body = get(f"/api/metrics?run={urllib.request.quote(run_id)}")
         data = json.loads(body)  # strict JSON: the NaN loss is sent as null

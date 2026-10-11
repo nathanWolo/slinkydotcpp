@@ -1,0 +1,40 @@
+{
+  "algorithm": "reinforce",
+  "max_turns": 1000,
+  "num_envs": 8,
+  "total_env_steps": 5242880,
+  "gamma": 0.95,
+  "baseline": "value",
+  "vf_coef": 0.5,
+  "ent_coef": 0.001,
+  "lr": 0.003,
+  "max_grad_norm": 0.5,
+  "adam_eps": 1e-05,
+  "conv_channels": [
+    16,
+    32,
+    32
+  ],
+  "conv_strides": [
+    2,
+    2,
+    1
+  ],
+  "hidden": 256,
+  "block_turns": 50,
+  "seed": 0,
+  "updates_per_log": 32,
+  "eval_every": 1048576,
+  "eval_games": 256,
+  "eval_opponents": [
+    "random_legal",
+    "heuristic",
+    "dqn"
+  ],
+  "eval_modes": [
+    "greedy",
+    "sample"
+  ],
+  "checkpoint_every": 262144,
+  "run_dir": "runs/reinforce-duel"
+}

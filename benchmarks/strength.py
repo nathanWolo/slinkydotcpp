@@ -12,13 +12,15 @@ the harness only, and the agents do not know about it.
 Agents (``--a`` and ``--b`` take comma-separated lists) are names from the registry in
 :mod:`slinky.agents`: ``random_legal``, ``random``, ``heuristic``, ``dqn`` (the checkpoint
 in ``baselines/checkpoints/dqn-duel-seed0``) or ``dqn:<run dir>``, ``ppo`` (greedy; the
-checkpoint in ``baselines/checkpoints/ppo-duel-seed0``), ``ppo-sample`` or ``ppo:<run dir>``,
-and ``mcts-<sims>[-shorthand...][:field=value...]``, e.g. ``mcts-64-rollout``,
+checkpoint in ``baselines/checkpoints/ppo-duel-seed0``), ``ppo-sample`` or
+``ppo:<run dir>``, ``rainbow`` or ``rainbow:<run dir>``, ``reinforce`` (greedy),
+``reinforce-sample`` or ``reinforce:<run dir>``, and
+``mcts-<sims>[-shorthand...][:field=value...]``, e.g. ``mcts-64-rollout``,
 ``mcts-256-rm-c0.5`` or ``mcts-128:exploration=0.5`` (the shorthands are listed by
 ``--help``). Names are printed and stored in their canonical form, which lists only the
-non-default settings (``mcts-64-rollout`` becomes ``mcts-64-rollout10``). The default
-MCTS values a draw at -0.5 *inside the search* (``contempt``); the benchmark score still
-counts a draw as 1/2.
+non-default settings (``mcts-64-rollout`` becomes ``mcts-64-rollout10``). The default MCTS
+values a draw at -0.5 *inside the search* (``contempt``); the benchmark score still counts a
+draw as 1/2.
 
 Usage::
 
@@ -40,7 +42,7 @@ crashed sweep resumes by running the same command. The identity covers *configs*
 search, the heuristic or the rules does not. Each line records the code that produced
 it (``git_commit``, ``git_dirty`` and ``code_fingerprint``, a hash of the ``slinky``
 modules the process loaded, the baseline scripts (``baselines/dqn.py``, ``ppo.py``,
-``rainbow.py``) and this script, all captured when the
+``rainbow.py``, ``reinforce.py``) and this script, all captured when the
 process started); the sweep warns when it skips lines made by other code, and
 ``--rerun`` plays the selected matchups again (the new line is preferred by ``--table``;
 the old one stays in the file). A line is
@@ -303,7 +305,7 @@ def code_fingerprint() -> tuple[str, int]:
     name, so checkouts in different directories with the same code agree.
     """
     files = {"benchmarks/strength.py": Path(__file__)}
-    for script, name, _ in registry.BASELINES.values():  # dqn.py, ppo.py, rainbow.py
+    for script, name, _ in registry.BASELINES.values():  # dqn.py, ppo.py, rainbow.py, ...
         if script.is_file():
             files[name] = script
     for name, module in list(sys.modules.items()):
@@ -357,7 +359,8 @@ class Matchup:
         ms = ROUGH_MS["fixed"] + ROUGH_MS["per_sim"] * sims * (1 + sims / ROUGH_MS["sim_scale"])
         # Rainbow's network is the DQN's with a wider head: about the same cost per move.
         ms += ROUGH_MS["dqn"] * (kinds.count("dqn") + kinds.count("rainbow"))
-        ms += ROUGH_MS["ppo"] * kinds.count("ppo")
+        # REINFORCE plays with PPO's network.
+        ms += ROUGH_MS["ppo"] * (kinds.count("ppo") + kinds.count("reinforce"))
         random = {"random", "random_legal"} & set(kinds)
         turns = ROUGH_TURNS_VS_RANDOM if random else ROUGH_TURNS_PER_GAME
         return self.games * turns * ms / 1e3
@@ -1056,7 +1059,7 @@ def estimate(s: Settings, matchups: list[Matchup], out: Path, assume_turns: int)
 def agent_sort_key(name: str) -> tuple[int, int, str]:
     if name in registry.SIMPLE_AGENTS:
         return registry.SIMPLE_AGENTS.index(name), 0, name
-    if name.startswith(("dqn", "ppo", "rainbow")):
+    if name.startswith(("dqn", "ppo", "rainbow", "reinforce")):
         return 3, 0, name
     if match := re.match(r"mcts-(\d+)(.*)", name):
         return 4, int(match[1]), match[2]

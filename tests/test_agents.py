@@ -60,6 +60,9 @@ CANONICAL = {
     # Absolute: a relative path is looked up in the repository only if it exists.
     f"rainbow:{agents_mod.DEFAULT_RAINBOW_CHECKPOINT}": "rainbow",
     "rainbow:/nonexistent/run": "rainbow:/nonexistent/run",
+    "reinforce": "reinforce",
+    "reinforce-greedy": "reinforce",
+    "reinforce-sample:/nonexistent/run": "reinforce-sample:/nonexistent/run",
     "random_legal": "random_legal",
     "heuristic": "heuristic",
 }
@@ -153,6 +156,9 @@ def test_format_number():
         ("ppox", "unknown agent"),
         ("rainbow:", "write rainbow:<run dir>"),
         ("rainbow@seed0", "write rainbow:<run dir>"),
+        ("reinforce:", "write reinforce:<run dir>"),
+        ("reinforce@seed0", "write reinforce:<run dir>"),
+        ("reinforce-bogus", "unknown reinforce mode 'bogus'"),
     ],
 )
 def test_bad_names(name, message):
@@ -307,6 +313,34 @@ def test_rainbow_agent_plays_from_observations(tmp_path):
             check_game(parse_agent(f"{kind}:{tmp_path}"), CONFIG)
     r = record_games(CONFIG, [name, "random_legal"], jax.random.key(0), 2, max_turns=6)
     assert r["games"][0]["seats"][0] == parse_agent(name).name
+
+
+def test_reinforce_agent_plays_from_observations(tmp_path):
+    pytest.importorskip("optax")
+    reinforce = agents_mod.load_reinforce_module()
+    cfg = reinforce.ReinforceConfig(conv_channels=(4,), conv_strides=(2,), hidden=16)
+    reinforce.save_config(str(tmp_path), cfg)
+    reinforce.save_checkpoint(str(tmp_path), reinforce.init_network(jax.random.key(0), cfg))
+    for mode, how in (("", "greedy"), ("-sample", "sampled")):
+        name = f"reinforce{mode}:{tmp_path}"
+        agent = make_agent(name, CONFIG)
+        assert agent.needs_obs and f"{how} self-play REINFORCE" in agent.description
+        spec = parse_agent(name)
+        assert spec.kind == "reinforce" and spec.greedy == (how == "greedy")
+        info = agent_config(spec)
+        assert info["type"] == "reinforce" and info["network"]["hidden"] == 16
+        r = record_games(CONFIG, [name, "random_legal"], jax.random.key(0), 2, max_turns=6)
+        assert r["games"][0]["seats"][0] == spec.name
+    with pytest.raises(ValueError, match="trained on 11x11"):
+        make_agent(f"reinforce:{tmp_path}", GameConfig(width=7, height=7))
+    with pytest.raises(FileNotFoundError, match="no REINFORCE checkpoint"):
+        make_agent("reinforce:/nonexistent/run", CONFIG)
+    if agents_mod.DEFAULT_PPO_CHECKPOINT.is_dir():  # a PPO run is not a REINFORCE run
+        with pytest.raises(ValueError, match="not a REINFORCE run"):
+            make_agent("reinforce:baselines/checkpoints/ppo-duel-seed0", CONFIG)
+    # ... and a REINFORCE run is not a PPO run: refused before anything is built.
+    with pytest.raises(ValueError, match="is a reinforce run; write reinforce:<run dir>"):
+        check_game(parse_agent(f"ppo:{tmp_path}"), CONFIG)
 
 
 def test_mcts_agents():

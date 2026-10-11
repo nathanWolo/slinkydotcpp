@@ -30,6 +30,10 @@ Names:
   (``baselines/rainbow.py``, legal argmax of the expected return, noise off),
   default checkpoint ``baselines/checkpoints/rainbow-duel-seed0``, otherwise
   like ``dqn``.
+* ``reinforce`` or ``reinforce:<run dir>``: the self-play REINFORCE baseline
+  (``baselines/reinforce.py``), default checkpoint
+  ``baselines/checkpoints/reinforce-duel-seed0``, with the same modes as
+  ``ppo`` (``reinforce-greedy``, ``reinforce-sample``; greedy by default).
 * ``mcts-<n>``: simultaneous-move MCTS (:func:`slinky.mcts.mcts`) with ``n``
   simulations per move and the default :class:`slinky.mcts.MCTSConfig`. Other
   fields are set with dash-separated shorthands (``mcts-256-rm-c0.5``; the list
@@ -86,13 +90,17 @@ PPO_SCRIPT = REPO_ROOT / "baselines" / "ppo.py"
 DEFAULT_PPO_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "ppo-duel-seed0"
 RAINBOW_SCRIPT = REPO_ROOT / "baselines" / "rainbow.py"
 DEFAULT_RAINBOW_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "rainbow-duel-seed0"
-# How ``ppo`` plays: "greedy" (legal argmax of the logits) or "sample" (from the policy).
+REINFORCE_SCRIPT = REPO_ROOT / "baselines" / "reinforce.py"
+DEFAULT_REINFORCE_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "reinforce-duel-seed0"
+# How ``ppo`` and ``reinforce`` play: "greedy" (legal argmax of the logits) or "sample"
+# (from the policy).
 PPO_MODES = ("greedy", "sample")
 PPO_DEFAULT_MODE = "greedy"
 
 AGENT_NAMES = (
     "random_legal", "random", "heuristic", "dqn", "dqn:<run dir>",
     "ppo[-greedy|-sample]", "ppo[-greedy|-sample]:<run dir>", "rainbow", "rainbow:<run dir>",
+    "reinforce[-greedy|-sample]", "reinforce[-greedy|-sample]:<run dir>",
     "mcts-<n>[-shorthand...][:field=value...]",
 )  # fmt: skip
 SIMPLE_AGENTS = ("random_legal", "random", "heuristic")
@@ -124,11 +132,12 @@ class AgentSpec:
     Attributes:
       name: the canonical name (see the module docstring).
       kind: ``"random_legal"``, ``"random"``, ``"heuristic"``, ``"dqn"``, ``"ppo"``,
-        ``"rainbow"`` or ``"mcts"``.
+        ``"rainbow"``, ``"reinforce"`` or ``"mcts"``.
       mcts: the search settings of an ``mcts`` agent.
-      checkpoint: the resolved run directory of a ``dqn``, ``ppo`` or ``rainbow`` agent.
-      greedy: how a ``ppo`` agent plays: the legal argmax of its logits (True) or a
-        move sampled from its policy (False). None for other agents.
+      checkpoint: the resolved run directory of a trained baseline (``dqn``, ``ppo``,
+        ``rainbow`` or ``reinforce``).
+      greedy: how a ``ppo`` or ``reinforce`` agent plays: the legal argmax of its
+        logits (True) or a move sampled from its policy (False). None for other agents.
     """
 
     name: str
@@ -157,11 +166,13 @@ def parse_agent(name: str) -> AgentSpec:
     if name.startswith("dqn@"):
         raise ValueError(f"{name!r}: write dqn:<run dir>")
     if name == "ppo" or name.startswith(("ppo:", "ppo-", "ppo@")):
-        return _parse_ppo(name)
+        return _parse_policy_gradient(name, "ppo")
     if name == "rainbow" or name.startswith("rainbow:"):
         return _parse_rainbow(name)
     if name.startswith("rainbow@"):
         raise ValueError(f"{name!r}: write rainbow:<run dir>")
+    if name == "reinforce" or name.startswith(("reinforce:", "reinforce-", "reinforce@")):
+        return _parse_policy_gradient(name, "reinforce")
     if name.startswith("mcts-"):
         return _parse_mcts(name)
     raise ValueError(f"unknown agent {name!r}; known agents: {', '.join(AGENT_NAMES)}")
@@ -177,8 +188,8 @@ def make_agent(name: str | AgentSpec, config: GameConfig | None = None) -> Agent
 
     Raises:
       ValueError: unknown name, bad ``mcts`` setting, or a game the agent can't play.
-      FileNotFoundError: ``dqn``, ``ppo`` or ``rainbow`` without its script in
-        ``baselines/`` or its checkpoint.
+      FileNotFoundError: a trained baseline (``dqn``, ``ppo``, ``rainbow`` or
+        ``reinforce``) without its script in ``baselines/`` or its checkpoint.
     """
     config = config or GameConfig()
     spec = parse_agent(name) if isinstance(name, str) else name
@@ -201,8 +212,7 @@ def make_env(config: GameConfig, obs: bool) -> BattlesnakeEnv:
 def check_game(spec: AgentSpec, config: GameConfig) -> None:
     """Raise ``ValueError`` if the agent can't play games with ``config``.
 
-    Raises ``FileNotFoundError`` for a ``dqn``, ``ppo`` or ``rainbow`` agent without its
-    checkpoint.
+    Raises ``FileNotFoundError`` for a trained baseline without its checkpoint.
     """
     if spec.kind == "mcts":
         mcts = importlib.import_module("slinky.mcts")
@@ -224,7 +234,7 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
     """Everything that defines the agent's play, as plain JSON data.
 
     The full config, not only the non-default settings: every ``MCTSConfig``
-    field, the heuristic weights, a DQN's, PPO's or Rainbow's run config
+    field, the heuristic weights, a trained baseline's run config
     (network included), how it picks moves and a hash of its parameters. Benchmarks
     hash it to tell results of different agents apart.
     """
@@ -269,6 +279,8 @@ def _build(spec: AgentSpec, config: GameConfig) -> Agent:
         return _ppo_agent(spec)
     if spec.kind == "rainbow":
         return _rainbow_agent(spec)
+    if spec.kind == "reinforce":
+        return _reinforce_agent(spec)
     return _mcts_agent(spec, env)
 
 
@@ -280,16 +292,17 @@ def _random(env: BattlesnakeEnv) -> Policy:
     return policy
 
 
-# --- Trained baselines (DQN, PPO, Rainbow) -----------------------------------------
+# --- Trained baselines (DQN, PPO, Rainbow, REINFORCE) ------------------------------
 
 # kind -> (script in baselines/, module name it is imported as, default checkpoint)
 BASELINES = {
     "dqn": (DQN_SCRIPT, "baselines_dqn", DEFAULT_DQN_CHECKPOINT),
     "ppo": (PPO_SCRIPT, "baselines_ppo", DEFAULT_PPO_CHECKPOINT),
     "rainbow": (RAINBOW_SCRIPT, "baselines_rainbow", DEFAULT_RAINBOW_CHECKPOINT),
+    "reinforce": (REINFORCE_SCRIPT, "baselines_reinforce", DEFAULT_REINFORCE_CHECKPOINT),
 }
 # For messages ("no DQN checkpoint in ...").
-BASELINE_LABELS = {"dqn": "DQN", "ppo": "PPO", "rainbow": "Rainbow"}
+BASELINE_LABELS = {"dqn": "DQN", "ppo": "PPO", "rainbow": "Rainbow", "reinforce": "REINFORCE"}
 
 
 @functools.cache
@@ -330,6 +343,11 @@ def load_rainbow_module() -> ModuleType:
     return load_baseline_module("rainbow")
 
 
+def load_reinforce_module() -> ModuleType:
+    """Import ``baselines/reinforce.py`` from the repository."""
+    return load_baseline_module("reinforce")
+
+
 def _run_dir(kind: str, text: str | None) -> Path:
     """The resolved run directory named by ``text`` (None: the default checkpoint)."""
     if text is None:
@@ -361,21 +379,22 @@ def _parse_rainbow(name: str) -> AgentSpec:
     return AgentSpec(_with_run_dir("rainbow", "rainbow", path), "rainbow", checkpoint=path)
 
 
-def _parse_ppo(name: str) -> AgentSpec:
+def _parse_policy_gradient(name: str, kind: str) -> AgentSpec:
+    """``ppo`` or ``reinforce``, with an optional mode and run dir."""
     head, sep, text = name.partition(":")
-    if head.startswith("ppo@"):
-        raise ValueError(f"{name!r}: write ppo:<run dir>")
+    if head.startswith(f"{kind}@"):
+        raise ValueError(f"{name!r}: write {kind}:<run dir>")
     mode = PPO_DEFAULT_MODE
-    if head != "ppo":
-        mode = head.removeprefix("ppo-")
+    if head != kind:
+        mode = head.removeprefix(f"{kind}-")
         if mode not in PPO_MODES:
             raise ValueError(
-                f"{name!r}: unknown ppo mode {mode!r}; write ppo[-greedy|-sample][:<run dir>]"
+                f"{name!r}: unknown {kind} mode {mode!r}; write {kind}[-greedy|-sample][:<run dir>]"
             )
-    path = _run_dir("ppo", text if sep else None)
-    base = "ppo" if mode == PPO_DEFAULT_MODE else f"ppo-{mode}"
+    path = _run_dir(kind, text if sep else None)
+    base = kind if mode == PPO_DEFAULT_MODE else f"{kind}-{mode}"
     return AgentSpec(
-        _with_run_dir(base, "ppo", path), "ppo", checkpoint=path, greedy=mode == "greedy"
+        _with_run_dir(base, kind, path), kind, checkpoint=path, greedy=mode == "greedy"
     )
 
 
@@ -396,11 +415,12 @@ def _checkpoint_files(spec: AgentSpec) -> tuple[Path, Path]:
 
 
 def _run_config(spec: AgentSpec) -> Any:
-    """The training config saved with a ``dqn``, ``ppo`` or ``rainbow`` agent's checkpoint.
+    """The training config saved with a trained baseline's checkpoint.
 
-    The three save the same files. A config that names its algorithm (``rainbow.py``
-    writes ``"algorithm"``) must match the agent's kind, so ``dqn:<Rainbow run>`` is
-    refused here rather than failing on a parameter shape later.
+    They all save the same files. A config that names its algorithm (``rainbow.py``
+    and ``reinforce.py`` write ``"algorithm"``) must match the agent's kind, so
+    ``dqn:<Rainbow run>`` is refused here rather than failing on a parameter shape
+    later.
     """
     config = _checkpoint_files(spec)[1]
     try:
@@ -442,6 +462,15 @@ def _ppo_agent(spec: AgentSpec) -> Agent:
     how = "greedy" if spec.greedy else "sampled"
     desc = f"{how} self-play PPO ({spec.checkpoint.name})"
     return Agent(spec.name, ppo.make_policy(params, cfg, bool(spec.greedy)), True, desc)
+
+
+def _reinforce_agent(spec: AgentSpec) -> Agent:
+    reinforce = load_reinforce_module()
+    cfg = _run_config(spec)
+    params = reinforce.load_params(str(spec.checkpoint), cfg)
+    how = "greedy" if spec.greedy else "sampled"
+    desc = f"{how} self-play REINFORCE ({spec.checkpoint.name})"
+    return Agent(spec.name, reinforce.make_policy(params, cfg, bool(spec.greedy)), True, desc)
 
 
 # --- MCTS ------------------------------------------------------------------------
