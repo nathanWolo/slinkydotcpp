@@ -78,9 +78,13 @@ temporaries. With 32 slots the cap only binds above about 15000 simulations per
 matchup; the peak resident memory of the process is recorded so the model can be
 checked. The number of games is rounded up to a multiple of ``N`` snakes so seats stay
 balanced (both numbers are recorded). A matchup is one round unless ``--target-ci`` is
-set: then rounds of about ``--round-games`` games (a multiple of ``N``; default 64) are
-played, each a range of game ids, and the stop test runs after each one. Every round
-ends with idle slots, so rounds cost some utilisation. Progress lines come from inside
+set or an agent searches with a network (``az-<n>``, ``n > 0``): then rounds of about
+``--round-games`` games (a multiple of ``N``; default 64) are played, each a range of
+game ids, and the ``--target-ci`` stop test runs after each one. Rounds bound the memory
+of network searches: XLA's CPU runtime (jax 0.11) keeps a few KB per matrix multiply run
+inside a compiled loop until the loop returns, and a round is one compiled loop, so a
+512-game round of ``az-256`` grew past 5 GB. Every round ends with idle slots, so rounds
+cost some utilisation. Progress lines come from inside
 the loop, at most every 15 seconds.
 
 **Workers.** ``--workers N`` runs matchups in ``N`` processes at once, each pinned to its
@@ -446,11 +450,17 @@ class Plan:
         return sum(self.rounds)
 
 
+def network_search(m: Matchup) -> bool:
+    """Whether an agent of the matchup searches with a network (``az-<n>``, ``n > 0``)."""
+    return any(x.spec.kind == "az" and x.spec.mcts is not None for x in (m.a, m.b))
+
+
 def plan_matchup(m: Matchup, s: Settings) -> Plan:
     """Rounds and slots for a matchup (the rule is in the module docstring)."""
     n = s.game.num_snakes
     games = -(-m.games // n) * n  # whole seat rotations
-    count = 1 if s.target_ci is None else -(-games // max(s.round_games, n))
+    split = s.target_ci is not None or network_search(m)
+    count = -(-games // max(s.round_games, n)) if split else 1
     while True:  # equal rounds of whole seat rotations, the last one possibly shorter
         per = -(-games // count)
         per = -(-per // n) * n
@@ -1308,7 +1318,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--round-games",
         type=int,
         default=64,
-        help="with --target-ci: games per round, i.e. between stop tests (default 64)",
+        help="about this many games per round (split into equal rounds of whole seat "
+        "rotations): --target-ci's stop test runs after each round, and network searches "
+        "(az-<n>, n > 0) always play in rounds, which bounds their memory (default 64)",
     )
     p.add_argument(
         "--slots",

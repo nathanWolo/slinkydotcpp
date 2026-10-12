@@ -108,13 +108,16 @@ baselines, one process on cores 0-3, PPO's network:
 * ``lr=1e-3`` decaying to 1e-4, as PPO's 1e-3; ``weight_decay=1e-4`` (AdamW,
   scaled by the learning rate: mild); ``max_grad_norm=1``; ``value_coef=1``
   (AlphaZero's equal weights).
-* ``total_env_steps=4_194_304``: about 4 hours with the evaluations at the
-  default settings, the scale of the PPO baseline's 5.2M env steps.
+* ``total_env_steps=4_194_304``: about 4-4.5 hours with the evaluations at
+  the default settings, the scale of the PPO baseline's 5.2M env steps.
 * ``eval_games=128`` per opponent and mode every 1,048,576 env steps (about
   55 minutes): in the pilot, 64 games of ``az-64`` took 18 s against
   ``random_legal``, 59 against the heuristic, 66 against PPO and 80 against
-  ``mcts-64`` (the raw network 3-13 s), so a default evaluation takes about
-  8 minutes, 13% of the run.
+  ``mcts-64`` (the raw network 3-13 s), so those four opponents take about
+  8 minutes. With the DQN and Rainbow added (the default ``eval_opponents``),
+  the evaluations of the 8.4M-step run (``baselines/checkpoints/az-duel-seed0``,
+  every opponent but ``random_legal``) took 11-17 minutes each (13 on average);
+  the four of a default run take about a fifth of its time.
 
 On a GPU the same code runs unchanged; raise ``num_envs`` (the network's batch
 is ``2 * num_envs`` observations per simulation) and keep ``replay_ratio``.

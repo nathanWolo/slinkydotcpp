@@ -124,6 +124,9 @@ def test_plan_slots_and_rounds():
                     assert max(plan.rounds) <= max(60, snakes) + snakes
     plan = S.plan_matchup(matchup(games=256), settings(target_ci=0.03))
     assert plan.rounds == (64, 64, 64, 64) and plan.slots == 32 and not plan.memory_limited
+    # A network search plays in rounds anyway (they bound XLA's memory), the raw net not.
+    assert S.plan_matchup(matchup("az-64", games=200), settings()).rounds == (50, 50, 50, 50)
+    assert S.plan_matchup(matchup("heuristic", "az-0", games=200), settings()).rounds == (200,)
     # Big trees: the memory budget cuts the slots (1 KB per node and simulation).
     big = S.plan_matchup(matchup("mcts-50000"), settings())
     assert big.memory_limited and big.slots < 32 and big.tree_mb <= 1024 / S.TREE_SAFETY

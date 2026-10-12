@@ -5,6 +5,7 @@
 | `throughput.py` | environment steps per second (see the main README's Performance section) |
 | `strength.py` | playing strength: every pair of two agent lists, as resumable JSONL results and markdown tables |
 | `plot_strength.py` | the MCTS-strength-vs-simulations chart below, from `strength.py`'s results |
+| `plot_az_ladder.py` | the AlphaZero chart below: what the network's search is worth in plain MCTS simulations, per training checkpoint |
 | `mcts_latency.py` | the latency of one MCTS move of one game, and the budget that fits a time limit |
 
 ## Strength of MCTS against the number of simulations
@@ -232,6 +233,118 @@ cost estimate, `--rerun` replays finished matchups, and `--target-ci` stops a
 matchup early. The module docstring describes the result fields and the
 resume rules. Agent names come from `slinky.agents`; for example,
 `mcts-256-rm`, `mcts-128:exploration=1.0` or `dqn:<run dir>`.
+
+## AlphaZero
+
+The AlphaZero network trained by `baselines/az.py`
+([`baselines/README.md`](../baselines/README.md#alphazero-azpy); checkpoint
+`baselines/checkpoints/az-duel-seed0`, 8.39M env steps from scratch) in the
+same benchmark. `az-<n>` searches with `n` simulations of decoupled PUCT,
+using the network's move priors and its value at the leaves; `az-0` is the
+raw network, the legal argmax of its policy. As above: 512 games per matchup
+unless noted, seats alternating, 95% Wilson intervals.
+
+| agent | vs `random_legal` | vs DQN | vs Rainbow | vs PPO | vs heuristic | W / D / L vs heuristic | ms per move |
+|---|---|---|---|---|---|---|--:|
+| `az-0` | 0.997 [0.987, 0.999] | 0.844 [0.810, 0.873] | 0.714 [0.673, 0.751] | 0.581 [0.538, 0.623] | 0.484 [0.441, 0.528] | 226 / 44 / 242 | 0.26 |
+| `az-64` | 0.999 [0.991, 1.000] | 0.994 [0.983, 0.998] | 0.984 [0.969, 0.992] | 0.943 [0.920, 0.960] | 0.853 [0.819, 0.881] | 395 / 83 / 34 | 7.0 |
+| `az-256` | 0.999 [0.991, 1.000] | 0.995 [0.984, 0.998] | 1.000 [0.993, 1.000] | 0.987 [0.973, 0.994] | 0.872 [0.840, 0.898] | 388 / 117 / 7 | 26.3 |
+
+The last column is timed as in the MCTS table: one move of one game against
+the heuristic, with 32 games in flight on one pinned core.
+
+**Against plain MCTS** (the default config):
+
+| opponent | `az-0` | `az-64` | `az-64:c_puct=0.25` | `az-256` |
+|---|---|---|---|---|
+| MCTS-16 | 0.663 [0.621, 0.703] | | | |
+| MCTS-32 | 0.491 [0.448, 0.534] | | | |
+| MCTS-64 | 0.387 [0.346, 0.430] | 0.828 [0.793, 0.858] | | |
+| MCTS-256 | | 0.734 [0.694, 0.771] | | |
+| MCTS-512 | | 0.640 [0.597, 0.680] | | |
+| MCTS-1024 | | 0.588 [0.545, 0.630] | 0.664 [0.622, 0.704] | |
+| MCTS-2048 | | 0.489 [0.446, 0.532] | 0.612 [0.569, 0.654] | |
+| MCTS-4096 | | 0.501 [0.458, 0.544] | 0.592 [0.549, 0.634] | 0.662 [0.602, 0.717] (256 games) |
+| MCTS-24000 (500 ms, 128 games) | | 0.387 [0.307, 0.473] | 0.574 [0.488, 0.656] | 0.586 [0.499, 0.668] |
+
+![az-64 against plain MCTS by simulations, one line per checkpoint](results/az_ladder.svg)
+
+- **The network's 64 simulations are worth about 2,000–4,000 plain ones.**
+  `az-64` is level with both MCTS-2048 (0.489) and MCTS-4096 (0.501), each
+  ±0.043, so the data place the crossing no more finely than that.
+  (MCTS-4096 against MCTS-2048 was not played; their scores against the
+  heuristic, 0.846 and 0.840, have saturated.) With `c_puct` 0.25 at play
+  time it is worth more (below).
+- **At equal time it wins.** On this CPU `az-64` takes 7.0 ms per move, what
+  plain MCTS spends on about 1,190 simulations (the orange dashed line), and
+  it beats MCTS-1024 0.588. Almost all of its time is the network: each extra
+  simulation costs about 0.1 ms (`az-256`'s timing against `az-64`'s),
+  against 5–8 µs for an extra plain simulation (the MCTS timings, differenced
+  the same way). On a GPU, which runs the batched network calls much faster,
+  the balance would likely shift further (not measured).
+- **Over training** (the lighter lines: training snapshots, 256 games per
+  point): the crossing moves from about 600 simulations at 1.05M env steps to
+  just over 1,000 at 2.10M–3.15M, about 1,500 at 4.19M and 2,800–3,500 at
+  5.24M–7.34M. A 256-game point is ±0.06, about one doubling of plain
+  simulations on these slopes, so the final network (1,900–4,200) is level
+  with the last snapshots.
+- **The raw network** plays like MCTS-32: 0.491 against it, 0.663 against
+  MCTS-16 and 0.387 against MCTS-64. Against the heuristic it scores 0.484,
+  between MCTS-16 (0.321) and MCTS-32 (0.528), at 0.26 ms per move. It beats
+  PPO 0.581 and the DQN 0.844.
+- **More simulations** help the network as they help plain MCTS: `az-256`
+  beats MCTS-4096 0.662 and loses 7 games in 512 to the heuristic, where
+  `az-64` loses 34.
+- **MCTS at 500 ms per move** (186 ms per move here, 27 times `az-64`'s
+  time) still beats `az-64`, 0.613 to 0.387. `az-256`, at a seventh of its
+  time (26.3 ms), scores 0.586 [0.499, 0.668] against it (57 / 36 / 35; the
+  7 games cut off at 500 turns count as draws): level or slightly ahead, as
+  the interval just reaches 0.5.
+- **`c_puct` 0.25 at play time** (the network trained with 0.5) scored higher
+  in every matchup: 0.664, 0.612 and 0.592 against MCTS-1024, 2048 and 4096
+  (the default: 0.588, 0.489, 0.501), 0.886 against the heuristic (0.853) and
+  0.964 against PPO (0.943). Its line never crosses 0.5: against MCTS at
+  500 ms per move it scores 0.574 [0.488, 0.656] (56 / 35 / 37, 9 games cut
+  off), where the default scored 0.387 [0.307, 0.473]. That is level with a
+  search that takes 25 times as long per move (7.5 ms against 186 ms). The
+  value 0.25 comes from the 1M-step pilot's play-time sweep, and this
+  matchup was played after the choice, so it tests it afresh.
+- **The heuristic's evaluation at the leaves** instead of the network's value
+  (`az-64:leaf=heuristic`) scores 0.574 [0.531, 0.616] against MCTS-1024,
+  level with the network's own values (0.588).
+
+### Reproducing
+
+Results are in `results/strength.jsonl`; the snapshot rows are in
+`results/az_ladder.jsonl`. The matchups took about 31 core-hours (24 for the
+final network, 7 for the snapshots) on the same 4-core machine, in four
+pinned single-worker processes taking matchups from a queue:
+
+```bash
+python benchmarks/strength.py --a az-0,az-64,az-256 --b random_legal,dqn,rainbow,ppo,heuristic --games 512
+python benchmarks/strength.py --a az-0 --b mcts-16,mcts-32,mcts-64 --games 512
+python benchmarks/strength.py --a az-64 --b mcts-64,mcts-256,mcts-512,mcts-1024,mcts-2048,mcts-4096 --games 512
+python benchmarks/strength.py --a az-64:c_puct=0.25 --b mcts-1024,mcts-2048,mcts-4096,heuristic,ppo --games 512
+python benchmarks/strength.py --a az-64:leaf=heuristic --b mcts-1024 --games 512
+python benchmarks/strength.py --a az-256 --b mcts-4096 --games 256
+python benchmarks/strength.py --a az-64,az-64:c_puct=0.25,az-256 --b mcts-24000 --games 128 --mem-mb 2400
+python benchmarks/plot_az_ladder.py   # results/az_ladder.svg
+```
+
+- **Rounds.** `strength.py` plays any matchup with a network search in rounds
+  of `--round-games` games (default 64), each its own compiled loop. XLA's
+  CPU runtime (jax 0.11) holds a few KB per matrix multiply inside a compiled
+  loop until the loop returns, and a 512-game round of `az-256` grew past
+  5 GB. A game depends only on its id, so rounds play the same games. The
+  queue passed `--round-games 128` for `az-256` and 256 for `az-64` to keep
+  more slots busy (`az-256` vs DQN and `az-64` vs MCTS-1024 used the default
+  64); five matchups ran before rounds were added, in one round each
+  (`rounds` in the results).
+- **Snapshots.** The ladder's rows `az-64:runs/az-duel-seed0-snaps/<env
+  steps>` are copies of the run's `params.npz` taken at each evaluation, at
+  256 games per matchup (`--out benchmarks/results/az_ladder.jsonl`). Each row records
+  its parameters' hash (`params_sha256` in `a_config`); the snapshots
+  themselves are not committed.
 
 ## The opponents
 
