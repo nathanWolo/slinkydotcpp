@@ -145,6 +145,32 @@ Game `g` depends only on `(key, g)`, so the result is the same for every
 utilisation, plays a range of game ids (`first_game`) and takes a progress
 callback.
 
+For games with more than two snakes, `play_table` seats any number of
+policies according to a line-up and scores each policy by its **share** of
+the win (a sole survivor gets 1, snakes tied at the end split 1; a policy's
+share is the sum over its seats, so parity is its seats / N) and by its mean
+**placement** (parity 2.5 with four snakes), with 95% intervals. It also
+counts each policy's wins, ties and losses by team share, and how its seats
+were eliminated (`deaths`, by the engine's cause names):
+
+```python
+from slinky.evaluate import play_table, random_legal
+
+env4 = BattlesnakeEnv(GameConfig(num_snakes=4))
+# Two teams of two (policy_a is any policy for env4); game g rotates the
+# line-up, so seats are balanced.
+t = play_table(env4, (policy_a, random_legal(env4)), (0, 1, 0, 1), key, num_games=1024)
+print(t.share[0], "+/-", t.share_ci95[0], t.placement[0], t.wins[0], t.ties[0], t.losses[0])
+```
+
+A game stops as soon as all living snakes belong to one policy (`early_stop`;
+this changes no share, placement or count, only `mean_turns`, which then is
+the turn at which games were decided), and `per_game=True` also returns each
+game's share and placement per policy, so two tables played with the same
+`key` can be compared game by game. As with `play_match`, `lineup`,
+`num_games` and `max_turns` do not recompile, except that fewer games than
+`batch_size` shrink the slots.
+
 `benchmarks/strength.py` plays all pairs of two agent lists and keeps the
 results in a resumable JSONL file (`--table` prints markdown tables);
 `--workers 4` runs four matchups at once, each in a process pinned to its
