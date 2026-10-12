@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Package the numpy PPO snake as an AWS Lambda zip (arm64, Python 3.13):
-# the handler, snake_numpy.py, the network as ppo.npz, and numpy's Linux
-# aarch64 wheel. Output: deploy/lambda/dist/snake.zip.
+# Package the numpy snakes as an AWS Lambda zip (arm64, Python 3.13): the
+# handler, snake_numpy.py, each snake's checkpoint (package_checkpoints.py)
+# and numpy's Linux aarch64 wheel. Output: deploy/lambda/dist/snake.zip.
 #
 #   deploy/lambda/build.sh [python]      # python with pip (default: .venv/bin/python)
 set -euo pipefail
@@ -24,7 +24,7 @@ find "$build" -name "__pycache__" -type d -prune -exec rm -rf {} +
 find "$build" -name "*.pyi" -delete
 
 cp "$here/lambda_function.py" "$here/snake_numpy.py" "$build/"
-cp "$root/baselines/checkpoints/ppo-duel-seed0/params.npz" "$build/ppo.npz"
+"$python" "$here/package_checkpoints.py" "$root/baselines/checkpoints" "$build/checkpoints"
 
 (cd "$build" && "$python" - <<'EOF'
 import os, zipfile

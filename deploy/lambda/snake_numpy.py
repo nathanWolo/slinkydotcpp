@@ -1,13 +1,16 @@
-"""PPO's move for a Battlesnake API request, in plain numpy (no JAX).
+"""The trained baselines' moves for a Battlesnake API request, in plain numpy (no JAX).
 
-A port of what the ``ppo`` agent computes for one snake, for hosts where JAX is
-too heavy (AWS Lambda: JAX costs ~500 MB and seconds of start-up):
+A port of what the trained agents of ``slinky.agents`` compute for one snake,
+for hosts where JAX is too heavy (AWS Lambda: JAX costs ~500 MB and seconds of
+start-up):
 
 * the request's board as countdown grids (``slinky.engine_json``),
 * the egocentric observation (``slinky.observations.egocentric_obs``),
 * the legal-move mask (``slinky.rules.action_mask``),
-* the actor network (``baselines/ppo.py``: ``network``) and its greedy move
-  (``slinky.evaluate.greedy_from_q``: argmax of the logits over legal moves).
+* the networks (:class:`Net`): the policy logits of PPO, REINFORCE and the raw
+  AlphaZero network (``az-0``), the DQN's Q-values and Rainbow's expected
+  returns (noisy layers at their means), and the greedy move over them
+  (``slinky.evaluate.greedy_from_q``: argmax over the legal moves).
 
 It only plays the game the network learned, the 11x11 standard duel; any
 other game gets :func:`safe_move`. ``tests/test_snake_numpy.py`` checks it
@@ -23,7 +26,6 @@ import numpy as np
 MOVE_NAMES = ("up", "down", "left", "right")
 DELTAS = ((0, 1), (0, -1), (-1, 0), (1, 0))  # (dx, dy) per move, y up as in the API
 SIZE = 11  # the duel board the network was trained on
-CONV_STRIDES = (2, 2, 1)  # baselines/ppo.py defaults (the committed checkpoint's)
 
 
 class Board:
@@ -138,23 +140,59 @@ def _conv3x3(x: np.ndarray, w: np.ndarray, b: np.ndarray, stride: int) -> np.nda
     return np.maximum(cols @ w.reshape(9 * c, -1) + b, 0.0)
 
 
-class PPO:
-    """The PPO actor from a ``params.npz`` checkpoint."""
+class Net:
+    """A trained baseline's network, from its checkpoint's ``params.npz`` and ``config.json``.
 
-    def __init__(self, path: str) -> None:
-        with np.load(path) as z:
-            self.p = {k: z[k].astype(np.float32) for k in z.files}
+    What it scores the moves by depends on the checkpoint: policy logits (a
+    ``policy`` head: PPO, REINFORCE, AlphaZero), Q-values (the DQN, plain or
+    dueling) or the expected return of Rainbow's distributional head.
+    """
 
-    def logits(self, obs: np.ndarray) -> np.ndarray:
+    def __init__(self, params: str, config: dict[str, Any]) -> None:
+        self.strides = tuple(config["conv_strides"])
+        with np.load(params) as z:
+            # The noisy layers' scales (``*_sigma``) are not needed to play.
+            self.p = {k: z[k].astype(np.float32) for k in z.files if not k.endswith("_sigma")}
+        if "policy/w" in self.p:
+            self.kind = "policy"
+        elif config.get("algorithm") == "rainbow":
+            self.kind = "rainbow"
+            self.support = np.linspace(
+                config["v_min"], config["v_max"], config["num_atoms"], dtype=np.float32
+            )
+            self.dueling = bool(config["dueling"])
+        else:
+            self.kind = "q"
+            self.dueling = bool(config.get("dueling", False))
+
+    def _dense(self, name: str, x: np.ndarray) -> np.ndarray:
+        return x @ self.p[f"{name}/w"] + self.p[f"{name}/b"]
+
+    def scores(self, obs: np.ndarray) -> np.ndarray:
+        """``f32[4]``: what the greedy move maximizes."""
         x = obs
-        for i, stride in enumerate(CONV_STRIDES):
+        for i, stride in enumerate(self.strides):
             x = _conv3x3(x, self.p[f"conv{i}/w"], self.p[f"conv{i}/b"], stride)
-        x = np.maximum(x.reshape(-1) @ self.p["hidden/w"] + self.p["hidden/b"], 0.0)
-        return x @ self.p["policy/w"] + self.p["policy/b"]
+        x = np.maximum(self._dense("hidden", x.reshape(-1)), 0.0)
+        if self.kind == "policy":
+            return self._dense("policy", x)
+        if self.kind == "q":
+            if not self.dueling:
+                return self._dense("q", x)
+            a = self._dense("advantage", x)
+            return self._dense("value", x) + a - a.mean()
+        atoms = len(self.support)
+        if self.dueling:
+            a = self._dense("advantage", x).reshape(4, atoms)
+            logits = self._dense("value", x)[None, :] + a - a.mean(axis=0, keepdims=True)
+        else:
+            logits = self._dense("logits", x).reshape(4, atoms)
+        e = np.exp(logits - logits.max(axis=-1, keepdims=True))
+        return (e / e.sum(axis=-1, keepdims=True) * self.support).sum(axis=-1)
 
     def move(self, b: Board) -> int:
         """The greedy legal move (the first one on ties, like ``jnp.argmax``)."""
-        return int(np.argmax(np.where(legal_moves(b), self.logits(observation(b)), -np.inf)))
+        return int(np.argmax(np.where(legal_moves(b), self.scores(observation(b)), -np.inf)))
 
 
 def is_duel(req: dict[str, Any]) -> bool:

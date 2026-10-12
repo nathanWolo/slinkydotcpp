@@ -4,17 +4,20 @@ Each snake is a path prefix, so one function serves them all::
 
     https://<id>.lambda-url.<region>.on.aws/ppo        <- register this URL
         GET  /ppo          snake info
-        POST /ppo/start    (nothing to do; logged)
+        POST /ppo/start    (loads the network if needed; logged)
         POST /ppo/move     {"move": "up" | "down" | "left" | "right"}
         POST /ppo/end      (logged)
 
-The networks load once per execution environment, at cold start. A move
-request always gets a move: if anything goes wrong it falls back to
-:func:`snake_numpy.safe_move`, then to "up".
+The snakes (:data:`SNAKES`) are the trained baselines of ``slinky.agents`` that
+need no search, under their registry names. A snake's network loads the first
+time the execution environment serves it (usually its ``/start``) and stays
+loaded. A move request always gets a move: if anything goes wrong it falls back
+to :func:`snake_numpy.safe_move`, then to "up".
 
-Settings (environment variables): ``SNAKE_AUTHOR``, ``SNAKE_COLOR``,
-``SNAKE_HEAD``, ``SNAKE_TAIL`` for the info response; ``PPO_PARAMS`` for the
-network (default: ``ppo.npz`` next to this file, as ``build.sh`` packages it).
+Settings (environment variables): ``SNAKE_AUTHOR``, ``SNAKE_HEAD``,
+``SNAKE_TAIL`` and ``SNAKE_COLOR_<NAME>`` (e.g. ``SNAKE_COLOR_PPO``) for the
+info responses; ``CHECKPOINTS`` for the checkpoint directories (default:
+``checkpoints/`` next to this file, as ``build.sh`` packages them).
 """
 
 from __future__ import annotations
@@ -30,14 +33,35 @@ import snake_numpy as sn
 
 HERE = Path(__file__).resolve().parent
 MAX_BODY = 1 << 16  # bytes; a duel request is under 2 KB
-SNAKES = {"ppo": sn.PPO(os.environ.get("PPO_PARAMS", str(HERE / "ppo.npz")))}
+CHECKPOINTS = Path(os.environ.get("CHECKPOINTS", str(HERE / "checkpoints")))
+# URL name -> (checkpoint directory under CHECKPOINTS, default colour). The names
+# are slinky.agents' (az-0 is the raw AlphaZero network, without its search).
+SNAKES = {
+    "ppo": ("ppo-duel-seed0", "#3b82f6"),
+    "reinforce": ("reinforce-duel-seed0", "#14b8a6"),
+    "dqn": ("dqn-duel-seed0", "#f59e0b"),
+    "rainbow": ("rainbow-duel-seed0", "#a855f7"),
+    "rainbow-long": ("rainbow-long-seed0", "#ec4899"),
+    "az-0": ("az-duel-seed0", "#ef4444"),
+}
+_nets: dict[str, sn.Net] = {}
+
+
+def net(name: str) -> sn.Net:
+    """The snake's network, loaded on first use."""
+    if name not in _nets:
+        t = time.perf_counter()
+        d = CHECKPOINTS / SNAKES[name][0]
+        _nets[name] = sn.Net(str(d / "params.npz"), json.loads((d / "config.json").read_text()))
+        log(snake=name, event="load", ms=round((time.perf_counter() - t) * 1e3, 1))
+    return _nets[name]
 
 
 def info(name: str) -> dict[str, str]:
     return {
         "apiversion": "1",
         "author": os.environ.get("SNAKE_AUTHOR", "slinky"),
-        "color": os.environ.get("SNAKE_COLOR", "#3b82f6"),
+        "color": os.environ.get(f"SNAKE_COLOR_{name.upper().replace('-', '_')}", SNAKES[name][1]),
         "head": os.environ.get("SNAKE_HEAD", "default"),
         "tail": os.environ.get("SNAKE_TAIL", "default"),
         "version": f"slinky {name} (numpy)",
@@ -56,7 +80,7 @@ def choose(name: str, req: dict[str, Any]) -> tuple[int, str]:
     """``(move, who chose it)`` for the request."""
     try:
         if sn.is_duel(req):
-            return SNAKES[name].move(sn.Board(req)), name
+            return net(name).move(sn.Board(req)), name
         return sn.safe_move(req), "safe_move"
     except Exception as e:  # never fail a move: answer something
         print(json.dumps({"error": repr(e)[:300]}))
@@ -100,6 +124,10 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         log(snake=name, game=game, turn=turn, move=sn.MOVE_NAMES[move], by=who, ms=ms)
         return response(200, {"move": sn.MOVE_NAMES[move]})
     if action == "start":
+        try:
+            net(name)
+        except Exception as e:  # the moves will report it too
+            log(snake=name, event="load failed", error=repr(e)[:300])
         board = req.get("board", {})
         log(
             snake=name,

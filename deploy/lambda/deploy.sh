@@ -16,7 +16,8 @@ region="$(command aws configure get region --profile "$profile")"
 fn="${FUNCTION_NAME:-slinky-snake}"
 role="$fn-lambda"
 zip="$here/dist/snake.zip"
-env_vars="Variables={SNAKE_AUTHOR=${SNAKE_AUTHOR:-slinky},SNAKE_COLOR=${SNAKE_COLOR:-#3b82f6},SNAKE_HEAD=${SNAKE_HEAD:-default},SNAKE_TAIL=${SNAKE_TAIL:-default}}"
+# Colours default per snake (lambda_function.SNAKES); SNAKE_COLOR_<NAME> overrides one.
+env_vars="Variables={SNAKE_AUTHOR=${SNAKE_AUTHOR:-slinky},SNAKE_HEAD=${SNAKE_HEAD:-default},SNAKE_TAIL=${SNAKE_TAIL:-default}}"
 
 aws() { command aws --profile "$profile" --region "$region" "$@"; }
 [ -f "$zip" ] || { echo "no $zip: run build.sh first" >&2; exit 1; }
@@ -80,4 +81,4 @@ if ! aws lambda get-function-url-config --function-name "$fn" >/dev/null 2>&1; t
         --action lambda:InvokeFunction --principal "*" --invoked-via-function-url >/dev/null
 fi
 url="$(aws lambda get-function-url-config --function-name "$fn" --query FunctionUrl --output text)"
-echo "snake URL: ${url%/}/ppo"
+echo "snake URLs: ${url%/}/<name>, one per name in lambda_function.SNAKES"

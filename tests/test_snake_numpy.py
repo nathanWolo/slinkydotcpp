@@ -1,4 +1,5 @@
-"""The numpy PPO port (deploy/lambda) against the JAX agent, and its Lambda handler."""
+"""The numpy port of the trained baselines (deploy/lambda) against the JAX agents, and its
+Lambda handler."""
 
 from __future__ import annotations
 
@@ -12,15 +13,16 @@ import jax
 import numpy as np
 import pytest
 
-from slinky.agents import load_ppo_module, make_agent, make_env, parse_agent
+from slinky.agents import load_baseline_module, make_agent, make_env, parse_agent
 from slinky.engine_json import state_to_engine
 from slinky.types import GameConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 LAMBDA_DIR = ROOT / "deploy" / "lambda"
-CHECKPOINT = ROOT / "baselines" / "checkpoints" / "ppo-duel-seed0"
+CHECKPOINTS = ROOT / "baselines" / "checkpoints"
 sys.path.insert(0, str(LAMBDA_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lambda_function as lf  # noqa: E402  (loads no network until asked)
 import snake_numpy as sn  # noqa: E402
 from test_server import api_request  # noqa: E402
 
@@ -58,31 +60,49 @@ def positions(n: int, seed: int) -> list:
     return out
 
 
+# Lambda snake -> the slinky.agents name of the same network.
+AGENT_NAMES = {
+    "ppo": "ppo",
+    "reinforce": "reinforce",
+    "dqn": "dqn",
+    "rainbow": "rainbow",
+    "rainbow-long": f"rainbow:{CHECKPOINTS / 'rainbow-long-seed0'}",
+    "az-0": "az-0",
+}
+
+
+def numpy_net(name: str) -> sn.Net:
+    d = CHECKPOINTS / lf.SNAKES[name][0]
+    return sn.Net(str(d / "params.npz"), json.loads((d / "config.json").read_text()))
+
+
+def jax_scores(name: str):
+    """The JAX function of observations ``[N, ...]`` whose legal argmax the agent plays."""
+    spec = parse_agent(AGENT_NAMES[name])
+    mod = load_baseline_module(spec.kind)
+    cfg = mod.load_config(str(spec.checkpoint))
+    params = mod.load_params(str(spec.checkpoint), cfg)
+    if spec.kind == "dqn":
+        return jax.jit(lambda o: mod.q_network(params, o, cfg))
+    if spec.kind == "rainbow":
+        return jax.jit(lambda o: mod.q_values(mod.network(params, o, cfg), cfg))
+    return jax.jit(lambda o: mod.network(params, o, cfg)[0])
+
+
 @pytest.fixture(scope="module")
-def jax_ppo():
-    ppo = load_ppo_module()
-    spec = parse_agent("ppo")
-    cfg = ppo.load_config(str(spec.checkpoint))
-    params = ppo.load_params(str(spec.checkpoint), cfg)
-    env = make_env(DUEL, True)
-    return (
-        jax.jit(env.observe),
-        jax.jit(env.action_mask),
-        jax.jit(lambda o: ppo.network(params, o, cfg)[0]),
-    )
+def states():
+    return positions(150, seed=0)
 
 
-def test_matches_the_jax_agent(jax_ppo) -> None:
-    observe, mask_fn, logits_fn = jax_ppo
-    net = sn.PPO(str(CHECKPOINT / "params.npz"))
-    agent = make_agent("ppo", DUEL)
+def test_snakes_are_the_agents() -> None:
+    assert set(lf.SNAKES) == set(AGENT_NAMES)
+
+
+def test_encoding_matches_jax(states) -> None:
     env = make_env(DUEL, True)
-    states = positions(300, seed=0)
-    near_ties = 0
+    observe, mask_fn = jax.jit(env.observe), jax.jit(env.action_mask)
     for i, state in enumerate(states):
-        obs, mask, logits = observe(state), mask_fn(state), logits_fn(observe(state))
-        ts = env._timestep(state, np.zeros(2, np.float32), np.asarray(False))
-        want = np.asarray(agent.policy(jax.random.key(0), state, ts))
+        obs, mask = observe(state), mask_fn(state)
         d = state_to_engine(state, DUEL)
         for seat in (0, 1):
             req = api_request(d, seat, game_id=f"g{i}")
@@ -90,19 +110,40 @@ def test_matches_the_jax_agent(jax_ppo) -> None:
             assert sn.is_duel(req)
             np.testing.assert_array_equal(sn.observation(board), np.asarray(obs[seat]))
             np.testing.assert_array_equal(sn.legal_moves(board), np.asarray(mask[seat]))
-            ours = net.logits(sn.observation(board))
-            np.testing.assert_allclose(ours, np.asarray(logits[seat]), rtol=1e-4, atol=1e-4)
-            legal = np.sort(np.where(np.asarray(mask[seat]), np.asarray(logits[seat]), -np.inf))
-            if legal[-1] - legal[-2] < 1e-3:
-                near_ties += 1  # float32 rounding may legitimately pick the other move
+
+
+@pytest.mark.parametrize("name", list(AGENT_NAMES))
+def test_moves_match_the_jax_agent(name, states) -> None:
+    net, scores_fn = numpy_net(name), jax_scores(name)
+    agent = make_agent(AGENT_NAMES[name], DUEL)
+    env = make_env(DUEL, True)
+    policy = jax.jit(agent.policy)
+    near_ties = 0
+    for i, state in enumerate(states):
+        ts = env._timestep(state, np.zeros(2, np.float32), np.asarray(False))
+        want = np.asarray(policy(jax.random.key(0), state, ts))
+        scores, mask = np.asarray(scores_fn(ts.obs)), np.asarray(ts.action_mask)
+        d = state_to_engine(state, DUEL)
+        for seat in (0, 1):
+            board = sn.Board(api_request(d, seat, game_id=f"g{i}"))
+            ours = net.scores(sn.observation(board))
+            np.testing.assert_allclose(ours, scores[seat], rtol=1e-4, atol=1e-5)
+            legal = np.where(mask[seat], scores[seat], -np.inf)
+            tol = 1e-4 * max(1.0, abs(legal.max()))
+            move = net.move(board)
+            if np.sort(legal)[-2] > legal.max() - tol:
+                # A near-tie: float32 rounding may legitimately pick the other move,
+                # but it must be one of the tied best.
+                near_ties += 1
+                assert legal[move] > legal.max() - tol, (name, i, seat)
                 continue
-            assert net.move(board) == int(want[seat])
-    assert near_ties < 10  # 600 positions; a handful at most
+            assert move == int(want[seat]), (name, i, seat)
+    assert near_ties < 30  # of 300 positions (Rainbow's returns saturate near +-1)
 
 
 @pytest.fixture(scope="module")
 def handler(monkeypatch_module):
-    monkeypatch_module.setenv("PPO_PARAMS", str(CHECKPOINT / "params.npz"))
+    monkeypatch_module.setenv("CHECKPOINTS", str(CHECKPOINTS))
     sys.modules.pop("lambda_function", None)
     return importlib.import_module("lambda_function").lambda_handler
 
@@ -127,18 +168,23 @@ def event(method: str, path: str, body: dict | bytes | None = None, b64: bool = 
 
 
 def test_handler_endpoints(handler) -> None:
-    out = handler(event("GET", "/ppo"), None)
-    assert out["statusCode"] == 200 and json.loads(out["body"])["apiversion"] == "1"
     state = positions(1, seed=5)[0]
     req = api_request(state_to_engine(state, DUEL), 0, game_id="h")
-    for b64 in (False, True):
-        out = handler(event("POST", "/ppo/move", req, b64), None)
-        assert out["statusCode"] == 200
-        move = json.loads(out["body"])["move"]
-        assert move == sn.MOVE_NAMES[sn.PPO(str(CHECKPOINT / "params.npz")).move(sn.Board(req))]
-    assert handler(event("POST", "/ppo/start", req), None)["statusCode"] == 200
-    assert handler(event("POST", "/ppo/end", req), None)["statusCode"] == 200
-    assert handler(event("POST", "/dqn/move", req), None)["statusCode"] == 404
+    colors = set()
+    for name in AGENT_NAMES:
+        out = handler(event("GET", f"/{name}"), None)
+        body = json.loads(out["body"])
+        assert out["statusCode"] == 200 and body["apiversion"] == "1" and name in body["version"]
+        colors.add(body["color"])
+        assert handler(event("POST", f"/{name}/start", req), None)["statusCode"] == 200
+        for b64 in (False, True):
+            out = handler(event("POST", f"/{name}/move", req, b64), None)
+            assert out["statusCode"] == 200
+            want = sn.MOVE_NAMES[numpy_net(name).move(sn.Board(req))]
+            assert json.loads(out["body"])["move"] == want
+        assert handler(event("POST", f"/{name}/end", req), None)["statusCode"] == 200
+    assert len(colors) == len(AGENT_NAMES)  # each snake looks different on the board
+    assert handler(event("POST", "/nope/move", req), None)["statusCode"] == 404
     assert handler(event("GET", "/ppo/move"), None)["statusCode"] == 404
     assert handler(event("POST", "/ppo/move", b"{nope"), None)["statusCode"] == 400
     assert handler(event("POST", "/ppo/move", b"x" * 70000), None)["statusCode"] == 400

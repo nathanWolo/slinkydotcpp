@@ -2,7 +2,8 @@
 
 The remote snake plays seat 0 through the real Battlesnake API (``/start``,
 ``/move``, ``/end``); a local agent plays seat 1. Every remote move is compared
-with the local numpy PPO (``snake_numpy.py``) on the same request::
+with the same snake's local numpy network (``snake_numpy.py``) on the same
+request::
 
     python deploy/lambda/check_live.py https://<id>.lambda-url.us-east-2.on.aws/ppo \
         --games 8 --parallel 4 --opponent heuristic
@@ -25,6 +26,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import snake_numpy as sn  # noqa: E402
+from lambda_function import SNAKES  # noqa: E402  (loads no network)
 
 from slinky.agents import make_agent, make_env  # noqa: E402
 from slinky.engine_json import state_to_engine  # noqa: E402
@@ -82,7 +84,7 @@ def post(url: str, body: dict) -> tuple[float, dict]:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("url", help="the snake's base URL (ending in /ppo)")
+    p.add_argument("url", help="a snake's base URL (ending in its name, e.g. /ppo)")
     p.add_argument("--games", type=int, default=8)
     p.add_argument("--parallel", type=int, default=4)
     p.add_argument("--opponent", default="heuristic")
@@ -94,7 +96,11 @@ def main() -> None:
     with urllib.request.urlopen(base, timeout=10) as r:
         print(f"GET {base}: {json.loads(r.read())} ({(time.perf_counter() - t) * 1e3:.0f} ms)")
 
-    net = sn.PPO(str(ROOT / "baselines/checkpoints/ppo-duel-seed0/params.npz"))
+    name = base.rsplit("/", 1)[-1]
+    if name not in SNAKES:
+        p.error(f"the URL must end in a snake name: {', '.join(SNAKES)}")
+    folder = ROOT / "baselines" / "checkpoints" / SNAKES[name][0]
+    net = sn.Net(str(folder / "params.npz"), json.loads((folder / "config.json").read_text()))
     env = make_env(DUEL, False)
     opp = make_agent(args.opponent, DUEL)
     reset, step, opp_policy = jax.jit(env.reset), jax.jit(env.step), jax.jit(opp.policy)
@@ -144,7 +150,7 @@ def main() -> None:
         f"p95 {a[int(0.95 * len(a))]:.0f} ms, "
         f"max {a[-1]:.0f} ms; over 400 ms: {(a > 400).sum()}"
     )
-    print(f"moves differing from the local numpy PPO: {len(mismatches)}", mismatches[:5])
+    print(f"moves differing from the local numpy {name}: {len(mismatches)}", mismatches[:5])
 
 
 if __name__ == "__main__":
