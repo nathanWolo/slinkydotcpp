@@ -69,8 +69,13 @@ def env_for(config: GameConfig) -> BattlesnakeEnv:
 
 
 @functools.cache
-def rollout_states(config: GameConfig, batch: int = 16, turns: int = 30, seed: int = 0) -> State:
-    """A batch of mid-game states from random legal play (autoreset); cached, as it compiles."""
+def rollout_states(
+    config: GameConfig, batch: int = 16, turns: int = 30, seed: int = 0, every_turn: bool = False
+) -> State:
+    """A batch of mid-game states from random legal play (autoreset); cached, as it compiles.
+
+    With ``every_turn``, every turn of every game instead: ``[batch * turns]`` states.
+    """
     env = env_for(config)
     k_reset, k_play = jax.random.split(jax.random.key(seed))
     states, _ = jax.vmap(env.reset)(jax.random.split(k_reset, batch))
@@ -81,11 +86,13 @@ def rollout_states(config: GameConfig, batch: int = 16, turns: int = 30, seed: i
             jax.random.split(k_pol, batch), states
         )
         states, _ = jax.vmap(env.step_autoreset)(jax.random.split(k_step, batch), states, acts)
-        return states, None
+        return states, (states if every_turn else None)
 
-    states, _ = jax.jit(lambda s, k: jax.lax.scan(step, s, jax.random.split(k, turns)))(
+    states, history = jax.jit(lambda s, k: jax.lax.scan(step, s, jax.random.split(k, turns)))(
         states, k_play
     )
+    if every_turn:
+        return jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), history)
     return states
 
 

@@ -29,7 +29,8 @@ pure, fixed-shape functions of one (unbatched) game that ``jit`` and ``vmap``.
    ``evaluate.Policy``). Each snake ranks its candidate moves
    lexicographically:
 
-   * tier 1, legal: ``env.action_mask``, minus moves that certainly starve;
+   * tier 1, legal: ``env.action_mask``, minus moves that certainly starve or
+     die to hazard damage;
    * tier 2, no losing head-to-head: no opponent reply kills the snake while
      the opponent survives;
    * tier 3, fits: after the move, the time-aware reachable area holds the
@@ -57,8 +58,13 @@ duel on the ``standard`` ruleset was tuned. Wrapped boards and constrictor
 (where bodies never shrink) are handled in the fills. Constrictor has no food
 and keeps health full, so the hunger term there only charges small spaces
 (see :func:`hunger`). It is kept on purpose: dropping it scored 0.436 +- 0.040
-against the snake that keeps it (256 constrictor duels). Hazards only enter
-through the exact rules step of the duel search.
+against the snake that keeps it (256 constrictor duels). Hazards enter in
+three places: the exact rules step of the duel search, the legal tier (a move
+onto a hazard cell that would take the last of its health is not legal), and
+the hunger margin of the per-move features. The fills treat hazard cells as
+plain passable cells. The per-move features ignore ``state.food`` under the
+constrictor rules: the rules clear food every turn, but the map spawns it
+again, and eating it changes nothing.
 """
 
 from __future__ import annotations
@@ -74,7 +80,7 @@ from jax.custom_batching import custom_vmap
 from slinky import rules
 from slinky.env import BattlesnakeEnv
 from slinky.evaluate import Policy
-from slinky.types import ACTION_DELTAS, NUM_ACTIONS, GameConfig, State, TimeStep
+from slinky.types import ACTION_DELTAS, MAX_HEALTH, NUM_ACTIONS, GameConfig, State, TimeStep
 
 INF = 1000  # distance / arrival time of cells that are not reached
 _NEVER = 30_000  # countdown of cells that never free up (constrictor bodies)
@@ -489,7 +495,9 @@ def hunger(health: jax.Array, dist_food: jax.Array, space: jax.Array) -> jax.Arr
     reachable food. If no food is reachable, ``margin = min(health, space) - 5``.
     The pressure is ``clip((30 - margin) / 30, 0, 1) ** 2``. With full health
     and no food (always the case under constrictor) it is a penalty on spaces
-    smaller than 35 cells.
+    smaller than 35 cells. :func:`move_features` passes the health that is left
+    after the hazard damage of the cell moved to (none under constrictor, where
+    health is reset every turn).
     """
     health = health.astype(jnp.float32)
     margin = jnp.where(
@@ -634,10 +642,10 @@ class MoveFeatures(NamedTuple):
     They need no simulation, so they also make cheap MCTS priors.
     """
 
-    legal: jax.Array  # bool: action mask, minus moves that certainly starve
-    eat: jax.Array  # bool: food on the cell moved to
+    legal: jax.Array  # bool: action mask, minus moves that certainly starve or die to hazard damage
+    eat: jax.Array  # bool: food on the cell moved to (never under constrictor: food is ignored)
     space: jax.Array  # int32: time-aware cells reachable after the move
-    fits: jax.Array  # bool: own tail reachable, or space >= length + eat
+    fits: jax.Array  # bool: own tail reachable, or space >= length + eat (eat is False then)
     h2h_danger: jax.Array  # bool: an equal-or-longer opponent can move to the same cell
     h2h_loss: jax.Array  # bool: ... and the meeting loses (equal length is a draw in a duel)
     kill_chance: jax.Array  # float32: sum over shorter opponents that can move there of 1/#moves
@@ -655,11 +663,38 @@ def next_cells(state: State, config: GameConfig) -> jax.Array:
     return nxt
 
 
+def _hazard_toll(state: State, config: GameConfig) -> jax.Array:
+    """int32[N, 4] health that the hazard on the cell of each move takes (0 off hazards).
+
+    This is the damage stage of ``rules.rules_step``, applied to the cell moved
+    to: ``hazard_damage_per_turn`` per stacked layer (negative damage heals),
+    and nothing when the cell has food. It excludes the 1 health per turn
+    that every move costs.
+    """
+    nxt = next_cells(state, config).reshape(-1, 2)
+    on_food = _at(state.food, nxt, config)
+    layers = _at(state.hazard, nxt, config).astype(jnp.int32)
+    # The rules saturate both factors, so the product cannot overflow.
+    damage = max(-MAX_HEALTH, min(MAX_HEALTH, config.hazard_damage_per_turn))
+    toll = jnp.where(on_food, 0, jnp.minimum(layers, MAX_HEALTH + 1) * damage)
+    return toll.reshape(config.num_snakes, NUM_ACTIONS)
+
+
 def legal_moves(state: State, config: GameConfig) -> jax.Array:
-    """bool[N, 4] ``rules.action_mask`` minus moves that certainly starve (health 1, no food)."""
+    """bool[N, 4] ``rules.action_mask`` minus moves that certainly kill the snake.
+
+    A move is removed if it starves the snake (health 1, no food on the cell
+    moved to), or if it enters a hazard cell without food where
+    ``health - 1 - damage * layers <= 0``. If the hazard test alone would
+    remove every move the snake had left, it is skipped for that snake, so a
+    doomed snake is judged as before.
+    """
     eat = _at(state.food, next_cells(state, config).reshape(-1, 2), config)
     starves = (state.health <= 1)[:, None] & ~eat.reshape(config.num_snakes, NUM_ACTIONS)
-    return rules.action_mask(state, config) & ~starves & state.alive[:, None]
+    toll = _hazard_toll(state, config)
+    base = rules.action_mask(state, config) & ~starves & state.alive[:, None]
+    legal = base & ~((toll > 0) & (toll >= state.health[:, None] - 1))
+    return jnp.where(jnp.any(legal, axis=1, keepdims=True), legal, base)
 
 
 def move_features(
@@ -672,6 +707,12 @@ def move_features(
     so both run on one clock, which models the simultaneous move. Territory is
     the Voronoi split between the two. This costs ``5 N`` fills on boolean
     grids, so it is several times slower than :func:`evaluate`.
+
+    Hazards are not in the fills. They enter through the ``legal`` flag and the
+    ``hunger`` margin, which counts the damage of the cell moved to. Under the
+    constrictor rules ``state.food`` is ignored (the rules clear it every turn
+    and eating it changes nothing), so the food features are empty there, and
+    the hunger margin ignores hazard damage (health is reset every turn).
     """
     n, h, w = config.num_snakes, config.height, config.width
     k = _fill_steps(config, weights)
@@ -680,7 +721,8 @@ def move_features(
     tf = free_after(state, config)
     nxt = next_cells(state, config)  # [N, 4, 2]
     flat = nxt.reshape(-1, 2)
-    eat = _at(state.food, flat, config).reshape(n, NUM_ACTIONS)
+    food = jnp.zeros_like(state.food) if config.ruleset.constrictor else state.food
+    eat = _at(food, flat, config).reshape(n, NUM_ACTIONS)
     mask = rules.action_mask(state, config)
 
     # Opponents' fields from their heads (move 0), merged into one per snake.
@@ -700,7 +742,6 @@ def move_features(
     b, lb = opp_first[:, None], opp_len[:, None]
     claim = (mine < b) | ((mine == b) & reach & (me_len > lb))
     lost = (b < mine) | ((mine == b) & (b < INF) & (lb > me_len))
-    food = state.food
     n_food = jnp.maximum(1, jnp.sum(food))
     territory = (jnp.sum(claim, axis=(2, 3)) - jnp.sum(lost, axis=(2, 3))) / (h * w)
     food_territory = (
@@ -723,6 +764,14 @@ def move_features(
     n_moves = jnp.maximum(1, jnp.sum(base == 1, axis=(1, 2)))  # [j]
     kill_chance = jnp.sum(jnp.where(can & (lj < li), 1.0 / n_moves[None, None, :], 0.0), axis=2)
 
+    if config.ruleset.constrictor:
+        # Health is reset to full every turn, after the hazard stage: only a lethal hazard
+        # matters, and `legal` has that.
+        health = state.health[:, None]
+    else:
+        # `dist_food` counts the move itself, so the health after the move (clipped to
+        # MAX_HEALTH by the rules, which only healing hazards reach) is one less than this.
+        health = jnp.minimum(state.health[:, None] - _hazard_toll(state, config), MAX_HEALTH + 1)
     return MoveFeatures(
         legal=legal_moves(state, config),
         eat=eat,
@@ -734,7 +783,7 @@ def move_features(
         territory=territory.astype(jnp.float32),
         food_territory=food_territory.astype(jnp.float32),
         dist_food=dist_food,
-        hunger=hunger(state.health[:, None], dist_food, space),
+        hunger=hunger(health, dist_food, space),
     )
 
 
