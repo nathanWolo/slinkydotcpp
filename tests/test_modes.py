@@ -1,10 +1,4 @@
-"""Tests for slinky.modes and env.placement_reward.
-
-Royale is built separately: tests that need a royale environment are skipped while
-``BattlesnakeEnv(mode_config("royale"))`` raises ``NotImplementedError`` (any other error
-at construction fails them). Everything that only reads a config (mode_config, mode_of,
-the royale features) runs regardless. Drop the guard once royale is merged.
-"""
+"""Tests for slinky.modes and env.placement_reward."""
 
 from __future__ import annotations
 
@@ -33,19 +27,7 @@ from slinky.observations import CHANNEL_NAMES, NUM_CHANNELS, obs_shape
 from slinky.policies import random_legal_policy
 from slinky.types import DOWN, LEFT, RIGHT, UP, GameConfig, Ruleset, empty_state
 
-
-def _royale_env_available() -> bool:
-    try:
-        BattlesnakeEnv(mode_config("royale"), obs=None)
-    except NotImplementedError:
-        return False
-    return True
-
-
-needs_royale = pytest.mark.skipif(
-    not _royale_env_available(), reason="the royale env is not available yet"
-)
-MODES_WITH_ENV = ["duel", "standard", "constrictor", pytest.param("royale", marks=needs_royale)]
+MODES_WITH_ENV = ["duel", "standard", "constrictor", "royale"]
 
 
 def _stub_state(config: GameConfig, turn: int = 0, alive=None):
@@ -295,7 +277,6 @@ def test_features_under_jit_and_vmap():
     np.testing.assert_allclose(feats[:, FEATURE_NAMES.index("turn")], 0.5)
 
 
-@needs_royale
 def test_features_on_real_royale_games():
     config = dataclasses.replace(mode_config("royale"), shrink_every_n_turns=5)
     env = BattlesnakeEnv(config, obs=None)
