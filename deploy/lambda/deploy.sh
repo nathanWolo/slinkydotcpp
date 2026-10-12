@@ -5,9 +5,11 @@
 #   AWS_PROFILE=slinky deploy/lambda/deploy.sh  # region from the profile
 #
 # Creates, once: an execution role (logs only), a log group with 14-day
-# retention, the function (arm64, Python 3.13, 1024 MB, 3 s timeout) and a
-# Function URL without auth (Battlesnake's servers must be able to call it).
-# Later runs only update the code and settings. Prints the URL.
+# retention, a private S3 bucket for the package (a direct upload of ~20 MB
+# tends to be cut off; `aws s3 cp` uploads in parts with retries), the
+# function (arm64, Python 3.13, 1024 MB, 3 s timeout) and a Function URL
+# without auth (Battlesnake's servers must be able to call it). Later runs
+# only update the code and settings. Prints the URL.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -35,6 +37,17 @@ if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
 fi
 role_arn="arn:aws:iam::$account:role/$role"
 
+bucket="$fn-deploy-$account-$region"
+if ! aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
+    echo "creating bucket $bucket"
+    aws s3api create-bucket --bucket "$bucket" \
+        --create-bucket-configuration LocationConstraint="$region" >/dev/null
+    aws s3api put-public-access-block --bucket "$bucket" --public-access-block-configuration \
+        BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+fi
+aws s3 cp --only-show-errors "$zip" "s3://$bucket/snake.zip"
+code=(--s3-bucket "$bucket" --s3-key snake.zip)
+
 log_group="/aws/lambda/$fn"
 if [ -z "$(aws logs describe-log-groups --log-group-name-prefix "$log_group" \
         --query "logGroups[?logGroupName=='$log_group'].logGroupName" --output text)" ]; then
@@ -46,7 +59,7 @@ settings=(--runtime python3.13 --handler lambda_function.lambda_handler
           --memory-size 1024 --timeout 3 --environment "$env_vars")
 if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
     echo "updating $fn"
-    aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$zip" >/dev/null
+    aws lambda update-function-code --function-name "$fn" "${code[@]}" >/dev/null
     aws lambda wait function-updated-v2 --function-name "$fn"
     aws lambda update-function-configuration --function-name "$fn" "${settings[@]}" >/dev/null
     aws lambda wait function-updated-v2 --function-name "$fn"
@@ -55,7 +68,8 @@ else
     # A new role takes a few seconds before Lambda can assume it.
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
         if aws lambda create-function --function-name "$fn" --architectures arm64 \
-                --role "$role_arn" --zip-file "fileb://$zip" "${settings[@]}" >/dev/null 2>"$here/dist/create.err"; then
+                --role "$role_arn" --code "S3Bucket=$bucket,S3Key=snake.zip" "${settings[@]}" \
+                >/dev/null 2>"$here/dist/create.err"; then
             break
         fi
         grep -q "cannot be assumed" "$here/dist/create.err" || { cat "$here/dist/create.err" >&2; exit 1; }

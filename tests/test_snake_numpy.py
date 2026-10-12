@@ -65,8 +65,7 @@ AGENT_NAMES = {
     "ppo": "ppo",
     "reinforce": "reinforce",
     "dqn": "dqn",
-    "rainbow": "rainbow",
-    "rainbow-long": f"rainbow:{CHECKPOINTS / 'rainbow-long-seed0'}",
+    "rainbow": f"rainbow:{CHECKPOINTS / 'rainbow-long-seed0'}",
     "az-0": "az-0",
 }
 

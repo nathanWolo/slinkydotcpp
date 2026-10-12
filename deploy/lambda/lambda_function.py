@@ -34,14 +34,15 @@ import snake_numpy as sn
 HERE = Path(__file__).resolve().parent
 MAX_BODY = 1 << 16  # bytes; a duel request is under 2 KB
 CHECKPOINTS = Path(os.environ.get("CHECKPOINTS", str(HERE / "checkpoints")))
-# URL name -> (checkpoint directory under CHECKPOINTS, default colour). The names
-# are slinky.agents' (az-0 is the raw AlphaZero network, without its search).
+# URL name -> (checkpoint directory under CHECKPOINTS, default colour): each
+# baseline's fully trained checkpoint. The names are slinky.agents', except that
+# "rainbow" is the longer run (slinky.agents' rainbow:baselines/checkpoints/
+# rainbow-long-seed0); az-0 is the raw AlphaZero network, without its search.
 SNAKES = {
     "ppo": ("ppo-duel-seed0", "#3b82f6"),
     "reinforce": ("reinforce-duel-seed0", "#14b8a6"),
     "dqn": ("dqn-duel-seed0", "#f59e0b"),
-    "rainbow": ("rainbow-duel-seed0", "#a855f7"),
-    "rainbow-long": ("rainbow-long-seed0", "#ec4899"),
+    "rainbow": ("rainbow-long-seed0", "#a855f7"),  # trained on to 4.61M env steps
     "az-0": ("az-duel-seed0", "#ef4444"),
 }
 _nets: dict[str, sn.Net] = {}
