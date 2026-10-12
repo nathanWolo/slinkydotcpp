@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from slinky.engine_json import state_from_engine, state_to_engine
-from slinky.rules import action_mask, rules_step
+from slinky.rules import action_mask, royale_hazards, rules_step
 from slinky.types import (
     ACTION_NAMES,
     DOWN,
@@ -23,6 +23,7 @@ from slinky.types import (
     UP,
     Cause,
     GameConfig,
+    RoyaleState,
     Ruleset,
     empty_state,
 )
@@ -439,10 +440,36 @@ def test_extreme_hazard_damage_saturates(damage, layers, health):
     assert bool(out.alive[0]) == (health > 0)
 
 
-def test_royale_rules_step_is_not_silently_standard():
+def test_royale_rules_step_needs_the_shrink_sides():
     config = GameConfig(ruleset=Ruleset.ROYALE)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="RoyaleState"):
         rules_step(jax.tree.map(jnp.asarray, empty_state(config)), np.zeros(2, int), config)
+
+
+def test_royale_rules_step_differs_from_standard_only_in_hazards():
+    royale = GameConfig(ruleset=Ruleset.ROYALE, shrink_every_n_turns=5)
+    standard = dataclasses.replace(royale, ruleset=Ruleset.STANDARD)
+    sides = RoyaleState(jnp.asarray([0, 3, 1, 2] * 5 + [0], jnp.int8))
+    d = {
+        "width": 11,
+        "height": 11,
+        "turn": 14,  # the next turn, 15, is the third shrink
+        "food": [[3, 5]],
+        "hazards": [[0, y] for y in range(11)] + [[10, y] for y in range(11)],
+        "snakes": [
+            {"id": "s0", "body": [[2, 5], [1, 5], [0, 5]], "health": 60},
+            {"id": "s1", "body": [[8, 8], [8, 7], [8, 6]], "health": 60},
+        ],
+    }
+    moves = np.array([RIGHT, UP])  # s0 eats, s1 steps up
+    out = rules_step(state_from_engine(d, royale, sides), moves, royale)
+    ref = rules_step(state_from_engine(d, standard, sides), moves, standard)
+    assert bool(out.alive.all()) and int(out.length[0]) == 4
+    assert jax.tree.all(jax.tree.map(jnp.array_equal, out._replace(hazard=ref.hazard), ref))
+    assert np.array_equal(
+        np.asarray(out.hazard), np.asarray(royale_hazards(sides.sides, 15, royale))
+    )
+    assert not np.array_equal(np.asarray(out.hazard), np.asarray(ref.hazard))
 
 
 def test_duplicate_food_is_rejected():

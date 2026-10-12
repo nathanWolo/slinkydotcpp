@@ -106,6 +106,8 @@ class GameConfig:
             raise ValueError("board dimensions must be positive")
         if self.num_snakes < 1:
             raise ValueError("need at least one snake")
+        if self.shrink_every_n_turns < 1:
+            raise ValueError("shrink_every_n_turns must be at least 1 (the engine rejects 0)")
 
     @property
     def solo(self) -> bool:
@@ -133,7 +135,25 @@ class State(NamedTuple):
     elim_cause: jax.Array  # int8[N] Cause code, 0 while alive
     elim_turn: jax.Array  # int32[N] engine "eliminatedOnTurn", 0 while alive
     done: jax.Array  # bool[] game over
-    map_state: Any  # map-specific pytree (e.g. royale safe-zone bounds); () if unused
+    map_state: Any  # map-specific pytree (RoyaleState for royale maps and rulesets); () if unused
+
+
+class RoyaleState(NamedTuple):
+    """Royale ``map_state``: the game's fixed sequence of shrink sides.
+
+    The hazards at turn ``t`` are a pure function of ``(sides, t)``
+    (:func:`slinky.rules.royale_hazards`), so nothing else is stored and a
+    frozen or reset game needs no special care.
+    """
+
+    # int8[W + H - 1]: side of shrink k; 0 left column, 1 right column,
+    # 2 bottom row (y = 0), 3 top row. W + H - 1 shrinks always empty the safe zone.
+    sides: jax.Array
+
+
+def royale_num_sides(config: GameConfig) -> int:
+    """Length of ``RoyaleState.sides``: the number of shrinks after which nothing is safe."""
+    return config.width + config.height - 1
 
 
 class TimeStep(NamedTuple):

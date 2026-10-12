@@ -290,6 +290,99 @@ class OracleStepper:
             return responses
 
 
+def engine_royale_zones(
+    oracle: OracleStepper,
+    seed: int,
+    turns: Iterable[int],
+    every: int = 25,
+    width: int = 11,
+    height: int = 11,
+) -> list[list[list[int]]]:
+    """Hazards of the engine's royale zone for game ``seed``, one list per turn in ``turns``.
+
+    Runs the royale ruleset on a position at each turn, so each result is the
+    zone the engine shows at ``turn + 1`` with ``shrinkEveryNTurns=every``.
+    """
+    corners = [(0, 0), (width - 1, height - 1)]
+    requests = [
+        make_step_request(
+            "royale",
+            {
+                "width": width,
+                "height": height,
+                "turn": turn,
+                "food": [],
+                "hazards": [],
+                "snakes": [
+                    {"id": f"s{i}", "body": [list(c)] * 3, "health": 100}
+                    for i, c in enumerate(corners)
+                ],
+            },
+            ["up", "down"],
+            settings={"shrinkEveryNTurns": every, "damagePerTurn": 14},
+            seed=seed,
+        )
+        for turn in turns
+    ]
+    zones = []
+    for resp in oracle.step_many(requests):
+        if resp["error"]:
+            raise OracleError(resp["error"])
+        zones.append(resp["state"]["hazards"])
+    return zones
+
+
+def _safe_bounds(hazards: Iterable[Sequence[int]], width: int, height: int):
+    """(min_x, max_x, min_y, max_y) of the cells that are not hazards; None if there are none."""
+    hazard = {tuple(h) for h in hazards}
+    safe = [(x, y) for x in range(width) for y in range(height) if (x, y) not in hazard]
+    if not safe:
+        return None
+    xs, ys = [x for x, _ in safe], [y for _, y in safe]
+    bounds = (min(xs), max(xs), min(ys), max(ys))
+    if len(safe) != (bounds[1] - bounds[0] + 1) * (bounds[3] - bounds[2] + 1):
+        raise OracleError(f"the safe zone is not a rectangle: {sorted(hazard)}")
+    return bounds
+
+
+def engine_royale_sides(
+    oracle: OracleStepper, seed: int, k: int, width: int = 11, height: int = 11
+) -> list[int]:
+    """The first ``k`` shrink sides of the engine's royale zone for game ``seed``.
+
+    Sides are 0 left, 1 right, 2 bottom, 3 top. The engine rebuilds the zone
+    every turn from a generator seeded with the game seed alone, so with
+    ``shrinkEveryNTurns=1`` the zone at turns ``1..k`` has had ``1..k`` shrinks.
+    Each shrink moves one bound of the safe rectangle inward by one, and that
+    identifies its side.
+
+    Once the safe zone is empty, the sides of later shrinks cannot be observed;
+    they cannot change anything either (the zone stays empty), and are 0. The
+    side that empties the zone is any one that does.
+    """
+    sides: list[int] = []
+    min_x, max_x, min_y, max_y = 0, width - 1, 0, height - 1
+    for hazards in engine_royale_zones(oracle, seed, range(k), 1, width, height):
+        seen = _safe_bounds(hazards, width, height)
+        candidates = (  # left, right, bottom, top
+            (min_x + 1, max_x, min_y, max_y),
+            (min_x, max_x - 1, min_y, max_y),
+            (min_x, max_x, min_y + 1, max_y),
+            (min_x, max_x, min_y, max_y - 1),
+        )
+        for side, after in enumerate(candidates):
+            empty = after[0] > after[1] or after[2] > after[3]
+            if (seen is None and empty) or seen == after:
+                sides.append(side)
+                min_x, max_x, min_y, max_y = after
+                break
+        else:
+            raise OracleError(f"shrink {len(sides)} of seed {seed} fits no side: {seen}")
+        if seen is None:
+            break
+    return sides + [0] * (k - len(sides))
+
+
 # --------------------------------------------------------------------------- games
 
 

@@ -55,7 +55,7 @@ states, ts = batch_reset(jax.random.split(key, 4096))
 
 | | |
 |---|---|
-| `GameConfig` | Static settings: `width`, `height`, `num_snakes`, `ruleset` (`standard`, `solo`, `wrapped`, `constrictor`, `wrapped_constrictor`), `map` (`standard`, `empty`), `food_spawn_chance`, `minimum_food`, `hazard_damage_per_turn`, `max_turns`. Defaults are the official 1v1 setup. |
+| `GameConfig` | Static settings: `width`, `height`, `num_snakes`, `ruleset` (`standard`, `solo`, `wrapped`, `constrictor`, `wrapped_constrictor`, `royale`), `map` (`standard`, `empty`, `royale`), `food_spawn_chance`, `minimum_food`, `hazard_damage_per_turn`, `shrink_every_n_turns` (royale), `max_turns`. Defaults are the official 1v1 setup. |
 | `env.reset(key)` | Returns `(State, TimeStep)` at turn 0, with snakes placed and starting food. |
 | `env.step(key, state, actions)` | `actions` is `int[N]`: `0=up, 1=down, 2=left, 3=right`. Any other value is an invalid move, and the snake repeats its last move, as in the engine. |
 | `env.step_autoreset(...)` | Same as `step`, but a finished game is replaced by a new one. `ts.final_obs` keeps the observation of the state the game ended in, for bootstrapping values on truncation. |
@@ -77,6 +77,33 @@ states, ts = batch_reset(jax.random.split(key, 4096))
     opponent bodies, opponent body countdown, opponent health, own health and
     own length.
   - Pass `obs=` a function to use your own, or `None` to skip observations.
+- **Royale:** `GameConfig(num_snakes=4, ruleset="royale", map="royale")` is the
+  official 4-snake royale mode.
+  - Every `shrink_every_n_turns` (default 25) turns the safe zone loses one
+    edge row or column, on a random side. Everything outside it is hazard.
+  - The sides of all shrinks are drawn at reset and kept in
+    `state.map_state` (`RoyaleState`), so the hazards at any turn are a pure
+    function of `(sides, turn)`: `slinky.rules.royale_hazards`.
+  - The royale ruleset works with any map, as in the engine: `env.reset`
+    always draws the sides. The standard ruleset on the royale map gives the
+    same game.
+  - `rules_step` on its own (search) needs a `RoyaleState` in `map_state`
+    under the royale ruleset, and raises `ValueError` without one. Under the
+    standard ruleset on the royale map, `rules_step` does not move the zone
+    (the map does), so code that only calls `rules_step` keeps the root's
+    hazards in that combination: `mcts.py` with its default `spawn_food=False`
+    (so AlphaZero's search too) and the heuristic's duel search. With
+    `spawn_food=True` the search steps through `env.step` and the zone moves.
+  - The `az-*` agents can play royale (their search sees the true future
+    zone, see below). Training AlphaZero with `augment=True` cannot: the board
+    symmetries refuse states that carry a `map_state`.
+  - The shrink sides follow the engine's distribution (iid uniform), not its
+    random stream. (The engine's first side is slightly tied to the turn-0
+    food roll; see `docs/battlesnake/ENGINE_RULES.md`.)
+  - `map_state` holds the whole game's sides, so it shows the future zone.
+    Observations and the heuristic never read it, but a search that simulates
+    from a state would see the true future shrinks; redraw `sides[turn // N:]`
+    at the search root if royale search is ever used.
 - **Action mask:** masks out a move only if it certainly hits a wall or a
   body next turn, whatever the other snakes do.
   - It applies the tail rule exactly: a tail square is open unless that tail
@@ -241,8 +268,8 @@ It is only used for testing; see its README. The tests use it in three ways:
 - **Engine-generated games**
   (`tests/test_parity.py::test_transitions_match_engine`).
   - Thousands of games are played by the engine: 1v1, 4-, 8- and 12-player
-    games, 7×7 to 19×19 boards, wrapped, constrictor, solo, the royale map,
-    and the hazard-pits, sinkholes and snail-mode maps.
+    games, 7×7 to 19×19 boards, wrapped, constrictor, solo, the royale ruleset
+    and map, and the hazard-pits, sinkholes and snail-mode maps.
   - Every transition must be reproduced exactly: bodies, health, elimination
     causes and turns, food and hazards.
 - **Our own games checked by the engine**
@@ -294,10 +321,11 @@ should scale much better with batch size.
 
 ## Roadmap
 
-1. **Core** (done): standard, duel, solo, wrapped and constrictor rules;
-   standard and empty maps; observations; engine parity tests; benchmark.
+1. **Core** (done): standard, duel, solo, wrapped, constrictor and royale
+   rules; standard, empty and royale maps; observations; engine parity tests;
+   benchmark.
 2. **More modes:**
-   - royale, hazard maps and healing pools;
+   - hazard maps other than royale, and healing pools (royale is done);
    - official API JSON (`/move` request) conversion, so a trained policy can
      play on the real Battlesnake servers.
 3. **Baselines:**

@@ -71,8 +71,9 @@ Details are in `docs/battlesnake/ENGINE_RULES.md`. The parts that matter here:
   happens: a snake on health 1 that eats survives.
 - **Hazards.** Damage applies only if the head ends the move on the hazard
   square, and food on that square cancels it. [src: Royale map doc] slinky's
-  current maps (`standard`, `empty`) have no hazards and `royale` is not
-  implemented, so hazard handling below is a documented extension.
+  `standard` and `empty` maps have no hazards; only the `royale` map and
+  ruleset (added after this note was written) place them, so hazard handling
+  below is a documented extension.
 - **Food is scarce in a duel.** With the default settings there is usually
   one to three food items on the board, so food control is a strategic
   resource, not just a health refill.
@@ -660,8 +661,11 @@ action[i] = argmax_a (score[i, a] + Uniform(0, 1e-4))
   used; computing both seats from one 4x4 matrix is free.
 - Dead snakes: mask `body` by `alive` before `max`. In done states return
   terminal values.
-- `rules_step` raises for the royale ruleset, so P1 supports only the rulesets
-  slinky supports. Only `standard` was prototyped.
+- Under the royale ruleset `rules_step` needs the shrink sides in
+  `state.map_state`. P1 works on environment states, which carry them. A state
+  built from a real game request has none, and the request does not carry the
+  seed they come from, so the future sides would have to be assumed before
+  `rules_step`. Only `standard` was prototyped.
 
 ### 6.9 Limits and extensions (not validated)
 

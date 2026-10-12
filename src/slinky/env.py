@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 from slinky import rules
 from slinky.maps import get_map
-from slinky.types import NUM_ACTIONS, GameConfig, Ruleset, State, TimeStep
+from slinky.types import NUM_ACTIONS, GameConfig, State, TimeStep
 
 RewardFn = Callable[[State, State, GameConfig], jax.Array]
 ObsFn = Callable[[State], Any]
@@ -65,9 +65,7 @@ class BattlesnakeEnv:
         reward_fn: RewardFn = win_loss_reward,
     ) -> None:
         self.config = config = config or GameConfig()
-        if config.ruleset == Ruleset.ROYALE:
-            raise NotImplementedError("the royale ruleset is not implemented yet")
-        self.map = get_map(config.map)
+        self.map = get_map(config.map, config.ruleset)
         self.reward_fn = reward_fn
         if isinstance(obs, str):
             from slinky.observations import make_obs_fn

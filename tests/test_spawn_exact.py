@@ -23,6 +23,8 @@ pytestmark = pytest.mark.oracle
         dict(ruleset="wrapped", snakes=4),
         dict(width=19, height=19, snakes=12),
         dict(width=7, height=7, snakes=1),
+        # Hazards cover most of the board early on: food still spawns on them.
+        dict(map="royale", snakes=4, shrink_every_n_turns=1),
     ],
     ids=str,
 )

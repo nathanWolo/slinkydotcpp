@@ -234,9 +234,11 @@ turns. Keep this in mind when doing statistics on engine-generated games.
 ### Royale
 
 - The board uses standard food spawning.
-- Every `shrinkEveryNTurns` turns (CLI default 25; your request contains the
-  real value), the safe zone shrinks by one row or column on a randomly
-  chosen side.
+- Every `shrinkEveryNTurns` turns, the safe zone shrinks by one row or column
+  on a randomly chosen side.
+  - The CLI default is 25 (your request contains the real value).
+  - If the setting is missing, the royale ruleset uses **20**. A value below 1
+    is an engine error.
   - The sequence of sides comes from a generator seeded with the game seed
     alone, so it is fixed for the whole game.
 - Every square outside the safe zone is a hazard. The list contains no
@@ -248,6 +250,52 @@ turns. Keep this in mind when doing statistics on engine-generated games.
   - The two produce identical lists.
   - The `royale` ruleset clears all hazards every turn, so combining it
     with another hazard map wipes that map's hazards.
+
+**The exact zone.**
+
+- The state shown at turn `t` has the zone after `t // N` shrinks (`N` is
+  `shrinkEveryNTurns`). The first hazards are shown at turn `N`, none before.
+- Shrink `k` is `rng.Intn(4)` on a generator seeded with the game seed, and
+  the same generator restarts every turn, so the sides never change:
+  0 moves the left edge in (`minX++`), 1 the right (`maxX--`), 2 the bottom
+  (`minY++`, with `y = 0` at the bottom), 3 the top (`maxY--`).
+- A square is a hazard when it lies outside
+  `[minX, maxX] x [minY, maxY]`.
+- After `W + H - 1` shrinks (21 on 11x11) the whole board is hazard, and the
+  zone never comes back. It often collapses earlier: after 11 to 21 shrinks,
+  18.3 on average on 11x11, so around turn 457 with `N = 25`.
+
+**Order of events.**
+
+- The ruleset's hazard stage runs after elimination and does nothing at
+  initialization (the setup call has no moves).
+- It computes the zone for turn `b.Turn + 1`, where `b.Turn` is the turn of
+  the state the snakes were shown. The map's update then does the same, and
+  the CLI increments the turn.
+- The first damage therefore lands on the move from turn `N` to `N + 1`. A
+  head that is inside a newly added row or column takes no damage until it
+  moves again.
+- **The stage is skipped on the game-over call.** When the first stage ends
+  the game, nothing after it runs. The map's update still runs, so with the
+  `royale` map the hazards of that final state move on. With a map that places
+  no hazards (such as `standard`) the zone is not regenerated, so it misses a
+  shrink that falls due on that turn (the final state at turn `T + 1` shows the
+  zone of turn `T`, which differs only when `(T + 1) % N == 0`).
+- Food on a hazard square cancels the damage, and food may spawn on hazard
+  squares.
+
+**Things worth knowing.**
+
+- **Seed 0 is unseeded.** With game seed 0 the generator is the global one,
+  so the zone is re-randomized every turn, can grow back, and differs between
+  processes. The CLI's default seed is the current time, so only an explicit
+  `--seed 0` does this.
+- **The first shrink side is tied to the turn-0 food roll.** Both come from
+  the same generator seeded with the game seed: the side is `Int31 & 3`, and
+  the roll is `Int31 % 100`. Since 4 divides 100, the side is the roll mod 4.
+  In 4000 games, when food spawned by chance right after turn 0, the first
+  side split 102 / 133 / 179 / 163 across the four sides, roughly the 3:3:4:4
+  that this predicts. The later sides are not affected.
 
 ### Other maps in the engine
 

@@ -6,24 +6,28 @@
 * Our own rollouts: states produced by :class:`BattlesnakeEnv` are sent to the
   engine, which must agree with our next state.
 
+Royale games need the engine's shrink sides in ``map_state``; they depend on the
+game seed alone and are read back from the engine (``engine_royale_sides``).
+``tests/test_royale.py`` has the exhaustive royale corpora.
+
 All tests here need Go (they are skipped otherwise).
 """
 
 from __future__ import annotations
 
-import functools
 import math
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from helpers import batched_step, compare_states, engine_sides, moves_to_ids, stack_states
 
 from slinky.engine_json import state_from_engine, state_to_engine
 from slinky.env import BattlesnakeEnv
 from slinky.maps import spawn_food_standard, spawn_mask
-from slinky.rules import is_game_over, rules_step
-from slinky.types import ACTION_NAMES, GameConfig, Ruleset
+from slinky.rules import is_game_over
+from slinky.types import ACTION_NAMES, GameConfig, RoyaleState, Ruleset
 
 try:
     from oracle import generate_games, make_step_request, split_games
@@ -32,8 +36,6 @@ except ImportError:
 
 pytestmark = pytest.mark.oracle
 
-MOVE_IDS = {name: i for i, name in enumerate(ACTION_NAMES)}
-
 # (id, oracle `games` flags). Hazard maps exercise hazard damage and stacking;
 # the rules pipeline is map-independent so any map's transitions are valid tests.
 GAME_CONFIGS = [
@@ -41,13 +43,23 @@ GAME_CONFIGS = [
     ("duel_invalid_moves", dict(games=60, invalid_move_prob=0.05)),
     ("standard_7x7_4p", dict(width=7, height=7, snakes=4, games=80)),
     ("standard_19x19_4p", dict(width=19, height=19, snakes=4, games=20)),
+    ("standard_11x11_4p", dict(snakes=4, games=60)),
     ("standard_11x11_8p", dict(snakes=8, games=30)),
     ("standard_11x11_12p", dict(snakes=12, games=20)),
     ("wrapped", dict(ruleset="wrapped", games=60)),
     ("constrictor", dict(ruleset="constrictor", games=60)),
+    ("constrictor_4p", dict(ruleset="constrictor", snakes=4, games=40)),
     ("wrapped_constrictor", dict(ruleset="wrapped_constrictor", games=40)),
     ("solo_7x7", dict(ruleset="solo", width=7, height=7, snakes=1, games=40)),
     ("royale_map_4p", dict(map="royale", snakes=4, games=40, shrink_every_n_turns=10)),
+    (
+        "royale_4p",
+        dict(ruleset="royale", map="royale", snakes=4, games=40, shrink_every_n_turns=10),
+    ),
+    (
+        "royale_standard_map_4p",
+        dict(ruleset="royale", map="standard", snakes=4, games=40, shrink_every_n_turns=10),
+    ),
     ("hazard_pits", dict(map="hz_hazard_pits", snakes=4, games=30)),
     ("sinkholes", dict(map="sinkholes", snakes=4, games=30)),
     ("snail_mode", dict(map="snail_mode", snakes=4, games=30)),
@@ -60,52 +72,19 @@ def _game_config(flags: dict) -> GameConfig:
         height=flags.get("height", 11),
         num_snakes=flags.get("snakes", 2),
         ruleset=flags.get("ruleset", "standard"),
+        map=flags.get("map", "standard"),
         food_spawn_chance=flags.get("food_spawn_chance", 15),
         minimum_food=flags.get("minimum_food", 1),
         hazard_damage_per_turn=flags.get("hazard_damage", 14),
+        shrink_every_n_turns=flags.get("shrink_every_n_turns", 25),
     )
 
 
-def _stack(states):
-    return jax.tree.map(lambda *xs: np.stack(xs), *states)
-
-
-@functools.cache
-def _batched_step(config: GameConfig):
-    return jax.jit(jax.vmap(lambda s, a: rules_step(s, a, config)))
-
-
-def _moves_to_ids(moves):
-    return np.array([MOVE_IDS.get(m, -1) for m in moves], np.int32)
-
-
-def _compare(ours, theirs, config: GameConfig, context) -> None:
-    """Assert two stacked States agree on everything the engine defines."""
-    o = jax.device_get(ours)
-    t = jax.device_get(theirs)
-    alive = t.alive
-    checks = {
-        "alive": (o.alive, t.alive),
-        "elim_cause": (o.elim_cause, t.elim_cause),
-        "elim_turn": (o.elim_turn, t.elim_turn),
-        "health": (o.health, t.health),
-        "head": (o.head, t.head),
-        "food": (o.food, t.food),
-        "hazard": (o.hazard, t.hazard),
-        "length[alive]": (np.where(alive, o.length, 0), np.where(alive, t.length, 0)),
-        "body[alive]": (o.body * alive[..., None, None], t.body * alive[..., None, None]),
-        "last_move[alive]": (np.where(alive, o.last_move, 0), np.where(alive, t.last_move, 0)),
-    }
-    for name, (a, b) in checks.items():
-        bad = np.nonzero(np.any((a != b).reshape(a.shape[0], -1), axis=1))[0]
-        if len(bad):
-            i = int(bad[0])
-            ours_i = jax.tree.map(lambda x, i=i: x[i], ours)
-            pytest.fail(
-                f"{name} differs in {len(bad)} transition(s); first: {context(i)}\n"
-                f"ours:   {state_to_engine(ours_i, config)}\n"
-                f"engine: {context(i, engine=True)}"
-            )
+def _map_states(oracle, games, config: GameConfig) -> dict:
+    """Per-game ``map_state``: the engine's royale sides, or ``()`` for other games."""
+    if config.ruleset != Ruleset.ROYALE and config.map != "royale":
+        return {g["game"]: () for g in games}
+    return {g["game"]: engine_sides(oracle, g["config"]["game_seed"], config) for g in games}
 
 
 @pytest.fixture(scope="module", params=GAME_CONFIGS, ids=[c[0] for c in GAME_CONFIGS])
@@ -115,14 +94,17 @@ def corpus(request, oracle_bin):
     return name, flags, _game_config(flags), split_games(records)
 
 
-def test_transitions_match_engine(corpus):
+def test_transitions_match_engine(corpus, oracle):
     name, flags, config, games = corpus
     trans = [t for g in games for t in g["transitions"]]
     assert trans, "no transitions generated"
-    pre = _stack([state_from_engine(t["pre"], config) for t in trans])
-    post = _stack([state_from_engine(t["post_rules"], config) for t in trans])
-    actions = np.stack([_moves_to_ids(t["moves"]) for t in trans])
-    ours = _batched_step(config)(pre, actions)
+    map_state = _map_states(oracle, games, config)
+    pre = stack_states([state_from_engine(t["pre"], config, map_state[t["game"]]) for t in trans])
+    post = stack_states(
+        [state_from_engine(t["post_rules"], config, map_state[t["game"]]) for t in trans]
+    )
+    actions = np.stack([moves_to_ids(t["moves"]) for t in trans])
+    ours = batched_step(config)(pre, actions)
 
     def context(i, engine=False):
         t = trans[i]
@@ -130,7 +112,7 @@ def test_transitions_match_engine(corpus):
             return t["post_rules"]
         return f"game {t['game']} turn {t['pre']['turn']} moves {t['moves']}\npre: {t['pre']}"
 
-    _compare(ours, post, config, context)
+    compare_states(ours, post, config, context)
     # The engine's game-over flag is its *pre*-move check.
     over = jax.vmap(lambda a: is_game_over(a, config))(pre.alive)
     assert np.array_equal(np.asarray(over), [t["game_over"] for t in trans])
@@ -138,10 +120,10 @@ def test_transitions_match_engine(corpus):
 
 def test_food_spawns_are_legal(corpus):
     name, flags, config, games = corpus
-    if flags.get("map", "standard") != "standard" or config.ruleset.constrictor:
-        pytest.skip("only the standard map's spawning is implemented")
+    if flags.get("map", "standard") not in ("standard", "royale") or config.ruleset.constrictor:
+        pytest.skip("only the standard and royale maps' spawning is implemented")
     trans = [t for g in games for t in g["transitions"]]
-    post = _stack([state_from_engine(t["post_rules"], config) for t in trans])
+    post = stack_states([state_from_engine(t["post_rules"], config) for t in trans])
     masks = np.asarray(jax.vmap(lambda s: spawn_mask(s, config))(post))
     # The engine draws turn T's spawn roll from a generator seeded with
     # game_seed + T, so games with overlapping seed ranges share rolls. Collect
@@ -224,8 +206,8 @@ def _initial_ok(d: dict, config: GameConfig) -> str | None:
 
 def test_initial_states(corpus):
     name, flags, config, games = corpus
-    if flags.get("map", "standard") != "standard":
-        pytest.skip("only the standard map's setup is implemented")
+    if flags.get("map", "standard") not in ("standard", "royale"):
+        pytest.skip("only the standard and royale maps' setup is implemented")
     for g in games:
         err = _initial_ok(g["initial"], config)
         assert err is None, f"engine initial state violates our model: {err}"
@@ -242,17 +224,26 @@ def test_initial_states(corpus):
 
 ROLLOUT_CONFIGS = [
     GameConfig(),
+    GameConfig(num_snakes=4),
     GameConfig(width=7, height=7, num_snakes=4),
     GameConfig(width=19, height=19, num_snakes=6),
     GameConfig(ruleset=Ruleset.WRAPPED),
     GameConfig(ruleset=Ruleset.CONSTRICTOR),
+    GameConfig(num_snakes=4, ruleset=Ruleset.CONSTRICTOR),
     GameConfig(width=7, height=7, num_snakes=1),
     GameConfig(minimum_food=3, food_spawn_chance=40),
+    GameConfig(num_snakes=4, ruleset=Ruleset.ROYALE, map="royale", shrink_every_n_turns=5),
 ]
+ROLLOUT_GAMES = 16
+ROLLOUT_STEPS = 150
 
 
-def _rollout(env: BattlesnakeEnv, key, steps: int, eps: float):
-    """Random play that mostly avoids certain death; returns (states, actions)."""
+def _rollout(env: BattlesnakeEnv, key, steps: int, eps: float, sides=None):
+    """Random play that mostly avoids certain death; returns (states, actions).
+
+    Finished games are replaced by new ones, unless ``sides`` (royale shrink sides
+    for one fixed game) are given: then the game keeps them and stays finished.
+    """
 
     def body(state, k):
         k_pol, k_eps, k_step = jax.random.split(k, 3)
@@ -261,10 +252,13 @@ def _rollout(env: BattlesnakeEnv, key, steps: int, eps: float):
         greedy = jax.random.categorical(k_pol, logits)
         rand = jax.random.randint(k_eps, greedy.shape, -1, 4)  # -1: invalid move
         actions = jnp.where(jax.random.uniform(k_eps, greedy.shape) < eps, rand, greedy)
-        nxt, _ = env.step_autoreset(k_step, state, actions)
+        step = env.step_autoreset if sides is None else env.step
+        nxt, _ = step(k_step, state, actions)
         return nxt, (state, actions)
 
     state, _ = env.reset(key)
+    if sides is not None:
+        state = state._replace(map_state=RoyaleState(sides))
     _, (states, actions) = jax.lax.scan(body, state, jax.random.split(key, steps))
     return states, actions
 
@@ -276,9 +270,18 @@ def _rollout(env: BattlesnakeEnv, key, steps: int, eps: float):
 )
 def test_our_rollouts_match_engine(config, oracle):
     env = BattlesnakeEnv(config, obs=None)
-    states, actions = jax.jit(jax.vmap(lambda k: _rollout(env, k, 150, 0.08)))(
-        jax.random.split(jax.random.key(7), 16)
-    )
+    keys = jax.random.split(jax.random.key(7), ROLLOUT_GAMES)
+    if config.ruleset == Ruleset.ROYALE:
+        # The engine regenerates the zone from the game seed, so each game gets a seed
+        # of its own and carries that seed's sides (autoreset would swap them).
+        seeds = [1_000_003 * (g + 1) for g in range(ROLLOUT_GAMES)]
+        sides = jnp.stack([engine_sides(oracle, s, config).sides for s in seeds])
+        play = jax.vmap(lambda k, s: _rollout(env, k, ROLLOUT_STEPS, 0.08, s))
+        states, actions = jax.jit(play)(keys, sides)
+    else:
+        seeds = [1] * ROLLOUT_GAMES
+        play = jax.vmap(lambda k: _rollout(env, k, ROLLOUT_STEPS, 0.08))
+        states, actions = jax.jit(play)(keys)
     flat = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), (states, actions))
     states, actions = jax.device_get(flat)
     keep = ~np.asarray(states.done)
@@ -293,20 +296,34 @@ def test_our_rollouts_match_engine(config, oracle):
             config.ruleset.value,
             d,
             [ACTION_NAMES[a] if 0 <= a < 4 else "" for a in acts[i]],
-            settings={"damagePerTurn": str(config.hazard_damage_per_turn)},
+            settings={
+                "damagePerTurn": str(config.hazard_damage_per_turn),
+                "shrinkEveryNTurns": str(config.shrink_every_n_turns),
+            },
             solo=config.solo,
+            seed=seeds[idx[i] // ROLLOUT_STEPS],
         )
         for i, d in enumerate(pre_dicts)
     ]
     responses = oracle.step_many(requests)
     errors = [r["error"] for r in responses if r.get("error")]
     assert not errors, errors[:3]
-    theirs = _stack([state_from_engine(r["state"], config) for r in responses])
+    theirs = stack_states([state_from_engine(r["state"], config) for r in responses])
     # Round-tripping through JSON must be lossless for our own states.
-    roundtrip = _stack([state_from_engine(d, config) for d in pre_dicts])
-    _compare(roundtrip, pre, config, lambda i, engine=False: f"roundtrip {i}")
-    ours = _batched_step(config)(pre, acts)
-    _compare(
+    roundtrip = stack_states([state_from_engine(d, config) for d in pre_dicts])
+    compare_states(roundtrip, pre, config, lambda i, engine=False: f"roundtrip {i}")
+    if config.ruleset == Ruleset.ROYALE:
+        # The environment's own hazards (rules stage, then the map) must be what the engine
+        # shows next. The game keeps its sides and never restarts, so consecutive entries
+        # of one game are consecutive turns, and `pre` is the input of both sides above.
+        nxt = np.nonzero(
+            (idx[1:] == idx[:-1] + 1) & (idx[1:] // ROLLOUT_STEPS == idx[:-1] // ROLLOUT_STEPS)
+        )[0]
+        assert len(nxt) > ROLLOUT_GAMES
+        assert np.array_equal(pre.hazard[nxt + 1], theirs.hazard[nxt])
+        assert pre.hazard.any()
+    ours = batched_step(config)(pre, acts)
+    compare_states(
         ours,
         theirs,
         config,

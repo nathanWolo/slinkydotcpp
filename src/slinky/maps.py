@@ -6,6 +6,12 @@ mirrors the engine's ``maps.GameMap`` interface (``SetupBoard`` and
 ``PostUpdateBoard``). ``PreUpdateBoard`` is a no-op for every map implemented
 so far, so it is omitted until a map needs it.
 
+The royale zone is the exception to "the map places hazards": the ``royale``
+map and the ``royale`` ruleset both generate it, from the same fixed sequence
+of random shrink sides (:class:`~slinky.types.RoyaleState`), and give the same
+game. :func:`get_map` therefore adds the sides to any map under the royale
+ruleset.
+
 Random choices match the engine's *distributions*, not its exact random
 stream (the engine uses Go's ``math/rand``). Each random operation draws one
 block of raw bits and derives every choice from it: on CPU every PRNG call is
@@ -21,8 +27,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from slinky.rules import one_hot_cells, value_at
-from slinky.types import MAX_HEALTH, START_LENGTH, GameConfig, State, empty_state
+from slinky.rules import one_hot_cells, royale_hazards, value_at
+from slinky.types import (
+    MAX_HEALTH,
+    START_LENGTH,
+    GameConfig,
+    RoyaleState,
+    Ruleset,
+    State,
+    empty_state,
+    royale_num_sides,
+)
 
 
 class GameMap(Protocol):
@@ -324,6 +339,13 @@ def spawn_food_standard(key: jax.Array, state: State, config: GameConfig) -> Sta
 # --- Maps ----------------------------------------------------------------------
 
 
+def _standard_setup(bits: jax.Array, config: GameConfig, map_state: Any) -> State:
+    """Turn-0 state of the standard map from uint32 placement bits, then initial-food bits."""
+    n_place = _placement_bits(config)
+    state = snakes_at(empty_state(config, map_state), place_snakes(bits[:n_place], config), config)
+    return place_initial_food(bits[n_place:], state, config)
+
+
 class StandardMap:
     """Standard snake placement and food spawning (map id ``standard``)."""
 
@@ -331,14 +353,74 @@ class StandardMap:
         return ()
 
     def setup(self, key: jax.Array, config: GameConfig) -> State:
-        n_place = _placement_bits(config)
-        bits = jax.random.bits(key, (n_place + _initial_food_bits(config),), jnp.uint32)
-        state = empty_state(config, self.init_map_state(config))
-        state = snakes_at(state, place_snakes(bits[:n_place], config), config)
-        return place_initial_food(bits[n_place:], state, config)
+        n_bits = _placement_bits(config) + _initial_food_bits(config)
+        bits = jax.random.bits(key, (n_bits,), jnp.uint32)
+        return _standard_setup(bits, config, self.init_map_state(config))
 
     def post_update(self, key: jax.Array, state: State, config: GameConfig) -> State:
         return spawn_food_standard(key, state, config)
+
+
+def _blank_sides(config: GameConfig) -> RoyaleState:
+    return RoyaleState(jnp.zeros(royale_num_sides(config), jnp.int8))
+
+
+def _random_sides(bits: jax.Array) -> RoyaleState:
+    """Uniform iid shrink sides from uint32 ``bits`` (the top two bits of each)."""
+    return RoyaleState((bits >> 30).astype(jnp.int8))
+
+
+class RoyaleMap:
+    """Standard placement and food, plus the shrinking royale hazard zone (map id ``royale``).
+
+    The sides of all shrinks are drawn once, at setup, as iid uniform values:
+    the engine's sequence is fixed per game, and we reproduce its distribution
+    but not its random stream. There are no hazards at turn 0.
+    """
+
+    def init_map_state(self, config: GameConfig) -> Any:
+        return _blank_sides(config)
+
+    def setup(self, key: jax.Array, config: GameConfig) -> State:
+        n_bits = _placement_bits(config) + _initial_food_bits(config)
+        bits = jax.random.bits(key, (n_bits + royale_num_sides(config),), jnp.uint32)
+        return _standard_setup(bits[:n_bits], config, _random_sides(bits[n_bits:]))
+
+    def post_update(self, key: jax.Array, state: State, config: GameConfig) -> State:
+        state = spawn_food_standard(key, state, config)
+        # The engine regenerates the zone for the turn about to be shown. The rules step
+        # has not incremented the turn yet.
+        return state._replace(hazard=royale_hazards(state.map_state.sides, state.turn + 1, config))
+
+
+class WithRoyaleSides:
+    """Another map under the royale ruleset, which needs the shrink sides in ``map_state``.
+
+    Setup and post-update are the wrapped map's (royale ruleset on the standard
+    map is the same game as on the royale map); the ruleset places the hazards.
+    The wrapped map must have no ``map_state`` of its own, which the sides replace.
+
+    Unlike :class:`RoyaleMap`, which draws its sides in the same block of bits as its
+    placement, this draws them with a second ``jax.random.bits`` call on a split key.
+    That costs a few percent of ``step_autoreset`` throughput (2048 games), too little
+    to widen the ``GameMap`` interface for a combination that is not a leaderboard mode.
+    """
+
+    def __init__(self, base: GameMap) -> None:
+        self.base = base
+
+    def init_map_state(self, config: GameConfig) -> Any:
+        return _blank_sides(config)
+
+    def setup(self, key: jax.Array, config: GameConfig) -> State:
+        if jax.tree.leaves(self.base.init_map_state(config)):
+            raise ValueError(f"{type(self.base).__name__} has a map_state of its own to replace")
+        k_map, k_sides = jax.random.split(key)
+        sides = jax.random.bits(k_sides, (royale_num_sides(config),), jnp.uint32)
+        return self.base.setup(k_map, config)._replace(map_state=_random_sides(sides))
+
+    def post_update(self, key: jax.Array, state: State, config: GameConfig) -> State:
+        return self.base.post_update(key, state, config)
 
 
 class EmptyMap:
@@ -359,11 +441,20 @@ class EmptyMap:
 MAPS: dict[str, GameMap] = {
     "standard": StandardMap(),
     "empty": EmptyMap(),
+    "royale": RoyaleMap(),
 }
 
 
-def get_map(name: str) -> GameMap:
+def get_map(name: str, ruleset: Ruleset = Ruleset.STANDARD) -> GameMap:
+    """The map registered as ``name``, ready to play under ``ruleset``.
+
+    The royale ruleset works with any map, but needs the shrink sides in
+    ``map_state``; every map other than ``royale`` gets them added.
+    """
     try:
-        return MAPS[name]
+        game_map = MAPS[name]
     except KeyError:
         raise ValueError(f"unknown map {name!r}; available: {sorted(MAPS)}") from None
+    if Ruleset(ruleset) == Ruleset.ROYALE and not isinstance(game_map, RoyaleMap):
+        return WithRoyaleSides(game_map)
+    return game_map
