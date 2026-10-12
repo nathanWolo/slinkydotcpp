@@ -66,6 +66,11 @@ states, ts = batch_reset(jax.random.split(key, 4096))
   - +1 to the last snake standing;
   - 0 for snakes that die on the final turn when nobody survives (a draw).
   - In solo games, dying is simply −1.
+  - `slinky.env.placement_reward` is a zero-sum finishing-order alternative for games
+    with more than two snakes. A snake gains 1/(N−1) for each snake that dies while
+    it lives and loses 1/(N−1) for each snake still alive when it dies, so a
+    4-snake game pays +1, +⅓, −⅓, −1 by place (ties averaged). In a duel it equals
+    `win_loss_reward`.
   - Pass `reward_fn=` to use your own.
 - **Observations** (`slinky.observations`):
   - **Egocentric** (the default): the board is centred on the agent's head

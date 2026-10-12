@@ -47,6 +47,31 @@ def win_loss_reward(prev: State, state: State, config: GameConfig) -> jax.Array:
     return reward.astype(jnp.float32)
 
 
+def placement_reward(prev: State, state: State, config: GameConfig) -> jax.Array:
+    """Zero-sum finishing-order reward, paid as snakes are eliminated.
+
+    * every snake that is still alive when another one dies gains ``1 / (N - 1)`` for
+      each snake that died this turn (it outlasted them);
+    * every snake that dies loses ``1 / (N - 1)`` for each snake still alive after this
+      turn (it was outlasted by them).
+
+    Snakes eliminated on the same turn have outlasted each other not at all, so tied
+    places are averaged. Over a game a snake's total is ``(outlasted - outlasted_by) /
+    (N - 1)``, which is ``1 - 2 (p - 1) / (N - 1)`` for place ``p``: +1, +1/3, -1/3, -1
+    in a 4-snake game. Each step sums to zero, so self-play has a baseline of 0 in
+    every mode, and in a duel the totals equal :func:`win_loss_reward`'s. Survivors
+    cut off by ``max_turns`` count as tied, with everything decided so far already paid.
+
+    In solo games there is nobody to outlast: dying is simply -1.
+    """
+    newly_dead = prev.alive & ~state.alive
+    if config.solo:
+        return jnp.where(newly_dead, -1.0, 0.0).astype(jnp.float32)
+    gain = jnp.where(state.alive, jnp.sum(newly_dead), 0)
+    loss = jnp.where(newly_dead, jnp.sum(state.alive), 0)
+    return ((gain - loss) / (config.num_snakes - 1)).astype(jnp.float32)
+
+
 class BattlesnakeEnv:
     """A Battlesnake game as a pure-functional JAX environment.
 
