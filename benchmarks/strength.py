@@ -194,11 +194,11 @@ PROGRESS_SECONDS = 15.0  # at most one progress line per this many seconds
 # --dry-run's rough model of one game-turn on one pinned core of a 2.1 GHz Xeon, fitted to
 # mcts-64 ... mcts-24000 against the heuristic with 32 slots: 0.06 ms plus 0.0055 ms per
 # simulation of the matchup's searches, growing by sims / 48000 (bigger trees cost more per
-# node), plus 0.25 ms per DQN move and about 0.15 per PPO move (smaller network). An
-# AlphaZero move costs a PPO-sized network evaluation (the raw network, or the search's
-# root) plus about 0.085 ms more per simulation for the network leaf: PUCT with that
-# network took 85-89 us per simulation batched against DUCT's 4.9 (slinky.mcts). Games
-# against random agents are short. --estimate measures instead.
+# node), plus 0.25 ms per DQN move and about 0.15 per PPO move (smaller network; the same
+# for ppo_modes). An AlphaZero move costs a PPO-sized network evaluation (the raw network,
+# or the search's root) plus about 0.085 ms more per simulation for the network leaf: PUCT
+# with that network took 85-89 us per simulation batched against DUCT's 4.9 (slinky.mcts).
+# Games against random agents are short. --estimate measures instead.
 ROUGH_MS = {
     "fixed": 0.06, "per_sim": 0.0055, "sim_scale": 48000.0, "dqn": 0.25, "ppo": 0.15,
     "az": 0.15, "az_per_sim": 0.085,
@@ -369,7 +369,8 @@ class Matchup:
         ms = ROUGH_MS["fixed"] + ROUGH_MS["per_sim"] * sims * (1 + sims / ROUGH_MS["sim_scale"])
         # Rainbow's network is the DQN's with a wider head: about the same cost per move.
         ms += ROUGH_MS["dqn"] * (kinds.count("dqn") + kinds.count("rainbow"))
-        ms += ROUGH_MS["ppo"] * kinds.count("ppo")
+        # The multi-mode network is PPO's with a small extra input: the same cost per move.
+        ms += ROUGH_MS["ppo"] * (kinds.count("ppo") + kinds.count("ppo_modes"))
         ms += ROUGH_MS["az"] * kinds.count("az")
         ms += ROUGH_MS["az_per_sim"] * sum(x.sims for x in (self.a, self.b) if x.spec.kind == "az")
         random = {"random", "random_legal"} & set(kinds)

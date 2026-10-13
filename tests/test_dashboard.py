@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
+import shutil
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -169,3 +172,255 @@ def test_http_api(runs):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --- ppo_modes: runs that play every game mode -----------------------------------------
+
+
+def share_eval(steps, mode, opponent, score, play="greedy", **extra):
+    """An eval record as ``baselines/ppo_modes.py`` writes it (the fields the dashboard reads)."""
+    return json.dumps(
+        {
+            "type": "eval", "env_steps": steps, "game_mode": mode, "opponent": opponent,
+            "mode": play, "score": score, "score_ci95": 0.04, "num_snakes": 4, **extra,
+        }
+    )  # fmt: skip
+
+
+MODES_CONFIG = {
+    "algorithm": "ppo_modes",
+    "game_modes": ["royale", "duel", "standard", "constrictor"],
+    "total_env_steps": 40_000,
+    "log_every": 32_768,
+    "num_envs": 64,
+    "num_steps": 128,
+}
+
+
+def modes_records():
+    """Train and eval records of a four-mode run at two evaluation points."""
+    lines = []
+    for steps in (32_768, 65_536):
+        lines.append(
+            train(
+                steps,
+                v_loss=0.05,
+                entropy=1.0,
+                value_mean=0.01,
+                games=10,
+                draws=2,
+                mean_game_len=60.0,
+            )
+        )
+        for i, mode in enumerate(MODES_CONFIG["game_modes"]):
+            for opponent, base in (("random_legal", 0.6), ("heuristic", 0.1)):
+                score = base + 0.1 * i + steps / 1e6
+                lines.append(share_eval(steps, mode, opponent, score))
+                lines.append(share_eval(steps, mode, opponent, 0.001, play="sample"))
+    return lines
+
+
+def test_ppo_modes_run_is_recognised_and_its_headline_is_the_first_game_mode(tmp_path):
+    run = write_run(tmp_path, "modes-a", MODES_CONFIG, modes_records())
+    summary = dash.run_summary("modes-a", run)
+    assert summary["algorithm"] == "ppo_modes"
+    # Steps and progress are per game mode: 40,000 rounds up to whole 32,768-step chunks.
+    assert summary["total_steps"] == 65_536 and summary["env_steps"] == 65_536
+    assert summary["finished"]
+    # The headline is the first mode of the config (royale, not "standard" nor the last record
+    # written), against random_legal, greedy, at the latest point.
+    head = summary["last_eval"]
+    assert (head["game_mode"], head["opponent"], head["mode"]) == (
+        "royale",
+        "random_legal",
+        "greedy",
+    )
+    assert head["env_steps"] == 65_536 and head["score"] == pytest.approx(0.6 + 65_536 / 1e6)
+    # Another first mode makes another headline; the run's other modes never are.
+    duel_first = {**MODES_CONFIG, "game_modes": ["duel", "royale"]}
+    run = write_run(tmp_path, "modes-b", duel_first, modes_records())
+    assert dash.run_summary("modes-b", run)["last_eval"]["game_mode"] == "duel"
+
+
+def test_is_headline_eval_with_and_without_a_game_mode():
+    head = {"type": "eval", "opponent": "random_legal", "mode": "greedy", "score": 0.5}
+    # Records without a game mode behave as they did (no config needed).
+    assert dash.is_headline_eval(head) and dash.is_headline_eval(head, {})
+    assert dash.is_headline_eval({"score": 0.5}) and dash.is_headline_eval({"mode": "search"})
+    assert dash.is_headline_eval(head, {"game_modes": ["duel"]})  # (a legacy record)
+    for other in ({"opponent": "heuristic"}, {"mode": "sample"}, {"mode": "raw"}):
+        assert not dash.is_headline_eval({**head, **other})
+    # A record that names a game mode is the headline only for the run's first one ...
+    royale = {**head, "game_mode": "royale"}
+    config = {"game_modes": ["royale", "duel"]}
+    assert dash.is_headline_eval(royale, config)
+    assert not dash.is_headline_eval({**head, "game_mode": "duel"}, config)
+    assert not dash.is_headline_eval({**royale, "opponent": "heuristic"}, config)
+    assert not dash.is_headline_eval({**royale, "mode": "sample"}, config)
+    # ... and, without a config that names the modes, for none.
+    for no_config in (None, {}, {"game_modes": []}, {"game_modes": "royale"}):
+        assert not dash.is_headline_eval(royale, no_config)
+    assert dash.headline_game_mode(config) == "royale" and dash.headline_game_mode({}) is None
+
+
+def test_ppo_modes_http_api(tmp_path):
+    write_run(tmp_path, "modes-a", MODES_CONFIG, modes_records())
+    dash.Handler.roots = [tmp_path]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(base + "/api/runs", timeout=10) as r:
+            (listed,) = json.loads(r.read())
+        assert listed["algorithm"] == "ppo_modes" and listed["last_eval"]["game_mode"] == "royale"
+        run_id = urllib.request.quote(listed["id"])
+        with urllib.request.urlopen(f"{base}/api/metrics?run={run_id}", timeout=10) as r:
+            data = json.loads(r.read())
+        # The page gets the config (to name the headline mode) and every record.
+        assert data["config"]["game_modes"][0] == "royale"
+        assert sum(r["type"] == "eval" for r in data["records"]) == 2 * 4 * 2 * 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# --- The page's chart definitions (pure helpers of dashboard.html, run under node) ----------
+
+
+def page_js(fn: str, data):
+    """``fn(input)`` evaluated after dashboard.html's ``@pure-begin``/``@pure-end`` block."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    page = (ROOT / "baselines" / "dashboard.html").read_text(encoding="utf-8")
+    m = re.search(r"// @pure-begin[^\n]*\n(.*?)// @pure-end", page, re.S)
+    assert m is not None
+    code = (
+        m.group(1)
+        + "\nconst input = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+        + f"\nprocess.stdout.write(JSON.stringify(({fn})(input)));"
+    )
+    out = subprocess.run(
+        [node, "-e", code], input=json.dumps(data), capture_output=True, text=True, timeout=60
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+# Per chart: whether it is shown for the selected runs, and each run's points (x, y, lo, hi).
+CHART_POINTS = """({runs}) => {
+  const datas = runs.map((r) => ({ ...r, evals: r.records.filter((x) => x.type === "eval"),
+                                   train: r.records.filter((x) => x.type === "train") }));
+  const out = {};
+  for (const def of CHARTS) {
+    if (def.visible && !def.visible(datas)) continue;
+    const per = {};
+    datas.forEach((d) => {
+      const pts = pointsOf(def, d);
+      if (pts) per[d.name] = pts.map((p) => [p.x, p.y]);
+    });
+    if (Object.keys(per).length) out[def.id] = { title: def.title, sub: def.sub, runs: per };
+  }
+  return out;
+}"""
+
+
+def page_run(name, config, lines):
+    return {"name": name, "algorithm": dash.algorithm(config), "config": config,
+            "records": [json.loads(line) for line in lines]}  # fmt: skip
+
+
+def legacy_duel_run():
+    """A ppo.py-style duel run: evals carry no game_mode."""
+    lines = [train(32_768, v_loss=0.05, entropy=1.0)]
+    for opponent, score in (("random_legal", 0.97), ("heuristic", 0.12)):
+        for play in ("greedy", "sample"):
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "eval",
+                        "env_steps": 32_768,
+                        "opponent": opponent,
+                        "mode": play,
+                        "score": score if play == "greedy" else 0.5,
+                        "score_ci95": 0.02,
+                    }
+                )  # fmt: skip
+            )
+    return page_run("ppo-duel", {"gae_lambda": 0.95, "algorithm": "ppo"}, lines)
+
+
+def test_page_treats_ppo_modes_as_ppo():
+    algorithms = ["ppo", "ppo_modes", "dqn", "rainbow", "az", "unknown", "pp"]
+    is_ppo = page_js("(names) => names.map((algorithm) => isPPO({ algorithm }))", algorithms)
+    assert dict(zip(algorithms, is_ppo, strict=True)) == {
+        "ppo": True, "ppo_modes": True, "dqn": False, "rainbow": False, "az": False,
+        "unknown": False, "pp": False,
+    }  # fmt: skip
+    assert page_js("(x) => isAZ({ algorithm: x })", "az") is True
+    assert page_js("(x) => isAZ({ algorithm: x })", "ppo_modes") is False
+
+
+def test_page_charts_per_game_mode():
+    modes_run = page_run("modes-a", MODES_CONFIG, modes_records())
+    legacy = legacy_duel_run()
+    shown = page_js(CHART_POINTS, {"runs": [modes_run]})
+    # One chart per game mode and opponent, for the greedy records of that mode only ...
+    for i, mode in enumerate(MODES_CONFIG["game_modes"]):
+        for opponent, base in (("random_legal", 0.6), ("heuristic", 0.1)):
+            chart = shown[f"eval-{opponent}-{mode}"]
+            assert chart["title"] == f"Share vs {opponent}, {mode}"
+            assert chart["runs"] == {
+                "modes-a": [
+                    [32_768, base + 0.1 * i + 0.032768],
+                    [65_536, base + 0.1 * i + 0.065536],
+                ]
+            }
+    # ... and none of the charts for runs without a game mode shows its records (those
+    # charts match game_mode == null), and its loss chart is PPO's: absent.
+    assert not [k for k in shown if k in ("eval-random_legal", "eval-heuristic", "loss")]
+    for k in ("vloss", "q", "entropy", "len", "draws"):
+        assert shown[k]["runs"]["modes-a"], k
+    # The share subtitle explains ties (a draw is not just 1/2 in a 4-snake game).
+    sub = shown["eval-random_legal-standard"]["sub"]
+    assert "1/k" in sub and "Parity is 1/N" in sub
+
+    # A mode nobody logged has no chart (a specialist shows its own mode only).
+    specialist = page_run(
+        "modes-royale",
+        {**MODES_CONFIG, "game_modes": ["royale"]},
+        [
+            share_eval(32_768, "royale", "random_legal", 0.7),
+            share_eval(32_768, "royale", "heuristic", 0.2),
+        ],
+    )
+    shown = page_js(CHART_POINTS, {"runs": [specialist]})
+    assert {k for k in shown if k.startswith("eval-")} == {
+        "eval-random_legal-royale",
+        "eval-heuristic-royale",
+    }
+
+    # A legacy duel run is a duel: it joins the duel charts as a reference, once a selected run
+    # logs game_mode, and keeps its own charts. Its sampled evals are not plotted.
+    shown = page_js(CHART_POINTS, {"runs": [modes_run, legacy]})
+    assert set(shown["eval-random_legal-duel"]["runs"]) == {"modes-a", "ppo-duel"}
+    assert shown["eval-random_legal-duel"]["runs"]["ppo-duel"] == [[32_768, 0.97]]
+    assert shown["eval-heuristic-duel"]["runs"]["ppo-duel"] == [[32_768, 0.12]]
+    for mode in ("standard", "royale", "constrictor"):  # other modes: the modes run alone
+        assert set(shown[f"eval-heuristic-{mode}"]["runs"]) == {"modes-a"}
+    assert set(shown["eval-random_legal"]["runs"]) == {"ppo-duel"}
+    assert shown["eval-random_legal"]["runs"]["ppo-duel"] == [[32_768, 0.97]]
+    assert shown["eval-heuristic"]["runs"]["ppo-duel"] == [[32_768, 0.12]]
+
+    # With no run that logs game_mode selected, the page is what it was: no per-mode charts.
+    shown = page_js(CHART_POINTS, {"runs": [legacy]})
+    assert not [k for k in shown if k.endswith(tuple(MODES_CONFIG["game_modes"]))]
+    assert "loss" not in shown  # PPO's loss is not comparable: it has the value loss chart
+
+
+def test_page_markers_and_headline_fact():
+    page = (ROOT / "baselines" / "dashboard.html").read_text(encoding="utf-8")
+    assert page.count("// @pure-begin") == 1 and page.count("// @pure-end") == 1
+    assert 'String(d.algorithm).startsWith("ppo")' in page  # ppo and ppo_modes
+    # The run card names the game mode of the headline eval it shows.
+    assert "ev.game_mode" in page

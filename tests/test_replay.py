@@ -496,3 +496,43 @@ def test_cli_writes_json_and_html(tmp_path, capsys):
     assert text.startswith("<title>") and len(_embedded(text)["games"][0]["seats"]) == 3
     with pytest.raises(SystemExit):
         replay_mod.main(["--a", "random"])
+
+
+def test_cli_game_mode(tmp_path, capsys):
+    """--game-mode plays a leaderboard mode: its ruleset and map, the agents' count as snakes."""
+    out = tmp_path / "mode.json"
+
+    def seats(*args: str) -> list[str]:
+        replay_mod.main([*args, "--games", "1", "--max-turns", "4", "--out", str(out)])
+        return json.loads(out.read_text())["games"][0]["seats"]
+
+    four = ["random_legal", "random", "random", "random"]
+    assert len(seats("--game-mode", "royale", "--agents", ",".join(four), "--rotate")) == 4
+    data = json.loads(out.read_text())
+    assert (data["ruleset"], data["map"]) == ("royale", "royale")
+    assert data["board"] == {"width": 11, "height": 11}
+    assert len(seats("--game-mode", "duel", "--a", "random_legal", "--b", "random")) == 2
+    assert json.loads(out.read_text())["ruleset"] == "standard"
+    assert len(seats("--game-mode", "constrictor", "--agents", ",".join(four[:3]))) == 3
+    assert json.loads(out.read_text())["ruleset"] == "constrictor"
+    assert (
+        len(seats("--game-mode", "standard", "--snakes", "3", "--agents", "random,random,random"))
+        == 3
+    )
+    # The mode fixes the rules, so conflicting flags and impossible snake counts are refused.
+    capsys.readouterr()
+    for args in (
+        ["--ruleset", "constrictor"], ["--map", "empty"], ["--width", "7", "--height", "7"]
+    ):  # fmt: skip
+        with pytest.raises(SystemExit):
+            replay_mod.main(["--game-mode", "royale", *args, "--a", "random", "--b", "random",
+                             "--out", str(out)])  # fmt: skip
+        assert "--game-mode sets the ruleset, map and board" in capsys.readouterr().err
+    with pytest.raises(SystemExit, match="cannot have 3 snakes"):
+        replay_mod.main(
+            ["--game-mode", "duel", "--agents", "random,random,random", "--out", str(out)]
+        )
+    with pytest.raises(SystemExit, match="cannot have 2 snakes"):  # two agents, two seats
+        replay_mod.main(
+            ["--game-mode", "standard", "--a", "random", "--b", "random", "--out", str(out)]
+        )

@@ -12,6 +12,8 @@ or from the command line (agents are names from :mod:`slinky.agents`)::
         --out replays/heuristic-vs-dqn.json --html replays/heuristic-vs-dqn.html
     python -m slinky.replay --agents heuristic,random_legal,random_legal,random --games 4 \\
         --html replays/four-way.html
+    python -m slinky.replay --game-mode royale --rotate --games 8 --html replays/royale.html \\
+        --agents ppo_modes,ppo_modes:runs/ppo-modes-royale-seed0,heuristic,heuristic
 
 The viewer (``viewer.html``, inlined by :func:`render_html`) needs no server and
 no network beyond Google Fonts. It can also open other replay files.
@@ -70,6 +72,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from slinky import modes
 from slinky.agents import Agent, make_agent, make_env
 from slinky.engine_json import countdown_to_body
 from slinky.env import BattlesnakeEnv
@@ -375,7 +378,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="python -m slinky.replay",
         description="Play games between agents and save them as a replay (JSON and/or HTML).",
         epilog="Agents: random_legal, random, heuristic, dqn, dqn:<run dir>, "
-        "ppo[-greedy|-sample], ppo:<run dir>, rainbow, rainbow:<run dir>, "
+        "ppo[-greedy|-sample], ppo:<run dir>, "
+        "ppo_modes[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>], "
+        "rainbow, rainbow:<run dir>, "
         "az-<n>[:<run dir>] (az-0: the raw network), "
         "mcts-<n>[-shorthand...][:field=value...], e.g. mcts-256-rm or "
         "mcts-128:exploration=0.5 (see slinky.agents).",
@@ -392,6 +397,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--height", type=int, default=11)
     p.add_argument("--ruleset", default="standard", choices=[r.value for r in Ruleset])
     p.add_argument("--map", default="standard")
+    p.add_argument(
+        "--game-mode",
+        choices=modes.MODE_NAMES,
+        help="play a leaderboard mode (slinky.modes.mode_config): its ruleset and map on the "
+        "11x11 board; the snakes are --snakes or the agents given. Replaces --ruleset, --map, "
+        "--width and --height",
+    )
     p.add_argument("--out", type=Path, help="write the replay JSON here")
     p.add_argument("--html", type=Path, help="write the viewer page here")
     p.add_argument(
@@ -404,6 +416,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("name two agents with --a and --b, or one per seat with --agents")
     if not args.out and not args.html:
         p.error("nothing to write: pass --out and/or --html")
+    board = (args.ruleset, args.map, args.width, args.height)
+    if args.game_mode and board != ("standard", "standard", 11, 11):
+        p.error(
+            "--game-mode sets the ruleset, map and board: "
+            "drop --ruleset, --map, --width and --height"
+        )
     return args
 
 
@@ -415,13 +433,20 @@ def main(argv: list[str] | None = None) -> None:
         rotate: bool | None = args.rotate
     else:
         agents, snakes, rotate = [args.a, args.b], args.snakes or 2, None
-    config = GameConfig(
-        width=args.width,
-        height=args.height,
-        num_snakes=snakes,
-        ruleset=Ruleset(args.ruleset),
-        map=args.map,
-    )
+    try:
+        config = (
+            modes.mode_config(args.game_mode, snakes)
+            if args.game_mode
+            else GameConfig(
+                width=args.width,
+                height=args.height,
+                num_snakes=snakes,
+                ruleset=Ruleset(args.ruleset),
+                map=args.map,
+            )
+        )
+    except ValueError as e:
+        sys.exit(f"error: {e}")
     try:
         replay = record_games(
             config, agents, jax.random.key(args.seed), args.games, args.max_turns, rotate

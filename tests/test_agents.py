@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from slinky import agents as agents_mod
-from slinky import mcts
+from slinky import mcts, modes
 from slinky.agents import (
     MCTS_SHORTHANDS,
     AgentSpec,
@@ -21,6 +24,7 @@ from slinky.agents import (
     mcts_name,
     parse_agent,
 )
+from slinky.observations import CHANNEL_NAMES
 from slinky.replay import record_games
 from slinky.types import GameConfig
 
@@ -57,6 +61,25 @@ CANONICAL = {
     "dqn:baselines/checkpoints/dqn-duel-seed0": "dqn",
     "dqn:/nonexistent/run": "dqn:/nonexistent/run",
     "rainbow": "rainbow",
+    "ppo_modes": "ppo_modes",
+    "ppo_modes-greedy": "ppo_modes",  # greedy is the default
+    "ppo_modes-sample": "ppo_modes-sample",
+    f"ppo_modes:{agents_mod.DEFAULT_PPO_MODES_CHECKPOINT}": "ppo_modes",
+    "ppo_modes:game_mode=duel": "ppo_modes:game_mode=duel",
+    "ppo_modes:/nonexistent/run": "ppo_modes:/nonexistent/run",
+    # Items in any order (the run dir first), as for az; the game mode goes last.
+    "ppo_modes-sample:game_mode=royale:/nonexistent/run": (
+        "ppo_modes-sample:/nonexistent/run:game_mode=royale"
+    ),
+    " ppo_modes:/nonexistent/run: game_mode = standard ": (
+        "ppo_modes:/nonexistent/run:game_mode=standard"
+    ),
+    # A snapshot (the trainer's params-<steps>.npz) goes between the run dir and the game mode.
+    "ppo_modes:snapshot=1310720": "ppo_modes:snapshot=1310720",
+    "ppo_modes-sample:game_mode=duel:snapshot=5:/nonexistent/run": (
+        "ppo_modes-sample:/nonexistent/run:snapshot=5:game_mode=duel"
+    ),
+    "ppo_modes:/nonexistent/run: snapshot = 0042 ": "ppo_modes:/nonexistent/run:snapshot=42",
     # Absolute: a relative path is looked up in the repository only if it exists.
     f"rainbow:{agents_mod.DEFAULT_RAINBOW_CHECKPOINT}": "rainbow",
     "rainbow:/nonexistent/run": "rainbow:/nonexistent/run",
@@ -161,6 +184,26 @@ def test_format_number():
         ("ppo-bogus", "unknown ppo mode 'bogus'"),
         ("ppo-greedy-sample", "unknown ppo mode 'greedy-sample'"),
         ("ppox", "unknown agent"),
+        ("ppo-modes", "unknown ppo mode 'modes'"),
+        ("ppo_modesx", "unknown agent"),
+        ("ppo_modes:", "empty item"),
+        ("ppo_modes::game_mode=duel", "empty item"),
+        ("ppo_modes@seed0", "write ppo_modes:<run dir>"),
+        ("ppo_modes-bogus", "unknown ppo_modes play mode 'bogus'"),
+        ("ppo_modes-greedy-sample", "unknown ppo_modes play mode 'greedy-sample'"),
+        ("ppo_modes:/a:/b", "two run dirs"),
+        ("ppo_modes:game_mode=lava", "unknown game mode 'lava'"),
+        ("ppo_modes:game_mode=", "unknown game mode ''"),
+        ("ppo_modes:mode=duel", "unknown ppo_modes option 'mode'"),
+        ("ppo_modes:hidden=16", "unknown ppo_modes option 'hidden'"),
+        ("ppo_modes:game_mode=duel:game_mode=royale", "both set game_mode"),
+        ("ppo_modes:snapshot=5:snapshot=6", "'snapshot=5' and 'snapshot=6' both set snapshot"),
+        ("ppo_modes:snapshot=0", "snapshot must be a positive whole number"),
+        ("ppo_modes:snapshot=", "snapshot must be a positive whole number"),
+        ("ppo_modes:snapshot=-5", "snapshot must be a positive whole number"),
+        ("ppo_modes:snapshot=1.5", "snapshot must be a positive whole number"),
+        ("ppo_modes:snapshot=1_000", "snapshot must be a positive whole number"),
+        ("ppo_modes:snapshot=last", "snapshot must be a positive whole number"),
         ("rainbow:", "write rainbow:<run dir>"),
         ("rainbow@seed0", "write rainbow:<run dir>"),
         ("az", "bad az agent name"),
@@ -415,3 +458,371 @@ def test_mcts_agents():
     r = record_games(CONFIG, [agent, "random_legal"], jax.random.key(0), 1, max_turns=2)
     assert len(r["games"][0]["frames"]) >= 2
     assert r["agents"] == ["mcts-4-depth2", "random_legal"]
+
+
+# --- ppo_modes: the multi-mode PPO baseline ------------------------------------------
+
+TINY_MODES = dict(conv_channels=(4,), conv_strides=(2,), hidden=16)
+
+
+def _tiny_modes_run(run_dir: Path, game_modes=modes.MODE_NAMES, seed: int = 0, **kw) -> Path:
+    """A saved ``ppo_modes`` run with a tiny network and *non-zero* ``feat/w`` and policy head.
+
+    (A fresh network has zeros in ``feat/w``, so its features would change nothing and a
+    registry agent that dropped them could not be told from a correct one.)
+    """
+    pm = agents_mod.load_ppo_modes_module()
+    cfg = pm.ModesConfig(game_modes=tuple(game_modes), **TINY_MODES, **kw)
+    params = pm.init_network(jax.random.key(seed), cfg)
+    k_feat, k_policy = jax.random.split(jax.random.key(seed + 1))
+    params["policy"] = {
+        **params["policy"],
+        "w": jax.random.normal(k_policy, params["policy"]["w"].shape) * 0.3,
+    }
+    if "feat" in params:
+        params["feat"] = {"w": jax.random.normal(k_feat, params["feat"]["w"].shape) * 0.5}
+    run_dir.mkdir()
+    pm.save_config(str(run_dir), cfg)
+    pm.save_checkpoint(str(run_dir), params)
+    return run_dir
+
+
+def test_ppo_modes_names():
+    checkpoint = agents_mod.DEFAULT_PPO_MODES_CHECKPOINT.resolve()
+    spec = parse_agent("ppo_modes")
+    assert (spec.name, spec.kind, spec.checkpoint) == ("ppo_modes", "ppo_modes", checkpoint)
+    assert spec.greedy is True and spec.game_mode is None
+    assert checkpoint.name == "ppo-modes-seed0"
+    assert agents_mod.BASELINES["ppo_modes"][1] == "baselines_ppo_modes"
+    # The default play mode and the default checkpoint are left out of the canonical name.
+    assert parse_agent("ppo_modes-greedy") == spec
+    assert parse_agent(f"ppo_modes-greedy:{checkpoint}") == spec
+    sample = parse_agent("ppo_modes-sample")
+    assert sample.name == "ppo_modes-sample" and sample.greedy is False
+    told = parse_agent("ppo_modes:/nonexistent/run:game_mode=duel")
+    assert told.game_mode == "duel" and told.checkpoint == Path("/nonexistent/run")
+    assert told.name == "ppo_modes:/nonexistent/run:game_mode=duel"
+    assert parse_agent("ppo_modes:game_mode=royale").name == "ppo_modes:game_mode=royale"
+    for s in (spec, sample, told, parse_agent("ppo_modes-sample:game_mode=constrictor")):
+        assert parse_agent(s.name) == s  # canonical names read back as the same agent
+    # Distinct agents, distinct names: the told mode and the play mode are part of the name.
+    names = {parse_agent(f"ppo_modes{h}{t}").name for h in ("", "-sample") for t in
+             ("", *(f":game_mode={m}" for m in modes.MODE_NAMES))}  # fmt: skip
+    assert len(names) == 2 * (1 + len(modes.MODE_NAMES))
+    # The name belongs to this kind alone, and the other PPO names mean what they did.
+    assert parse_agent("ppo").kind == "ppo" and parse_agent("ppo").game_mode is None
+    assert parse_agent("ppo-sample:/nonexistent/run").kind == "ppo"
+    assert parse_agent("ppo:/nonexistent/run").name == "ppo:/nonexistent/run"
+
+
+def test_ppo_modes_without_its_default_checkpoint(tmp_path, monkeypatch):
+    script, module, _ = agents_mod.BASELINES["ppo_modes"]
+    monkeypatch.setitem(agents_mod.BASELINES, "ppo_modes", (script, module, tmp_path / "missing"))
+    spec = parse_agent("ppo_modes")
+    assert spec.name == "ppo_modes" and spec.checkpoint == (tmp_path / "missing").resolve()
+    # A clear error, naming the missing directory, from every way in.
+    for call in (
+        lambda: make_agent("ppo_modes", GameConfig(max_turns=7)),  # a config no test caches
+        lambda: make_agent("ppo_modes:game_mode=duel", GameConfig(max_turns=7)),
+        lambda: agent_config(spec),
+        lambda: check_game(spec, CONFIG),
+    ):
+        with pytest.raises(FileNotFoundError, match="no multi-mode PPO checkpoint in .*missing"):
+            call()
+
+
+def test_ppo_modes_agent_config(tmp_path):
+    ppo_run = _tiny_ppo_checkpoint(tmp_path / "ppo-run")
+    run = _tiny_modes_run(tmp_path / "modes-run")
+    cfg = agent_config(parse_agent(f"ppo_modes:{run}"))
+    digest = hashlib.sha256((run / "params.npz").read_bytes()).hexdigest()[:16]
+    assert cfg["type"] == "ppo_modes" and cfg["greedy"] is True and cfg["game_mode"] is None
+    assert cfg["params_sha256"] == digest and cfg["checkpoint"] == str(run.resolve())
+    assert cfg["network"]["hidden"] == 16 and cfg["network"]["game_modes"] == list(modes.MODE_NAMES)
+    assert json.loads(json.dumps(cfg)) == cfg
+    # The told mode and the play mode are part of the identity; the parameters are shared.
+    duel = agent_config(parse_agent(f"ppo_modes:{run}:game_mode=duel"))
+    sample = agent_config(parse_agent(f"ppo_modes-sample:{run}"))
+    assert duel["game_mode"] == "duel" and duel != cfg
+    assert sample["greedy"] is False and sample != cfg
+    assert {c["params_sha256"] for c in (cfg, duel, sample)} == {digest}
+    assert {c["game_mode"] for c in (cfg, sample)} == {None}
+
+    # No other kind has the key, and their identities are exactly what they were.
+    ppo_cfg = agent_config(parse_agent(f"ppo:{ppo_run}"))
+    ppo = agents_mod.load_ppo_module()
+    assert ppo_cfg == {
+        "type": "ppo",
+        "checkpoint": str(ppo_run.resolve()),
+        "greedy": True,
+        "params_sha256": hashlib.sha256((ppo_run / "params.npz").read_bytes()).hexdigest()[:16],
+        "network": json.loads(json.dumps(dataclasses.asdict(ppo.load_config(str(ppo_run))))),
+    }
+    assert set(ppo_cfg) == {"type", "checkpoint", "greedy", "params_sha256", "network"}
+    az_run = _tiny_az_checkpoint(tmp_path / "az-run")
+    az_keys = {"type", "checkpoint", "greedy", "params_sha256", "network", "simulations", "search"}
+    for name in (f"az-0:{az_run}", f"az-2:{az_run}"):
+        assert set(agent_config(parse_agent(name))) == az_keys
+    for name in ("random_legal", "random", "heuristic", "mcts-4"):
+        assert "game_mode" not in agent_config(parse_agent(name))
+
+
+def test_ppo_modes_snapshots(tmp_path, monkeypatch):
+    """``:snapshot=<steps>`` plays ``params-<steps>.npz``: its parameters, hash and name."""
+    pm = agents_mod.load_ppo_modes_module()
+    run = _tiny_modes_run(tmp_path / "run", seed=0)
+    cfg = pm.load_config(str(run))
+    other = pm.init_network(jax.random.key(5), cfg)  # a snapshot differing from the final params
+    other["policy"] = {
+        **other["policy"],
+        "w": jax.random.normal(jax.random.key(6), other["policy"]["w"].shape) * 0.3,
+    }
+    other["feat"] = {"w": jax.random.normal(jax.random.key(7), other["feat"]["w"].shape) * 0.5}
+    pm.save_checkpoint(str(run), other, pm.snapshot_name(1024))
+
+    spec = parse_agent(f"ppo_modes:{run}:snapshot=1024")
+    assert spec.snapshot == 1024 and spec.name == f"ppo_modes:{run}:snapshot=1024"
+    assert parse_agent(spec.name) == spec and parse_agent(f"ppo_modes:{run}").snapshot is None
+    # The file is the trainer's snapshot file, and the identity follows it.
+    assert agents_mod._checkpoint_files(spec)[0] == run / pm.snapshot_name(1024)
+    assert agents_mod._checkpoint_files(parse_agent(f"ppo_modes:{run}"))[0] == run / "params.npz"
+    final, snap = agent_config(parse_agent(f"ppo_modes:{run}")), agent_config(spec)
+    digest = hashlib.sha256((run / "params-1024.npz").read_bytes()).hexdigest()[:16]
+    assert snap["params_sha256"] == digest != final["params_sha256"]
+    assert (snap["snapshot"], final["snapshot"]) == (1024, None)
+    assert {k: v for k, v in snap.items() if k not in ("params_sha256", "snapshot")} == {
+        k: v for k, v in final.items() if k not in ("params_sha256", "snapshot")
+    }
+    assert agent_config(parse_agent(f"ppo_modes:{run}:snapshot=1024:game_mode=duel")) != snap
+
+    # The agent plays the snapshot's parameters, not the final ones.
+    network, recorded = _recording_network(pm, monkeypatch)
+    params = {
+        name: pm.load_params(str(run), cfg, name=name)
+        for name in ("params.npz", pm.snapshot_name(1024))
+    }
+    group = pm.make_groups(cfg)[0]
+    state, ts = _states_of(group.game, {6})[0]
+    states = jax.tree.map(lambda x: x[None], state)
+    boards, feats, _ = pm.group_inputs(cfg, group, states)
+    want = {n: np.asarray(network(p, boards, feats, cfg)[0])[0] for n, p in params.items()}
+    assert not np.allclose(*want.values(), atol=1e-3)  # the two sets of parameters differ
+    for given, name in ((f"ppo_modes:{run}:snapshot=1024", pm.snapshot_name(1024)),
+                        (f"ppo_modes:{run}", "params.npz")):  # fmt: skip
+        make_agent(given, group.game).policy(jax.random.key(0), state, ts)
+        np.testing.assert_allclose(recorded[-1], want[name], rtol=1e-4, atol=1e-5)
+    described = make_agent(spec.name, group.game).description
+    assert (
+        "snapshot 1024" in described
+        and "snapshot" not in make_agent(f"ppo_modes:{run}", group.game).description
+    )
+
+    # A run directory that has only the snapshots plays them; a missing one is a clear error.
+    only = tmp_path / "only"
+    only.mkdir()
+    for name in ("config.json", pm.snapshot_name(1024)):
+        (only / name).write_bytes((run / name).read_bytes())
+    assert make_agent(f"ppo_modes:{only}:snapshot=1024", group.game).needs_obs
+    with pytest.raises(FileNotFoundError, match="no multi-mode PPO checkpoint in .*only"):
+        agent_config(parse_agent(f"ppo_modes:{only}"))  # the final params.npz is not there
+    for call in (
+        lambda: agent_config(parse_agent(f"ppo_modes:{run}:snapshot=7")),
+        lambda: check_game(parse_agent(f"ppo_modes:{run}:snapshot=7"), CONFIG),
+        lambda: make_agent(f"ppo_modes:{run}:snapshot=7", GameConfig(max_turns=9)),
+    ):
+        with pytest.raises(FileNotFoundError, match=r"expected params-7\.npz and config\.json"):
+            call()
+
+
+def test_ppo_modes_runs_and_other_runs_are_not_mixed_up(tmp_path):
+    run = _tiny_modes_run(tmp_path / "modes-run")
+    ppo_run = _tiny_ppo_checkpoint(tmp_path / "ppo-run")
+    az_run = _tiny_az_checkpoint(tmp_path / "az-run")
+    # ppo:<ppo_modes run> (and every other kind) is refused before anything is built ...
+    for kind in ("dqn", "ppo", "ppo-sample", "rainbow"):
+        with pytest.raises(ValueError, match="is a ppo_modes run; write ppo_modes:<run dir>"):
+            check_game(parse_agent(f"{kind}:{run}"), CONFIG)
+    with pytest.raises(ValueError, match="is a ppo_modes run; write ppo_modes:<run dir>"):
+        make_agent(f"ppo:{run}", CONFIG)
+    with pytest.raises(ValueError, match="is a ppo_modes run; write ppo_modes:<run dir>"):
+        make_agent(f"az-0:{run}", CONFIG)
+    # ... and a ppo_modes agent refuses the runs of the others.
+    with pytest.raises(ValueError, match="not a ppo_modes run"):
+        make_agent(f"ppo_modes:{ppo_run}", CONFIG)
+    with pytest.raises(ValueError, match="is an az run; write az-<n>:<run dir>"):
+        check_game(parse_agent(f"ppo_modes:{az_run}"), CONFIG)
+    with pytest.raises(FileNotFoundError, match="no multi-mode PPO checkpoint"):
+        make_agent("ppo_modes:/nonexistent/run", CONFIG)
+
+
+def test_ppo_modes_check_game(tmp_path):
+    general = _tiny_modes_run(tmp_path / "general")
+    royale = _tiny_modes_run(tmp_path / "royale", game_modes=("royale",))
+    pair = _tiny_modes_run(tmp_path / "pair", game_modes=("duel", "constrictor"))
+    # A generalist plays every mode, and is told the mode of the game it plays.
+    for mode in modes.MODE_NAMES:
+        game = modes.mode_config(mode)
+        agent = make_agent(f"ppo_modes:{general}", game)
+        assert agent.needs_obs and f"told {mode}" in agent.description
+        assert make_agent(f"ppo_modes:{general}", game) is agent  # cached per (name, game)
+    assert make_agent(f"ppo_modes:{general}", modes.mode_config("duel")) is not make_agent(
+        f"ppo_modes:{general}", modes.mode_config("standard")
+    )  # one policy, so one compile, per mode
+    # ... also with 3 snakes (still standard) and other snake counts of a mode.
+    for game in (GameConfig(num_snakes=3), modes.mode_config("constrictor", 2)):
+        check_game(parse_agent(f"ppo_modes:{general}"), game)
+
+    # A specialist is refused every other mode's game ...
+    check_game(parse_agent(f"ppo_modes:{royale}"), modes.mode_config("royale"))
+    for mode in ("standard", "duel", "constrictor"):
+        with pytest.raises(ValueError, match=rf"trained on royale only and can't play a {mode}"):
+            check_game(parse_agent(f"ppo_modes:{royale}"), modes.mode_config(mode))
+    with pytest.raises(ValueError, match="can't play a standard game; write :game_mode="):
+        make_agent(f"ppo_modes:{pair}", modes.mode_config("standard"))
+    check_game(parse_agent(f"ppo_modes:{pair}"), modes.mode_config("constrictor"))
+    # ... unless it is told its own mode, the cross-mode matrix.
+    told_royale = parse_agent(f"ppo_modes:{royale}:game_mode=royale")
+    for mode in ("standard", "duel", "constrictor"):
+        check_game(told_royale, modes.mode_config(mode))
+    cross = make_agent(f"ppo_modes:{royale}:game_mode=royale", modes.mode_config("duel"))
+    assert (
+        cross.name == f"ppo_modes:{royale}:game_mode=royale" and "told royale" in cross.description
+    )
+    # A told mode outside the run's modes is refused whatever the game is.
+    for game in (modes.mode_config("royale"), modes.mode_config("duel")):
+        with pytest.raises(ValueError, match="can't be told game_mode=standard"):
+            check_game(parse_agent(f"ppo_modes:{royale}:game_mode=standard"), game)
+    with pytest.raises(ValueError, match="can't be told game_mode=royale"):
+        check_game(parse_agent(f"ppo_modes:{pair}:game_mode=royale"), modes.mode_config("duel"))
+    # The wrong-mode ablation: a generalist told another mode.
+    check_game(parse_agent(f"ppo_modes:{general}:game_mode=duel"), modes.mode_config("standard"))
+
+    # Games outside the four modes, and other board sizes, are refused.
+    with pytest.raises(ValueError, match="no game mode for ruleset='standard' map='empty'"):
+        check_game(parse_agent(f"ppo_modes:{general}"), GameConfig(map="empty"))
+    check_game(parse_agent(f"ppo_modes:{general}:game_mode=standard"), GameConfig(map="empty"))
+    with pytest.raises(ValueError, match="trained on 11x11"):
+        make_agent(f"ppo_modes:{general}", GameConfig(width=7, height=7))
+    with pytest.raises(ValueError, match="no game mode"):
+        make_agent(f"ppo_modes:{general}", GameConfig(num_snakes=1))
+
+
+FOOD = CHANNEL_NAMES.index("food")
+# Turn 0, a few turns in, and (royale) past the first shrink at turn 25: so the turn, the
+# shrink phase and the share of opponents alive take different values.
+STATE_TURNS = (0, 6, 40)
+
+
+def _states_of(game, turns):
+    """The ``(state, timestep)`` of one game (random legal play) at each of ``turns``."""
+    env = agents_mod.make_env(game, True)
+    step = jax.jit(env.step)
+    random_legal = make_agent("random_legal", game).policy
+    state, ts = jax.jit(env.reset)(jax.random.key(7))
+    out = []
+    for t in range(max(turns) + 1):
+        if t in turns:
+            out.append((state, ts))
+        key = jax.random.key(100 + t)
+        state, ts = step(key, state, random_legal(key, state, ts))
+    return out
+
+
+def _recording_network(pm, monkeypatch):
+    """Wrap ``pm.network`` (which the policies look up at call time) to record the logits.
+
+    Returns ``(original network, list of the logits of every call)``. Only calls that run
+    un-jitted record concrete values, so use it with a policy called directly.
+    """
+    original, recorded = pm.network, []
+
+    def recording(params, obs, feats, cfg):
+        out = original(params, obs, feats, cfg)
+        recorded.append(np.asarray(out[0]))
+        return out
+
+    monkeypatch.setattr(pm, "network", recording)
+    return original, recorded
+
+
+def test_ppo_modes_logits_equal_the_trainers_network(tmp_path, monkeypatch):
+    """The registry agent computes what the trainer's network does on the same states.
+
+    The trainer's inputs come from ``group_inputs`` (egocentric boards with the food
+    hidden in constrictor, and the mode features) and its network from ``network``; the
+    agent reaches the same functions through ``make_policy``. The agent's logits are
+    recorded by wrapping ``network`` while its (un-jitted) policy runs, so what is compared
+    is the logits themselves, not only the moves made from them.
+    """
+    pm = agents_mod.load_ppo_modes_module()
+    run = _tiny_modes_run(tmp_path / "run")
+    cfg = pm.load_config(str(run))
+    params = pm.load_params(str(run), cfg)
+    network, recorded = _recording_network(pm, monkeypatch)
+    for group in pm.make_groups(cfg):
+        game, mode = group.game, group.name
+        greedy = make_agent(f"ppo_modes:{run}", game)
+        sample = make_agent(f"ppo_modes-sample:{run}", game)
+        pairs = _states_of(game, STATE_TURNS)
+        states = jax.tree.map(lambda *xs: jnp.stack(xs), *(s for s, _ in pairs))
+        boards, feats, mask = pm.group_inputs(cfg, group, states)  # the trainer's inputs
+        expected = np.asarray(network(params, boards, feats, cfg)[0])  # [E, N, 4]
+        assert len({tuple(np.round(f[0, 4:], 4)) for f in np.asarray(feats)}) > 1  # they vary
+        for i, (state, ts) in enumerate(pairs):
+            del recorded[:]
+            actions = np.asarray(greedy.policy(jax.random.key(i), state, ts))
+            np.testing.assert_allclose(recorded[-1], expected[i], rtol=1e-4, atol=1e-5)
+            masked = np.where(np.asarray(mask[i]), expected[i], -np.inf)
+            np.testing.assert_array_equal(actions, masked.argmax(axis=-1))
+            for k in range(4):  # sampled play draws from the same distribution, same keys
+                key = jax.random.key(10 * i + k)
+                want = pm.sample_actions(key, jnp.asarray(expected[i]), mask[i])
+                np.testing.assert_array_equal(sample.policy(key, state, ts), want)
+
+        # The check would pass if the agent dropped the features or kept the food: it must not.
+        blind = np.asarray(network(params, boards, jnp.zeros_like(feats), cfg)[0])
+        assert not np.allclose(blind, expected, atol=1e-3), mode  # the features matter
+        raw = jnp.stack([ts.obs for _, ts in pairs])  # the boards as the env reports them
+        assert float(jnp.abs(raw[..., FOOD]).max()) > 0.0, mode  # (food is on every board)
+        if mode == "constrictor":
+            assert float(jnp.abs(boards[..., FOOD]).max()) == 0.0  # hidden from the network
+            shown = np.asarray(network(params, raw, feats, cfg)[0])
+            assert not np.allclose(shown, expected, atol=1e-3)  # and hiding it matters
+        else:
+            np.testing.assert_array_equal(np.asarray(boards), np.asarray(raw))
+
+
+def test_ppo_modes_food_follows_the_game_and_features_the_told_mode(tmp_path, monkeypatch):
+    """The food follows the game's ruleset and the features the told mode, never the other way."""
+    pm = agents_mod.load_ppo_modes_module()
+    run = _tiny_modes_run(tmp_path / "run")
+    cfg = pm.load_config(str(run))
+    params = pm.load_params(str(run), cfg)
+    network, recorded = _recording_network(pm, monkeypatch)
+    for game_mode, told in (("standard", "constrictor"), ("constrictor", "standard")):
+        game = cfg.games[game_mode]
+        state, ts = _states_of(game, {5})[0]
+        agent = make_agent(f"ppo_modes:{run}:game_mode={told}", game)
+        assert f"told {told}" in agent.description
+        agent.policy(jax.random.key(0), state, ts)
+        # Hidden exactly when the game is constrictor; the features say the told mode.
+        board = ts.obs.at[..., FOOD].set(0.0) if game_mode == "constrictor" else ts.obs
+        assert float(jnp.abs(ts.obs[..., FOOD]).max()) > 0.0
+        want = np.asarray(network(params, board, modes.mode_features(state, game, told), cfg)[0])
+        np.testing.assert_allclose(recorded[-1], want, rtol=1e-4, atol=1e-5)
+        # The told mode is not the game's own: the logits differ from an untold agent's.
+        own = make_agent(f"ppo_modes:{run}", game)
+        own.policy(jax.random.key(0), state, ts)
+        assert not np.allclose(recorded[-1], want, atol=1e-3)
+        assert own.name != agent.name and own.policy is not agent.policy
+
+
+def test_ppo_modes_agent_plays_and_records(tmp_path):
+    run = _tiny_modes_run(tmp_path / "run")
+    for mode in ("duel", "royale"):
+        game = dataclasses.replace(modes.mode_config(mode), max_turns=8)
+        names = [f"ppo_modes:{run}"] + ["heuristic"] * (game.num_snakes - 1)
+        r = record_games(game, names, jax.random.key(0), 2, max_turns=8, rotate=True)
+        assert r["games"][0]["seats"][0] == f"ppo_modes:{run}"
+        assert r["ruleset"] == game.ruleset.value and r["map"] == game.map
+        assert all(len(g["frames"]) > 1 for g in r["games"])

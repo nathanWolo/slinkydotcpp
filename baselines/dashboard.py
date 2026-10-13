@@ -1,4 +1,6 @@
-"""A live training dashboard for the baselines (DQN, PPO, Rainbow) in the browser.
+"""A live training dashboard for the baselines (DQN, PPO, Rainbow, AlphaZero) in the browser.
+
+Including the multi-mode PPO runs (``ppo_modes``), which get per-game-mode eval charts.
 
 ::
 
@@ -80,7 +82,8 @@ def read_records(run: Path) -> list[dict[str, Any]]:
 
 
 def algorithm(config: dict[str, Any]) -> str:
-    # dqn.py's and ppo.py's config.json have no "algorithm" key.
+    # dqn.py's and ppo.py's config.json have no "algorithm" key (rainbow.py, az.py and
+    # ppo_modes.py write theirs).
     if not config:
         return "unknown"
     return str(config.get("algorithm") or ("ppo" if "gae_lambda" in config else "dqn"))
@@ -101,16 +104,31 @@ def total_steps(config: dict[str, Any]) -> int | None:
     return -(-total // chunk) * chunk
 
 
-def is_headline_eval(record: dict[str, Any]) -> bool:
+def is_headline_eval(record: dict[str, Any], config: dict[str, Any] | None = None) -> bool:
     """An eval of the main agent against ``random_legal``, which every baseline logs.
 
     The main agent is the greedy policy, or for AlphaZero the network with search
     (mode "search"). PPO also evaluates against other opponents and with a sampled
     policy, AlphaZero also the raw network; DQN and Rainbow records have neither field.
+
+    A ``ppo_modes`` run evaluates every game mode and tags its records with ``game_mode``
+    (their ``score`` is the share of the win). Its headline is the first of the run's
+    ``game_modes`` (from ``config``), the mode its top-level train metrics follow too; the
+    other modes have their own charts. Without a config that names the run's modes, a
+    record with a ``game_mode`` is not a headline.
     """
-    return record.get("opponent", "random_legal") == "random_legal" and record.get(
+    if record.get("opponent", "random_legal") != "random_legal" or record.get(
         "mode", "greedy"
-    ) in ("greedy", "search")
+    ) not in ("greedy", "search"):
+        return False
+    game_mode = record.get("game_mode")
+    return game_mode is None or game_mode == headline_game_mode(config)
+
+
+def headline_game_mode(config: dict[str, Any] | None) -> str | None:
+    """The first of a multi-mode run's ``game_modes`` (None: not a multi-mode run's config)."""
+    modes = (config or {}).get("game_modes")
+    return modes[0] if isinstance(modes, list) and modes and isinstance(modes[0], str) else None
 
 
 def read_run(run: Path) -> tuple[list[dict[str, Any]], float, str]:
@@ -138,7 +156,7 @@ def run_summary(run_id: str, run: Path, read: tuple | None = None) -> dict[str, 
     records, mtime, version = read_run(run) if read is None else read
     train = [r for r in records if r.get("type") == "train"]
     evals = [r for r in records if r.get("type") == "eval"]
-    headline = [r for r in evals if is_headline_eval(r)]
+    headline = [r for r in evals if is_headline_eval(r, config)]
     total = total_steps(config)
     steps = (_number(train[-1].get("env_steps")) or 0) if train else 0
     # Live: written to within LIVE_SECONDS, or within 3 of this run's own chunk + eval

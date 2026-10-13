@@ -247,12 +247,16 @@ self-contained HTML viewer (no server; open the file in a browser):
 python -m slinky.replay --a heuristic --b dqn --games 8 --html replays/heuristic-vs-dqn.html
 python -m slinky.replay --a mcts-256 --b heuristic --games 4 --out replays/mcts.json   # JSON only
 python -m slinky.replay --agents heuristic,random_legal,mcts-64,dqn --games 2 --html replays/four.html   # 4 snakes
+python -m slinky.replay --game-mode royale --agents heuristic,random_legal,random_legal,random --games 2 --html replays/royale.html
 ```
 
 - **Agents** come from the registry in `slinky.agents` (shared with
   `benchmarks/strength.py`): `random_legal`, `random`, `heuristic`, `dqn`
   (the checkpoint in `baselines/checkpoints/`) or `dqn:<run dir>`, `ppo`
-  (greedy), `ppo-sample` or `ppo:<run dir>`, `rainbow` or `rainbow:<run dir>`,
+  (greedy), `ppo-sample` or `ppo:<run dir>`,
+  `ppo_modes[:<run dir>][:snapshot=<steps>][:game_mode=<mode>]` (the multi-mode
+  PPO, told the mode of the game it plays; `snapshot` plays the run's
+  `params-<steps>.npz`), `rainbow` or `rainbow:<run dir>`,
   `az-<simulations>` or `az-<simulations>:<run dir>` (the AlphaZero network
   with PUCT search; `az-0` is the raw network), and `mcts-<simulations>`
   with dash shorthands and/or `:field=value` overrides of `MCTSConfig`, e.g.

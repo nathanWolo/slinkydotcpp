@@ -4,6 +4,7 @@
 |---|---|
 | `throughput.py` | environment steps per second (see the main README's Performance section) |
 | `strength.py` | playing strength: every pair of two agent lists, as resumable JSONL results and markdown tables |
+| `modes.py` | the four leaderboard modes at 4-player tables: a generalist against its per-mode specialists and fixed references (share of the win, placement, paired G-vs-S differences), as resumable JSONL results (`results/modes.jsonl`) and markdown tables |
 | `plot_strength.py` | the MCTS-strength-vs-simulations chart below, from `strength.py`'s results |
 | `plot_az_ladder.py` | the AlphaZero chart below: what the network's search is worth in plain MCTS simulations, per training checkpoint |
 | `mcts_latency.py` | the latency of one MCTS move of one game, and the budget that fits a time limit |

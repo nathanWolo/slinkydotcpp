@@ -26,6 +26,23 @@ Names:
   explicitly, also with ``:<run dir>``. The canonical name leaves the default
   mode out. The default is greedy: in the pilot runs it scored at least as well
   as sampled play against the heuristic and the DQN.
+* ``ppo_modes[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]``: the
+  multi-mode self-play PPO baseline (``baselines/ppo_modes.py``): one network that plays
+  the four leaderboard modes of :mod:`slinky.modes` (``standard``, ``duel``, ``royale``,
+  ``constrictor``) and is told which one it is in. Default checkpoint
+  ``baselines/checkpoints/ppo-modes-seed0`` (the generalist); a specialist trained on one
+  mode is ``ppo_modes:<run dir>``. The agent is told the mode of the game it plays
+  (:func:`slinky.modes.mode_of` of the game config), so the same name plays every mode;
+  ``:game_mode=<mode>`` tells it another one instead (the wrong-mode ablation, or a
+  specialist playing another mode's game as its own). A mode outside the run's
+  ``game_modes`` is refused (:func:`check_game`). ``:snapshot=<steps>`` plays the snapshot
+  ``params-<steps>.npz`` the trainer saves at each evaluation (steps are env steps per
+  mode) instead of the final ``params.npz``, to compare runs at equal steps. It plays
+  greedy or sampled like ``ppo`` (the canonical name leaves the default, greedy, out).
+  Items after the first ``:`` are read as for ``az``: an item with ``=`` is a setting
+  (``game_mode`` or ``snapshot``), any other item the run dir. The food channel is hidden
+  by the real game's ruleset (constrictor), whatever mode the network is told.
+  ``ppo:<ppo_modes run>`` is refused, as is ``ppo_modes:<ppo run>``: the networks differ.
 * ``rainbow`` or ``rainbow:<run dir>``: the self-play Rainbow DQN baseline
   (``baselines/rainbow.py``, legal argmax of the expected return, noise off),
   default checkpoint ``baselines/checkpoints/rainbow-duel-seed0``, otherwise
@@ -89,6 +106,7 @@ from typing import Any, NamedTuple
 
 import jax
 
+from slinky import modes
 from slinky.env import BattlesnakeEnv
 from slinky.evaluate import Policy, greedy_from_q, random_legal
 from slinky.policies import random_policy
@@ -99,17 +117,25 @@ DQN_SCRIPT = REPO_ROOT / "baselines" / "dqn.py"
 DEFAULT_DQN_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "dqn-duel-seed0"
 PPO_SCRIPT = REPO_ROOT / "baselines" / "ppo.py"
 DEFAULT_PPO_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "ppo-duel-seed0"
+PPO_MODES_SCRIPT = REPO_ROOT / "baselines" / "ppo_modes.py"
+# Not committed yet: building the default ``ppo_modes`` agent raises until it is.
+DEFAULT_PPO_MODES_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "ppo-modes-seed0"
 RAINBOW_SCRIPT = REPO_ROOT / "baselines" / "rainbow.py"
 DEFAULT_RAINBOW_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "rainbow-duel-seed0"
 AZ_SCRIPT = REPO_ROOT / "baselines" / "az.py"
 DEFAULT_AZ_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "az-duel-seed0"
-# How ``ppo`` plays: "greedy" (legal argmax of the logits) or "sample" (from the policy).
+# How ``ppo`` and ``ppo_modes`` play: "greedy" (legal argmax of the logits) or "sample" (from
+# the policy).
 PPO_MODES = ("greedy", "sample")
 PPO_DEFAULT_MODE = "greedy"
+# The ``:field=value`` items of a ``ppo_modes`` name.
+PPO_MODES_OPTIONS = ("game_mode", "snapshot")
 
 AGENT_NAMES = (
     "random_legal", "random", "heuristic", "dqn", "dqn:<run dir>",
-    "ppo[-greedy|-sample]", "ppo[-greedy|-sample]:<run dir>", "rainbow", "rainbow:<run dir>",
+    "ppo[-greedy|-sample]", "ppo[-greedy|-sample]:<run dir>",
+    "ppo_modes[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]", "rainbow",
+    "rainbow:<run dir>",
     "az-<n>[:<run dir>][:field=value...]", "mcts-<n>[-shorthand...][:field=value...]",
 )  # fmt: skip
 SIMPLE_AGENTS = ("random_legal", "random", "heuristic")
@@ -141,19 +167,25 @@ class AgentSpec:
     Attributes:
       name: the canonical name (see the module docstring).
       kind: ``"random_legal"``, ``"random"``, ``"heuristic"``, ``"dqn"``, ``"ppo"``,
-        ``"rainbow"``, ``"az"`` or ``"mcts"``.
+        ``"ppo_modes"``, ``"rainbow"``, ``"az"`` or ``"mcts"``.
       mcts: the search settings of an ``mcts`` agent. For an ``az`` agent with a
         search, what the name fixes: the simulations, PUCT with network priors,
         the leaf and the ``overrides`` on top of ``MCTSConfig``'s defaults (enough
         for cost and memory models); the run's own search constants replace the
         defaults when the agent is built (see :func:`agent_config`). None for
         ``az-0``.
-      checkpoint: the resolved run directory of a ``dqn``, ``ppo``, ``rainbow`` or
-        ``az`` agent.
-      greedy: how a ``ppo`` agent plays: the legal argmax of its logits (True) or a
-        move sampled from its policy (False). None for other agents.
+      checkpoint: the resolved run directory of a ``dqn``, ``ppo``, ``ppo_modes``,
+        ``rainbow`` or ``az`` agent.
+      greedy: how a ``ppo`` or ``ppo_modes`` agent plays: the legal argmax of its logits
+        (True) or a move sampled from its policy (False). None for other agents.
       overrides: an ``az`` agent's ``:field=value`` search settings, in
         ``MCTSConfig`` field order.
+      game_mode: the mode a ``ppo_modes`` agent is told whatever game it plays (a name
+        in :data:`slinky.modes.MODE_NAMES`); None: the mode of the game
+        (:func:`slinky.modes.mode_of`). None for other agents.
+      snapshot: the env steps (per mode) of the ``params-<steps>.npz`` snapshot a
+        ``ppo_modes`` agent plays; None: the run's final ``params.npz``. None for other
+        agents.
     """
 
     name: str
@@ -162,6 +194,8 @@ class AgentSpec:
     checkpoint: Path | None = None
     greedy: bool | None = None
     overrides: tuple[tuple[str, Any], ...] = ()
+    game_mode: str | None = None
+    snapshot: int | None = None
 
     @property
     def sims(self) -> int:
@@ -184,6 +218,8 @@ def parse_agent(name: str) -> AgentSpec:
         raise ValueError(f"{name!r}: write dqn:<run dir>")
     if name == "ppo" or name.startswith(("ppo:", "ppo-", "ppo@")):
         return _parse_ppo(name)
+    if name == "ppo_modes" or name.startswith(("ppo_modes:", "ppo_modes-", "ppo_modes@")):
+        return _parse_ppo_modes(name)
     if name == "rainbow" or name.startswith("rainbow:"):
         return _parse_rainbow(name)
     if name.startswith("rainbow@"):
@@ -229,15 +265,20 @@ def make_env(config: GameConfig, obs: bool) -> BattlesnakeEnv:
 def check_game(spec: AgentSpec, config: GameConfig) -> None:
     """Raise ``ValueError`` if the agent can't play games with ``config``.
 
-    Raises ``FileNotFoundError`` for a ``dqn``, ``ppo``, ``rainbow`` or ``az`` agent
-    without its checkpoint.
+    A ``ppo_modes`` agent is also refused when the mode it would be told (``:game_mode=``,
+    else the mode of ``config``) is not one of its run's ``game_modes``: a specialist
+    plays another mode's game only when told its own mode explicitly.
+
+    Raises ``FileNotFoundError`` for a ``dqn``, ``ppo``, ``ppo_modes``, ``rainbow`` or
+    ``az`` agent without its checkpoint.
     """
     if spec.kind == "mcts" or (spec.kind == "az" and spec.mcts is not None):
         mcts = importlib.import_module("slinky.mcts")
         if config.num_snakes > mcts.MAX_SNAKES:
             raise ValueError(f"{spec.name}: MCTS supports at most {mcts.MAX_SNAKES} snakes")
     if spec.kind in BASELINES:
-        trained = _run_config(spec).game
+        run = _run_config(spec)
+        trained = run.game
         if (config.width, config.height) != (trained.width, trained.height) or (
             config.ruleset.wrapped != trained.ruleset.wrapped
         ):
@@ -246,6 +287,18 @@ def check_game(spec: AgentSpec, config: GameConfig) -> None:
                 f"({'wrapped' if trained.ruleset.wrapped else 'not wrapped'}) and can't play "
                 f"{config.width}x{config.height} ({config.ruleset.value})"
             )
+        if spec.kind == "ppo_modes":
+            told = _told_mode(spec, config)
+            if told not in run.game_modes:
+                known = ", ".join(run.game_modes)
+                if spec.game_mode is None:
+                    raise ValueError(
+                        f"{spec.name} was trained on {known} only and can't play a {told} game; "
+                        f"write :game_mode=<{'|'.join(run.game_modes)}> to tell it a mode it knows"
+                    )
+                raise ValueError(
+                    f"{spec.name} was trained on {known} only and can't be told game_mode={told}"
+                )
 
 
 def agent_config(spec: AgentSpec) -> dict[str, Any]:
@@ -256,7 +309,10 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
     Rainbow's or AlphaZero's run config (network included), how it picks moves and a
     hash of its parameters; an ``az`` agent also gets its simulations and, if it
     searches, the resolved search (``search``: the ``MCTSConfig`` fields, from its run
-    and name). Benchmarks hash it to tell results of different agents apart.
+    and name). A ``ppo_modes`` agent also gets ``game_mode``, the mode it is told whatever
+    game it plays (None: the game's own), and ``snapshot`` (None: the final parameters); no
+    other kind has these keys, so the identities of the others do not change. Benchmarks
+    hash it to tell results of different agents apart.
     """
     if spec.kind in ("random_legal", "random"):
         config: dict[str, Any] = {"type": spec.kind}
@@ -277,6 +333,9 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
             search = _az_search(spec)
             config["simulations"] = spec.sims
             config["search"] = None if search is None else _mcts_fields(search)
+        if spec.kind == "ppo_modes":
+            config["game_mode"] = spec.game_mode
+            config["snapshot"] = spec.snapshot
     else:
         config = {"type": "mcts", **_mcts_fields(spec.mcts)}
     return json.loads(json.dumps(config, sort_keys=True))  # as it reads back from JSON
@@ -317,6 +376,8 @@ def _build(spec: AgentSpec, config: GameConfig) -> Agent:
         return _dqn_agent(spec)
     if spec.kind == "ppo":
         return _ppo_agent(spec)
+    if spec.kind == "ppo_modes":
+        return _ppo_modes_agent(spec, config)
     if spec.kind == "rainbow":
         return _rainbow_agent(spec)
     if spec.kind == "az":
@@ -338,11 +399,15 @@ def _random(env: BattlesnakeEnv) -> Policy:
 BASELINES = {
     "dqn": (DQN_SCRIPT, "baselines_dqn", DEFAULT_DQN_CHECKPOINT),
     "ppo": (PPO_SCRIPT, "baselines_ppo", DEFAULT_PPO_CHECKPOINT),
+    "ppo_modes": (PPO_MODES_SCRIPT, "baselines_ppo_modes", DEFAULT_PPO_MODES_CHECKPOINT),
     "rainbow": (RAINBOW_SCRIPT, "baselines_rainbow", DEFAULT_RAINBOW_CHECKPOINT),
     "az": (AZ_SCRIPT, "baselines_az", DEFAULT_AZ_CHECKPOINT),
 }
 # For messages ("no DQN checkpoint in ...").
-BASELINE_LABELS = {"dqn": "DQN", "ppo": "PPO", "rainbow": "Rainbow", "az": "AlphaZero"}
+BASELINE_LABELS = {
+    "dqn": "DQN", "ppo": "PPO", "ppo_modes": "multi-mode PPO", "rainbow": "Rainbow",
+    "az": "AlphaZero",
+}  # fmt: skip
 
 
 @functools.cache
@@ -376,6 +441,11 @@ def load_dqn_module() -> ModuleType:
 def load_ppo_module() -> ModuleType:
     """Import ``baselines/ppo.py`` from the repository."""
     return load_baseline_module("ppo")
+
+
+def load_ppo_modes_module() -> ModuleType:
+    """Import ``baselines/ppo_modes.py`` from the repository."""
+    return load_baseline_module("ppo_modes")
 
 
 def load_rainbow_module() -> ModuleType:
@@ -437,29 +507,90 @@ def _parse_ppo(name: str) -> AgentSpec:
     )
 
 
+def _parse_ppo_modes(name: str) -> AgentSpec:
+    head, *items = name.split(":")
+    syntax = "write ppo_modes[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]"
+    if head.startswith("ppo_modes@"):
+        raise ValueError(f"{name!r}: write ppo_modes:<run dir>")
+    mode = PPO_DEFAULT_MODE
+    if head != "ppo_modes":
+        mode = head.removeprefix("ppo_modes-")
+        if mode not in PPO_MODES:
+            raise ValueError(f"{name!r}: unknown ppo_modes play mode {mode!r}; {syntax}")
+    run_text: str | None = None
+    settings: dict[str, tuple[str, str]] = {}  # field -> (value text, the item it came from)
+    for item in items:
+        if "=" not in item:
+            if not item.strip():
+                raise ValueError(f"{name!r}: empty item; {syntax}")
+            if run_text is not None:
+                raise ValueError(f"{name!r}: two run dirs ({run_text!r} and {item!r})")
+            run_text = item
+            continue
+        field, _, text = item.partition("=")
+        field = field.strip()
+        if field not in PPO_MODES_OPTIONS:
+            raise ValueError(
+                f"unknown ppo_modes option {field!r} in {name!r}; the options are "
+                + " and ".join(PPO_MODES_OPTIONS)
+            )
+        if field in settings:
+            raise ValueError(f"{name!r}: {settings[field][1]!r} and {item!r} both set {field}")
+        settings[field] = (text.strip(), item)
+    game_mode = snapshot = None
+    if "game_mode" in settings:
+        game_mode = settings["game_mode"][0]
+        if game_mode not in modes.MODE_NAMES:
+            raise ValueError(
+                f"{name!r}: unknown game mode {game_mode!r}; expected one of "
+                f"{', '.join(modes.MODE_NAMES)}"
+            )
+    if "snapshot" in settings:
+        text = settings["snapshot"][0]
+        if not re.fullmatch(r"[0-9]+", text) or int(text) < 1:
+            raise ValueError(
+                f"{name!r}: snapshot must be a positive whole number of env steps per mode "
+                f"(the <steps> of params-<steps>.npz), not {text!r}"
+            )
+        snapshot = int(text)
+    path = _run_dir("ppo_modes", run_text)
+    base = "ppo_modes" if mode == PPO_DEFAULT_MODE else f"ppo_modes-{mode}"
+    text = _with_run_dir(base, "ppo_modes", path)
+    text += f":snapshot={snapshot}" if snapshot else ""
+    text += f":game_mode={game_mode}" if game_mode else ""
+    return AgentSpec(
+        text, "ppo_modes", checkpoint=path, greedy=mode == "greedy", game_mode=game_mode,
+        snapshot=snapshot,
+    )  # fmt: skip
+
+
 def _display_path(path: Path) -> str:
     """Relative to the repository if inside it, else absolute."""
     return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else str(path)
 
 
 def _checkpoint_files(spec: AgentSpec) -> tuple[Path, Path]:
+    """``(parameter file, config file)`` of a run; a ``ppo_modes`` snapshot has its own file."""
     path = spec.checkpoint
-    params, config = path / "params.npz", path / "config.json"
+    # ``baselines/ppo_modes.snapshot_name`` (a test pins the two together).
+    name = "params.npz" if spec.snapshot is None else f"params-{spec.snapshot}.npz"
+    params, config = path / name, path / "config.json"
     if not params.is_file() or not config.is_file():
         raise FileNotFoundError(
-            f"no {BASELINE_LABELS[spec.kind]} checkpoint in {path} (expected params.npz and "
+            f"no {BASELINE_LABELS[spec.kind]} checkpoint in {path} (expected {name} and "
             "config.json there)"
         )
     return params, config
 
 
 def _run_config(spec: AgentSpec) -> Any:
-    """The training config saved with a ``dqn``, ``ppo``, ``rainbow`` or ``az`` checkpoint.
+    """The training config saved with a ``dqn``, ``ppo``, ``ppo_modes``, ``rainbow`` or ``az`` run.
 
-    They all save the same files. A config that names its algorithm (``rainbow.py``
-    and ``az.py`` write ``"algorithm"``) must match the agent's kind, so
-    ``dqn:<Rainbow run>`` is refused here rather than failing on a parameter shape
-    later (``rainbow.py`` and ``az.py`` also refuse configs without their name).
+    They all save the same files. A config that names its algorithm (``rainbow.py``,
+    ``az.py`` and ``ppo_modes.py`` write ``"algorithm"``) must match the agent's kind, so
+    ``dqn:<Rainbow run>`` and ``ppo:<ppo_modes run>`` are refused here rather than
+    failing on a parameter shape later (``rainbow.py``, ``az.py`` and ``ppo_modes.py``
+    also refuse configs without their name).
     """
     config = _checkpoint_files(spec)[1]
     try:
@@ -502,6 +633,29 @@ def _ppo_agent(spec: AgentSpec) -> Agent:
     how = "greedy" if spec.greedy else "sampled"
     desc = f"{how} self-play PPO ({spec.checkpoint.name})"
     return Agent(spec.name, ppo.make_policy(params, cfg, bool(spec.greedy)), True, desc)
+
+
+def _told_mode(spec: AgentSpec, config: GameConfig) -> str:
+    """The mode a ``ppo_modes`` agent is told in games with ``config``."""
+    if spec.game_mode is not None:
+        return spec.game_mode
+    try:
+        return modes.mode_of(config)
+    except ValueError as e:  # e.g. the empty map, a wrapped ruleset
+        raise ValueError(f"{spec.name}: {e}") from None
+
+
+def _ppo_modes_agent(spec: AgentSpec, config: GameConfig) -> Agent:
+    ppo_modes = load_ppo_modes_module()
+    cfg = _run_config(spec)
+    params_file = _checkpoint_files(spec)[0]
+    params = ppo_modes.load_params(str(spec.checkpoint), cfg, name=params_file.name)
+    mode = _told_mode(spec, config)
+    how = "greedy" if spec.greedy else "sampled"
+    snap = "" if spec.snapshot is None else f", snapshot {spec.snapshot}"
+    desc = f"{how} multi-mode self-play PPO ({spec.checkpoint.name}{snap}), told {mode}"
+    policy = ppo_modes.make_policy(params, cfg, config, mode, bool(spec.greedy))
+    return Agent(spec.name, policy, True, desc)
 
 
 def _parse_az(name: str) -> AgentSpec:
