@@ -114,7 +114,10 @@ produced by the same code, the same ``code_fingerprint`` and in particular the s
 does not cover code); otherwise the row says so and shows the unpaired comparison only.
 A second table gives the wrong-mode ablation the same way: ``G`` minus ``G@m`` in
 ``G,H,H,H`` against ``G@m,H,H,H``, the same games, which answers whether the mode input is
-used (positive: telling the right mode helps). Lines of the same cell id are not pooled:
+used (positive: telling the right mode helps). Further specialists of a mode take symbols
+``S<digit>...`` (``S1``, ``S2`` for other seeds, ``S16`` for another setting); their
+cells pair with ``G`` and with ``S`` the same way, in tables of their own. Lines of the
+same cell id are not pooled:
 the one with the most games is shown. With several seeds in the file (``--seed`` selects
 one) every row and comparison carries its seed.
 """
@@ -694,6 +697,9 @@ def markdown_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 ROLES = {"G,S,G,S": "primary", "G,S": "primary", "G,S,H,H": "co-headline"}
+# Symbols of further specialists of a mode (``S1``, ``S2`` for other seeds, ``S16`` for
+# another setting): ``--table`` also prints their paired comparisons with G and with S.
+EXTRA_SPECIALIST = re.compile(r"S[0-9][A-Za-z0-9_.-]*")
 
 
 def pairs_table(pairs: list[tuple[str, Paired]], a: str, b: str) -> str:
@@ -768,6 +774,18 @@ def table_main(path: Path, mode: str | None, seed: int | None) -> int:
                 " difference negative favours G):\n"
             )
             print(pairs_table(pairs, "G", "S"))
+        # Further specialists (other seeds, other settings) against the generalist and the
+        # mode's specialist.
+        extra = sorted({x for r in recs for x in r["results"] if EXTRA_SPECIALIST.fullmatch(x)})
+        for x in extra:
+            for a, b in (("G", x), (x, "S")):
+                pairs = pair_records(recs, a=a, b=b)
+                if pairs:
+                    print(
+                        f"\n{a} - {b}, paired game by game, in share per seat (positive favours"
+                        f" {a}; placement difference negative favours {a}):\n"
+                    )
+                    print(pairs_table(pairs, a, b))
         # The wrong-mode ablation: is the mode input used?
         wrong = [f"G@{m}" for m in modes.MODE_NAMES if any(f"G@{m}" in r["results"] for r in recs)]
         ablation = [pair for x in wrong for pair in pair_records(recs, a="G", b=x)]
