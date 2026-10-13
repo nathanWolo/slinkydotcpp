@@ -1,17 +1,25 @@
-"""A Battlesnake API server for any agent in the registry (:mod:`slinky.agents`).
+"""A Battlesnake API server for agents in the registry (:mod:`slinky.agents`).
 
-It speaks the official Battlesnake HTTP API (version 1), so a registered snake
-on play.battlesnake.com can point at it::
+It speaks the official Battlesnake HTTP API (version 1). Each agent is a
+separate snake under its own path, so one server can host several and a
+registered snake on play.battlesnake.com points at ``<server>/<name>``::
 
-    python -m slinky.server --agent ppo --port 8000
-    curl -s http://127.0.0.1:8000/          # snake info
+    python -m slinky.server --agent az-256 --agent ppo --port 8000
+    python -m slinky.server --agent best=az-256:runs/loop/gen-02   # name=agent
+    curl -s http://127.0.0.1:8000/az-256    # snake info
 
-* ``GET /`` returns the snake's info (API version, author, colour, head, tail).
-* ``POST /move`` converts the request's board to a :class:`~slinky.types.State`
-  with the requesting snake in seat 0 and answers with that seat's move.
-* ``POST /start`` starts compiling the policy for the game's board if it is
-  new (in the background; the duel is compiled at startup); ``POST /end``
-  logs the result.
+* ``GET /<name>`` returns the snake's info (API version, author, colour, head,
+  tail); ``GET /`` lists the snakes.
+* ``POST /<name>/move`` converts the request's board to a
+  :class:`~slinky.types.State` with the requesting snake in seat 0 and answers
+  with that seat's move.
+* ``POST /<name>/start`` starts compiling the policy for the game's board if
+  it is new (in the background; the duel is compiled at startup);
+  ``POST /<name>/end`` logs the result.
+
+A snake's name is the agent's registry name, or the ``name`` of
+``--agent name=agent`` (letters, digits, ``.``, ``_`` and ``-``), which is
+needed for agents whose registry name has a run directory in it.
 
 The agent plays the games it can: the trained baselines read 11x11 egocentric
 observations, so they only play 11x11 standard games with two snakes (the
@@ -30,6 +38,7 @@ import argparse
 import contextlib
 import json
 import logging
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -261,7 +270,25 @@ class Mover:
         return int(act(key, state)), name
 
 
-def make_handler(mover: Mover, info: dict[str, str]) -> type[BaseHTTPRequestHandler]:
+SNAKE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def parse_snake(text: str) -> tuple[str, str]:
+    """``(name, agent)`` of an ``--agent`` value: ``agent`` or ``name=agent``."""
+    name, sep, agent = text.partition("=")
+    if not sep:
+        name = agent = text
+    if not SNAKE_NAME.fullmatch(name):
+        raise ValueError(
+            f"snake name {name!r} can't be a URL path: write --agent name={agent}, "
+            "with letters, digits, '.', '_' and '-' in the name"
+        )
+    return name, agent
+
+
+def make_handler(snakes: dict[str, tuple[Mover, dict[str, str]]]) -> type[BaseHTTPRequestHandler]:
+    """A handler serving each ``name -> (mover, info)`` snake under ``/<name>``."""
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "slinky"
         timeout = 5  # seconds a client may take to send its request
@@ -277,17 +304,30 @@ def make_handler(mover: Mover, info: dict[str, str]) -> type[BaseHTTPRequestHand
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self) -> None:
-            if self.path.split("?")[0] == "/":
-                self._send(200, info)
-            else:
-                self._send(404, {"error": "not found"})
+        def _route(self) -> tuple[str, str] | None:
+            """``(snake name, action)`` of ``/<name>[/<action>]``, or None."""
+            parts = [p for p in self.path.split("?")[0].split("/") if p]
+            if not parts or parts[0] not in snakes or len(parts) > 2:
+                return None
+            return parts[0], parts[1] if len(parts) == 2 else ""
 
-        def do_POST(self) -> None:
-            path = self.path.split("?")[0]
-            if path not in ("/start", "/move", "/end"):
+        def do_GET(self) -> None:
+            if self.path.split("?")[0] in ("", "/"):
+                self._send(200, {"snakes": [f"/{name}" for name in snakes]})
+                return
+            route = self._route()
+            if route is None or route[1] != "":
                 self._send(404, {"error": "not found"})
                 return
+            self._send(200, snakes[route[0]][1])
+
+        def do_POST(self) -> None:
+            route = self._route()
+            if route is None or route[1] not in ("start", "move", "end"):
+                self._send(404, {"error": "not found"})
+                return
+            snake, path = route
+            mover = snakes[snake][0]
             try:
                 size = int(self.headers.get("Content-Length", 0))
                 if not 0 < size <= MAX_BODY:
@@ -300,13 +340,16 @@ def make_handler(mover: Mover, info: dict[str, str]) -> type[BaseHTTPRequestHand
                 self._send(400, {"error": "not a Battlesnake request"})
                 return
             game = req.get("game", {}).get("id", "?")
-            if path == "/move":
+            if path == "move":
                 t = time.perf_counter()
                 try:
                     action, name = mover.move(req)
                 except Exception:  # never time out on our side: answer something legal-ish
                     log.exception(
-                        "game %s turn %s: falling back to safe_move", game, req.get("turn")
+                        "%s game %s turn %s: falling back to safe_move",
+                        snake,
+                        game,
+                        req.get("turn"),
                     )
                     try:
                         action, name = safe_move(req), "safe_move"
@@ -315,20 +358,22 @@ def make_handler(mover: Mover, info: dict[str, str]) -> type[BaseHTTPRequestHand
                 ms = (time.perf_counter() - t) * 1e3
                 self._send(200, {"move": MOVE_NAMES[action]})
                 log.info(
-                    "game %s turn %s: %s (%s, %.1f ms)",
+                    "%s game %s turn %s: %s (%s, %.1f ms)",
+                    snake,
                     game,
                     req.get("turn"),
                     MOVE_NAMES[action],
                     name,
                     ms,
                 )
-            elif path == "/start":
+            elif path == "start":
                 self._send(200, {})  # answer first; compiling may take a few seconds
                 try:
                     name = mover.start(req)
                     b = req["board"]
                     log.info(
-                        "game %s start: %sx%s, %d snakes, %s, playing %s",
+                        "%s game %s start: %sx%s, %d snakes, %s, playing %s",
+                        snake,
                         game,
                         b["width"],
                         b["height"],
@@ -337,20 +382,21 @@ def make_handler(mover: Mover, info: dict[str, str]) -> type[BaseHTTPRequestHand
                         name,
                     )
                 except Exception:
-                    log.exception("game %s: bad /start request", game)
+                    log.exception("%s game %s: bad /start request", snake, game)
             else:
                 self._send(200, {})
                 try:
                     mover.end(req)
                     left = [s["id"] for s in req["board"]["snakes"]]
                     log.info(
-                        "game %s end at turn %s: %s",
+                        "%s game %s end at turn %s: %s",
+                        snake,
                         game,
                         req.get("turn"),
                         "won" if left == [req["you"]["id"]] else "lost or drew",
                     )
                 except Exception:
-                    log.exception("game %s: bad /end request", game)
+                    log.exception("%s game %s: bad /end request", snake, game)
 
     return Handler
 
@@ -364,7 +410,12 @@ class Server(ThreadingHTTPServer):
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--agent", default="ppo", help="registry name of the agent (default: ppo)")
+    p.add_argument(
+        "--agent",
+        action="append",
+        help="a snake to serve at /<name>: an agent's registry name, or name=agent "
+        "(repeat for several snakes; default: ppo)",
+    )
     p.add_argument(
         "--fallback",
         default="heuristic",
@@ -377,9 +428,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--head", default="default")
     p.add_argument("--tail", default="default")
     args = p.parse_args(argv)
+    try:
+        specs = dict(parse_snake(text) for text in args.agent or ["ppo"])
+    except ValueError as e:
+        p.error(str(e))
+    if len(specs) < len(args.agent or ["ppo"]):
+        p.error("two snakes have the same name")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    mover = Mover(args.agent, args.fallback)
     duel = {
         "game": {"ruleset": {"name": "standard"}, "map": "standard"},
         "turn": 0,
@@ -395,23 +451,28 @@ def main(argv: list[str] | None = None) -> None:
         },
         "you": {"id": "a"},
     }
-    times = []
-    for _ in range(20):
-        t = time.perf_counter()
-        action, name = mover.move(duel)
-        times.append((time.perf_counter() - t) * 1e3)
-    log.info("%s plays 11x11 duels: %.1f ms per move (median of 20)", name, np.median(times))
-
-    info = {
-        "apiversion": "1",
-        "author": args.author,
-        "color": args.color,
-        "head": args.head,
-        "tail": args.tail,
-        "version": f"slinky {args.agent}",
-    }
-    server = Server((args.host, args.port), make_handler(mover, info))
-    log.info("serving %s on http://%s:%d", args.agent, args.host, args.port)
+    snakes = {}
+    for snake, agent in specs.items():
+        mover = Mover(agent, args.fallback)
+        times = []
+        for _ in range(20):
+            t = time.perf_counter()
+            action, name = mover.move(duel)
+            times.append((time.perf_counter() - t) * 1e3)
+        log.info("/%s: %s plays 11x11 duels: %.1f ms per move (median of 20)",
+                 snake, name, np.median(times))  # fmt: skip
+        info = {
+            "apiversion": "1",
+            "author": args.author,
+            "color": args.color,
+            "head": args.head,
+            "tail": args.tail,
+            "version": f"slinky {agent}",
+        }
+        snakes[snake] = (mover, info)
+    server = Server((args.host, args.port), make_handler(snakes))
+    for snake, agent in specs.items():
+        log.info("serving %s on http://%s:%d/%s", agent, args.host, args.port, snake)
     with contextlib.suppress(KeyboardInterrupt):
         server.serve_forever()
 

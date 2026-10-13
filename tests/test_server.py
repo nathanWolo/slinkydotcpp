@@ -13,7 +13,15 @@ import pytest
 
 from slinky.agents import make_agent, make_env
 from slinky.engine_json import state_to_engine
-from slinky.server import MOVE_NAMES, Mover, Server, make_handler, request_to_engine, safe_move
+from slinky.server import (
+    MOVE_NAMES,
+    Mover,
+    Server,
+    make_handler,
+    parse_snake,
+    request_to_engine,
+    safe_move,
+)
 from slinky.types import GameConfig
 
 DUEL = GameConfig()
@@ -177,7 +185,7 @@ def server():
         "head": "default",
         "tail": "default",
     }
-    srv = Server(("127.0.0.1", 0), make_handler(Mover("ppo"), info))
+    srv = Server(("127.0.0.1", 0), make_handler({"ppo": (Mover("ppo"), info)}))
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -195,22 +203,46 @@ def _post(url: str, body: bytes) -> tuple[int, dict]:
 
 def test_http_endpoints(server: str) -> None:
     with urllib.request.urlopen(server + "/", timeout=10) as r:
-        assert json.loads(r.read())["apiversion"] == "1"
+        assert json.loads(r.read()) == {"snakes": ["/ppo"]}
+    for path in ("/ppo", "/ppo/"):
+        with urllib.request.urlopen(server + path, timeout=10) as r:
+            assert json.loads(r.read())["apiversion"] == "1"
+    snake = server + "/ppo"
     state = midgame_states(DUEL, 1, seed=3)[0]
     req = json.dumps(api_request(state_to_engine(state, DUEL), 0, game_id="http")).encode()
-    assert _post(server + "/start", req) == (200, {})
-    code, body = _post(server + "/move", req)
+    assert _post(snake + "/start", req) == (200, {})
+    code, body = _post(snake + "/move", req)
     assert code == 200 and body["move"] in MOVE_NAMES
-    assert _post(server + "/end", req) == (200, {})
-    assert _post(server + "/move", b"{not json")[0] == 400
-    assert _post(server + "/nope", req)[0] == 404
-    assert _post(server + "/move", b"[1, 2]")[0] == 400
+    assert _post(snake + "/end", req) == (200, {})
+    assert _post(snake + "/move", b"{not json")[0] == 400
+    assert _post(snake + "/nope", req)[0] == 404
+    assert _post(snake + "/move", b"[1, 2]")[0] == 400
     # Junk that parses: still a move, never an error or a hang.
-    assert _post(server + "/move", b'{"board": 3}') == (200, {"move": "up"})
+    assert _post(snake + "/move", b'{"board": 3}') == (200, {"move": "up"})
     huge = json.loads(req)
     huge["board"]["width"] = huge["board"]["height"] = 99  # past MAX_SIDE: no compile
-    code, body = _post(server + "/move", json.dumps(huge).encode())
+    code, body = _post(snake + "/move", json.dumps(huge).encode())
     assert code == 200 and body["move"] in MOVE_NAMES
+
+
+def test_routes_are_per_snake(server: str) -> None:
+    state = midgame_states(DUEL, 1, seed=3)[0]
+    req = json.dumps(api_request(state_to_engine(state, DUEL), 0, game_id="route")).encode()
+    assert _post(server + "/move", req)[0] == 404  # no snake at the root
+    assert _post(server + "/dqn/move", req)[0] == 404  # not a snake on this server
+    assert _post(server + "/ppo/move/extra", req)[0] == 404
+    for path in ("/dqn", "/ppo/move"):  # GET only serves a snake's info
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(server + path, timeout=10)
+        assert e.value.code == 404
+
+
+def test_parse_snake() -> None:
+    assert parse_snake("az-256") == ("az-256", "az-256")
+    assert parse_snake("best=az-256:runs/loop/gen-02") == ("best", "az-256:runs/loop/gen-02")
+    for bad in ("az-64:runs/x", "a b=ppo", "=ppo"):
+        with pytest.raises(ValueError):
+            parse_snake(bad)
 
 
 def test_concurrent_moves(server: str) -> None:
@@ -222,5 +254,5 @@ def test_concurrent_moves(server: str) -> None:
         for i, st in enumerate(midgame_states(DUEL, 8, seed=9))
     ] * 4
     with ThreadPoolExecutor(32) as pool:
-        results = list(pool.map(lambda r: _post(server + "/move", r), reqs))
+        results = list(pool.map(lambda r: _post(server + "/ppo/move", r), reqs))
     assert all(code == 200 and body["move"] in MOVE_NAMES for code, body in results)

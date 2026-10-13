@@ -229,8 +229,15 @@ so it can play real games (for example on the Duels leaderboard: 11×11, two
 snakes, 500 ms per move):
 
 ```bash
-python -m slinky.server --agent ppo --port 8000   # binds 127.0.0.1
+python -m slinky.server --agent ppo --port 8000   # binds 127.0.0.1; snake at /ppo
+python -m slinky.server --agent az-256 --agent best=az-256:runs/az-x   # two snakes
 ```
+
+- **One URL per snake.** Each `--agent` is served under its own path,
+  `/<name>` (`/<name>/move` and so on), so one server can host several
+  snakes; `GET /` lists them. The name is the agent's registry name, or
+  `name` in `--agent name=agent` (needed when the agent names a run directory).
+  Register `<server>/<name>` as the Battlesnake's URL.
 
 - **Who plays.** The trained baselines play only the game they learned, the
   11×11 duel. Other standard games get the heuristic (`--fallback`), compiled
