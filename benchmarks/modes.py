@@ -89,6 +89,14 @@ generalist, ``S`` the mode's specialist (cells with ``S`` are skipped without on
   (1024), the co-headline (G's share minus S's, paired within each game).
 * the duel: ``G,S`` (1024, the primary endpoint); ``X,H`` and ``X,P`` (1024); ``X,R``
   (256).
+* every mode: ``Gs,Ss,Gs,Ss`` (``Gs,Ss`` in a duel; 1024), the head-to-head with both
+  networks sampling their moves (``ppo_modes-sample``). In constrictor read this one, not
+  ``G,S,G,S``: food is inert there and hidden from ``ppo_modes`` networks, so two greedy
+  networks play a game fixed by its start, and the standard map has 2 start layouts, so
+  ``G,S,G,S`` is 12 distinct games (6 seatings of G's two seats, 2 layouts), repeated, and
+  its interval is not a sampling interval. ``--table`` marks such rows *deterministic*.
+  Every other cell is varied games: the heuristic breaks ties at random, ``random_legal``
+  is random, ``P`` sees the randomly spawned food, and in the other modes food matters.
 * every mode: ``G@m,H,H,H`` (``G,H`` in a duel) for each other mode ``m`` (256 games each):
   the generalist told a wrong mode, which shows whether the mode input is used. Food is
   hidden by the real game, so this does not measure food hiding.
@@ -293,19 +301,23 @@ def protocol_cells(
                 agents[f"G@{other}"] = f"ppo_modes:{generalist}:game_mode={other}"
         if mode in specialists:
             agents["S"] = f"ppo_modes:{specialists[mode]}"
+            # The same head-to-head with both networks sampling their moves.
+            agents["Gs"] = f"ppo_modes-sample:{generalist}"
+            agents["Ss"] = f"ppo_modes-sample:{specialists[mode]}"
         xs = "GS" if "S" in agents else "G"  # the policies under test
         four = modes.DEFAULT_SNAKES[mode] > 2
         core: list[tuple[str, int]] = []  # (seats, games), most important first
         if four:
             if "S" in agents:
-                core += [("G,S,G,S", 1024), ("G,S,H,H", 1024)]  # primary endpoint, co-headline
+                core += [("G,S,G,S", 1024), ("Gs,Ss,Gs,Ss", 1024)]  # primary endpoint, sampled
+                core.append(("G,S,H,H", 1024))  # the co-headline
             for x in xs:
                 core += [(f"{x},H,H,H", 1024), (f"{x},P,P,P", 1024), (f"{x},H,R,R", 1024)]
             core.append(("P,H,H,H", 512))
             core += [(f"{x},R,R,R", 256) for x in xs]
         else:
             if "S" in agents:
-                core.append(("G,S", 1024))  # the primary endpoint
+                core += [("G,S", 1024), ("Gs,Ss", 1024)]  # the primary endpoint, sampled
             core += [(f"{x},{o}", n) for o, n in (("H", 1024), ("P", 1024), ("R", 256)) for x in xs]
         for seats, n in core:
             cells.append(make_cell(mode, seats.split(","), agents, games or n))
@@ -696,7 +708,13 @@ def markdown_table(header: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
-ROLES = {"G,S,G,S": "primary", "G,S": "primary", "G,S,H,H": "co-headline"}
+ROLES = {
+    "G,S,G,S": "primary",
+    "G,S": "primary",
+    "G,S,H,H": "co-headline",
+    "Gs,Ss,Gs,Ss": "sampled",
+    "Gs,Ss": "sampled",
+}
 # Symbols of further specialists of a mode (``S1``, ``S2`` for other seeds, ``S16`` for
 # another setting): ``--table`` also prints their paired comparisons with G and with S.
 EXTRA_SPECIALIST = re.compile(r"S[0-9][A-Za-z0-9_.-]*")
@@ -717,6 +735,16 @@ def pairs_table(pairs: list[tuple[str, Paired]], a: str, b: str) -> str:
         )
     header = ["Comparison", "Games", f"Share {a} - {b}", "Unpaired half-width"]
     return markdown_table([*header, f"Placement {a} - {b}"], rows)
+
+
+def deterministic(record: dict[str, Any]) -> bool:
+    """A constrictor line-up of greedy ``ppo_modes`` networks only: its games are fixed by the
+    start (food is inert and hidden from these networks, and nothing else is random)."""
+    return record["game_mode"] == "constrictor" and all(
+        registry.parse_agent(v["name"]).kind == "ppo_modes"
+        and registry.parse_agent(v["name"]).greedy
+        for v in record["agents"].values()
+    )
 
 
 def table_main(path: Path, mode: str | None, seed: int | None) -> int:
@@ -744,7 +772,10 @@ def table_main(path: Path, mode: str | None, seed: int | None) -> int:
                 share.append(f"{x} {v['share']:.3f} [{lo:.3f}, {hi:.3f}]")
                 place.append(f"{x} {v['placement']:.2f} +- {v['placement_ci95']:.2f}")
                 wtl.append(f"{x} {v['wins']}/{v['ties']}/{v['losses']}")
-            role = ROLES.get(r["lineup"]) if {"G", "S"} <= set(r["results"]) else None
+            held = set(r["results"])
+            role = ROLES.get(r["lineup"]) if {"G", "S"} <= held or {"Gs", "Ss"} <= held else None
+            if deterministic(r):
+                role = f"{role}, deterministic" if role else "deterministic"
             rows.append(
                 [
                     r["lineup"] + (f" ({role})" if role else "") + seed_tag(r, several),
@@ -762,6 +793,14 @@ def table_main(path: Path, mode: str | None, seed: int | None) -> int:
                 rows,
             )
         )
+        if any(deterministic(r) for r in recs):
+            print(
+                "\nDeterministic: only greedy ppo_modes networks in constrictor, where food is"
+                " inert and hidden from them, so each game is fixed by its start; the standard"
+                " map has 2 start layouts, so there are at most 2 x the seatings distinct games"
+                " (12 in G,S,G,S) and the interval is not a sampling interval. Read the sampled"
+                " row instead."
+            )
         names: dict[str, set[str]] = {}
         for r in recs:
             for x, v in r["agents"].items():

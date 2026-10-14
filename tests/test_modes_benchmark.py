@@ -337,6 +337,34 @@ def test_further_specialists_are_compared(tmp_path, capsys):
     assert "S_duel - S" not in text and "G - S_duel" not in text  # the matrix's symbols are not
 
 
+def test_deterministic_constrictor_line_ups_are_marked(tmp_path, capsys):
+    """Greedy networks alone in constrictor play games fixed by their start: few distinct games."""
+    out = tmp_path / "modes.jsonl"
+    a, b = _tiny_modes_run(tmp_path / "a", seed=5), _tiny_modes_run(tmp_path / "b", seed=6)
+    names = {"A": f"ppo_modes:{a}", "B": f"ppo_modes:{b}", "As": f"ppo_modes-sample:{a}"}
+    names |= {"Bs": f"ppo_modes-sample:{b}", "H": "heuristic"}
+    agent_flags = [x for k, v in names.items() for x in ("--agent", f"{k}={v}")]
+    games = 48
+    for mode, seats in (("constrictor", "A,B,A,B"), ("constrictor", "As,Bs,As,Bs"),
+                        ("constrictor", "A,H,H,H"), ("standard", "A,B,A,B")):  # fmt: skip
+        assert run(out, "--game-mode", mode, "--seats", seats, *agent_flags,
+                   "--games", str(games)) == 0  # fmt: skip
+    recs = M.read_records(out)[0]
+    flagged = {(r["game_mode"], r["lineup"]) for r in recs if M.deterministic(r)}
+    assert flagged == {("constrictor", "A,B,A,B")}
+    # It really is: the games repeat (2 start layouts x 6 seatings at most), the sampled ones don't.
+    greedy = direct(M.make_cell("constrictor", ["A", "B", "A", "B"], names, games), games)
+    sampled = direct(M.make_cell("constrictor", ["As", "Bs", "As", "Bs"], names, games), games)
+    distinct = lambda r: len({tuple(x) for x in np.round(r.game_placement, 6)})  # noqa: E731
+    assert distinct(greedy) <= 12 < games
+    assert distinct(sampled) > distinct(greedy)
+    capsys.readouterr()
+    assert M.main(["--table", "--out", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "| A,B,A,B (deterministic) |" in text and "Deterministic: only greedy ppo_modes" in text
+    assert "| As,Bs,As,Bs |" in text and "| A,H,H,H |" in text
+
+
 def test_pairing_needs_the_same_other_agents_and_the_same_games(tmp_path):
     out = tmp_path / "modes.jsonl"
     g, spec_s = ["--agent", "G=random_legal"], ["--agent", "S=random"]
@@ -499,15 +527,17 @@ def test_protocol_cells(tmp_path):
     by_mode = {m: [(c.label, c.games) for c in cells if c.game_mode == m] for m in modes.MODE_NAMES}
     wrong = lambda m, tail: [(f"G@{o}{tail}", 256) for o in modes.MODE_NAMES if o != m]  # noqa: E731
 
-    # The duel: G,S first (the primary endpoint), then each of G and S against H and P, floors.
+    # The duel: G,S first (the primary endpoint) and its sampled twin, then each of G and S
+    # against H and P, floors.
     assert by_mode["duel"] == [
-        ("G,S", 1024), ("G,H", 1024), ("S,H", 1024), ("G,P", 1024), ("S,P", 1024),
+        ("G,S", 1024), ("Gs,Ss", 1024),
+        ("G,H", 1024), ("S,H", 1024), ("G,P", 1024), ("S,P", 1024),
         ("G,R", 256), ("S,R", 256), *wrong("duel", ",H"),
     ]  # fmt: skip
-    # A 4-snake mode: the primary endpoint and the co-headline first, then the mid-strength and
-    # zero-shot references, the floors and the generalist told wrong modes.
+    # A 4-snake mode: the primary endpoint, its sampled twin and the co-headline first, then the
+    # mid-strength and zero-shot references, the floors and the generalist told wrong modes.
     four = [
-        ("G,S,G,S", 1024), ("G,S,H,H", 1024),
+        ("G,S,G,S", 1024), ("Gs,Ss,Gs,Ss", 1024), ("G,S,H,H", 1024),
         ("G,H,H,H", 1024), ("G,P,P,P", 1024), ("G,H,R,R", 1024),
         ("S,H,H,H", 1024), ("S,P,P,P", 1024), ("S,H,R,R", 1024),
         ("P,H,H,H", 512), ("G,R,R,R", 256), ("S,R,R,R", 256), *wrong("royale", ",H,H,H"),
@@ -530,6 +560,10 @@ def test_protocol_cells(tmp_path):
         c.agents["G"].name == f"ppo_modes:{general}" and c.agents["S"].name == f"ppo_modes:{royale}"
     )
     assert c.agents["H"].name == "heuristic"
+    sampled = next(c for c in cells if c.game_mode == "royale" and c.label == "Gs,Ss,Gs,Ss")
+    assert sampled.agents["Gs"].name == f"ppo_modes-sample:{general}"
+    assert sampled.agents["Ss"].name == f"ppo_modes-sample:{royale}"
+    assert not sampled.agents["Gs"].spec.greedy and not sampled.agents["Ss"].spec.greedy
     p = next(c for c in cells if c.label == "P,H,H,H" and c.game_mode == "royale")
     assert p.agents["P"].name == "ppo"
     told = next(c for c in cells if c.label == "G@duel,H,H,H" and c.game_mode == "royale")
@@ -575,14 +609,14 @@ def test_protocol_command_line(tmp_path, capsys):
     flags = ["--protocol", "--generalist", str(general), "--specialist", f"duel={duel}"]
     assert run(out, *flags, "--only", "duel", "--dry-run") == 0
     err = capsys.readouterr().err
-    assert "10 cell(s), 0 finished, 10 to play" in err and "G,S" in err and not out.exists()
+    assert "11 cell(s), 0 finished, 11 to play" in err and "G,S" in err and not out.exists()
     # Two cells of the protocol, played; a repeat finds them finished.
     cells = M.protocol_cells(str(general), {"duel": str(duel)}, ("duel",), games=6)
-    assert M.sweep([cells[0], cells[5]], SETTINGS, out, rerun=False) == 0
+    assert M.sweep([cells[0], cells[6]], SETTINGS, out, rerun=False) == 0
     assert [r["lineup"] for r in lines(out)] == ["G,S", "G,R"]
     assert run(out, *flags, "--only", "duel", "--games", "6", "--dry-run") == 0
     err = capsys.readouterr().err
-    assert "10 cell(s), 2 finished, 8 to play" in err and err.count("  done  ") == 2
+    assert "11 cell(s), 2 finished, 9 to play" in err and err.count("  done  ") == 2
     # Bad uses.
     for bad, message in (
         (["--protocol"], "--protocol needs --generalist"),
