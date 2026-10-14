@@ -49,7 +49,7 @@ How to read this file:
   sample their moves (`Gs,Ss,Gs,Ss`). `--table` marks a constrictor line-up
   of greedy networks only as *deterministic*.
 
-## 2. Without the repeats: level when sampled, slightly behind near greedy
+## 2. Without the repeats: level when sampled, slightly behind close to greedy
 
 | measure | generalist's share | source |
 |---|---|---|
@@ -63,12 +63,15 @@ How to read this file:
 | against 1 heuristic and 2 `random_legal`, G − S per seat (paired, 1,024 games) | −0.046 ± 0.038 | [benchmark] |
 
 - **No overall gain.** The generalist is level with its specialist under
-  sampled play, with sampled openings and against three heuristics. It is
-  slightly ahead against `ppo` and slightly behind with one heuristic and two
-  `random_legal`.
-- **A small deficit when greedy play is perturbed.** With uniform random moves
-  it is 0.04–0.08 behind. The three eps runs reuse the same random draws, so
-  they are not independent confirmations.
+  sampled play, with 3 sampled opening moves and against three heuristics.
+  It is slightly ahead against `ppo` and slightly behind with one heuristic
+  and two `random_legal`.
+- **A small deficit close to greedy play.** With occasional uniform random
+  moves it is 0.04–0.08 behind. The three eps runs reuse the same random
+  draws, so they are not independent confirmations.
+  - With a single sampled opening move, then greedy play, it scores 0.446
+    [0.417, 0.474] per game. Those are only 189 distinct games, and over the
+    distinct games it is 0.492 [0.421, 0.561]. [side analysis]
 - **Where that deficit sits** (2% random moves, 0.083 behind per game).
   - Its snakes are alive at the end of the contest less often: 23.2% of
     seats against 32.7%.
@@ -80,7 +83,9 @@ How to read this file:
     first is between the generalist's own snakes −0.030. Games whose first
     is between the specialist's snakes give +0.022 back.
   - A generalist-vs-specialist head-on kills one of each, so the loss in
-    those games builds up in the play that follows. [side analysis]
+    those games comes mostly from the play that follows. The surviving
+    generalist snake is also slightly worse placed at the collision (−0.80
+    [−1.55, −0.03] Voronoi cells). [side analysis]
 - **Royale does not depend on the protocol.** The generalist's lead holds
   greedy (0.705), sampled (0.698) and at every matched training snapshot:
   0.545, 0.646, 0.678, 0.706 and 0.701 against the specialist at the same
@@ -143,13 +148,15 @@ the policy).**
   - The food modes also agree at the constrictor specialist's parameters.
     That does not show a property of the tasks, though: there the food-mode
     rollouts are off the specialist's distribution, and a shared value
-    miscalibration alone would align them.
+    miscalibration could by itself align them.
 - **Caveat on the gradients.** 83–98% of the value gradient's squared norm
   sits in the 257-parameter value head, at the generalist's snapshots.
   - On the shared convolutional and dense layers alone, constrictor's value
-    gradient lines up with the food modes' at 2M and 3M (0.69, 0.63). It does
-    not at 1M (−0.04) or 4M (0.16), and at 5.24M it opposes them (−0.43
-    [−0.74, −0.14]).
+    gradient lines up with the food modes' at 2M and 3M (0.69, 0.63). It is
+    not clearly aligned at 1M (−0.04) or 4M (0.16), whose intervals are wide.
+  - At 5.24M it is slightly negative on the same statistic: −0.18
+    [−0.61, 0.15], raw cosine −0.11 [−0.19, −0.03]. Only standard's pair is
+    clearly negative (−0.57 [−0.79, −0.32]).
   - The value term is only 1/20–1/50 of those layers' gradient. The
     policy-gradient term dominates them and was pure noise at the sample
     sizes used.
@@ -172,8 +179,16 @@ the policy).**
     sampled G,S,G,S games).
   - Reweighting the specialist's decisions to the generalist's confidence
     gives 0.026, about 4 times.
-  - Whether the generalist reads the channels as tails that will move is not
-    settled. The same probe leaves its trap rate unchanged. [side analysis]
+  - Whether the generalist reads the channels as tails that will move is only
+    partly settled. Some probes move its trap rate in the tail-moving
+    direction, where the specialist's barely moves:
+    - making every body look about to clear raises its trap rate by 0.042
+      (the specialist's by 0.003);
+    - shifting the countdowns 5 turns later lowers it by 0.009 (the
+      specialist's by 0.004).
+  - Other probes do not. Making every body look far from clearing leaves its
+    trap rate unchanged (+0.001), and a 30-turn shift raises it (+0.029).
+    [side analysis]
 - **Moves that only have room if tails move.** Some decisions have a move
   that is roomy only if tails move. Where that room margin is 5 cells, the
   generalist picks it 13% of the time, against 7% for the specialist (2,048
@@ -235,8 +250,9 @@ the policy).**
 
 ## 4. Not finished
 
-Two experiments were cut short. A container restart interrupted them. They
-were restarted, then stopped for good when no more training was wanted:
+Two experiments were cut short. A container restart interrupted them; they
+were resumed, then stopped for good when no more training was wanted. This
+is recorded in the runs' own logs, which are not committed:
 
 - **Fine-tuning test.** The generalist and the constrictor specialist each
   get 1M more constrictor-only env steps, then play each other. This would

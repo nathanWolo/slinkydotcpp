@@ -247,8 +247,8 @@ in [`benchmarks/README.md`](benchmarks/README.md); the multi-mode tables are in
     standard, 0.62–0.71 in the duel (three specialist seeds) and 0.71 in
     royale.
   - In constrictor it has no overall gain. It is level with sampled play
-    (0.494), and slightly behind when greedy play is perturbed by random moves
-    (0.42–0.46).
+    (0.494), and slightly behind close to greedy play (0.42–0.46 with
+    occasional random moves).
   - In the duel it scores 0.388 against the heuristic and 0.644 against PPO.
   - Specialists retrained with its 16 minibatches (standard, duel, royale) are
     no stronger head to head, so its lead there is not its extra gradient

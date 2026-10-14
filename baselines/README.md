@@ -744,11 +744,14 @@ their moves (`ppo_modes-sample`), added after the greedy results.
   - Every other cell has a source of randomness: the heuristic breaks ties at
     random, `ppo` sees the food, and the other modes' food matters. `--table`
     now marks a line-up like this one *deterministic*.
-- **Perturbed greedy play shows a small constrictor deficit.** With a random
-  legal move 2%, 5% or 10% of the time, the generalist scores 0.417, 0.438
-  and 0.461 head to head (2,048 games each). With 3 sampled opening moves
-  and then greedy play it is level (0.490). These come from the
-  [investigation](../docs/research/multimode_constrictor.md)'s scripts.
+- **Close to greedy play there is a small constrictor deficit.**
+  - With a random legal move 2%, 5% or 10% of the time, the generalist scores
+    0.417, 0.438 and 0.461 head to head (2,048 games each).
+  - With 3 sampled opening moves and then greedy play it is level (0.490).
+    With one sampled opening move it scores 0.446, but over only 189
+    distinct games.
+  - These come from the
+    [investigation](../docs/research/multimode_constrictor.md)'s scripts.
 
 **Against fixed opponents.** These are the share of one seat against three
 copies of the opponent, or one copy in the duel. Parity is 0.25 at a 4-snake
@@ -910,8 +913,9 @@ narrowed them down:
     constrictor's points against standard's (raw cosine −0.31
     [−0.43, −0.19]).
   - Most of the value gradient sits in the value head. On the shared layers,
-    constrictor's value gradient lines up with the food modes' at 2–3M but
-    not at 1M or 4M, and opposes them at 5.24M.
+    constrictor's value gradient lines up with the food modes' at 2–3M. It
+    is not clearly aligned at 1M or 4M, and at 5.24M it is slightly negative
+    (clearly so only against standard's).
   - The policy-gradient term, which dominates those layers, could not be
     measured. So there is no direct evidence either way about what the
     shared layers learn for constrictor.
@@ -943,9 +947,9 @@ narrowed them down:
   mode the board cannot reveal would need it.
 - **Constrictor is weak for both** (about 0.7 against `random_legal`). A
   dedicated study (longer games on bigger boards, or a better reward) is open.
-- **Two experiments were cut short.** A container restart interrupted them.
-  They were restarted, then stopped for good when no more training was
-  wanted. Neither is reported.
+- **Two experiments were cut short.** A container restart interrupted them;
+  they were resumed, then stopped for good when no more training was wanted
+  (from the runs' own logs, not committed). Neither is reported.
   - The 16-minibatch constrictor control was stopped at 2.9M of 5.24M env
     steps.
   - In the fine-tuning test, the generalist and the constrictor specialist
