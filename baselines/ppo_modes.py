@@ -235,6 +235,9 @@ class ModesConfig:
     # Optimization.
     lr: float = 1e-3
     anneal_lr: bool = True  # linear decay to 0 over the run
+    # With anneal_lr off: constant until this many env steps per mode, then a linear
+    # cooldown to 0 at total_env_steps (-1: none). Set by --resume RUN --cooldown STEPS.
+    cooldown_from: int = -1
     max_grad_norm: float = 0.5
     adam_eps: float = 1e-5
     # Network: ppo.py's (3x3 convs, a dense hidden layer, linear policy and value heads)
@@ -299,6 +302,10 @@ class ModesConfig:
             raise ValueError(f"unknown eval_modes {sorted(bad)}; expected {EVAL_MODES}")
         if not 0.0 <= self.gamma <= 1.0 or not 0.0 <= self.gae_lambda <= 1.0:
             raise ValueError("gamma and gae_lambda must be in [0, 1]")
+        if self.cooldown_from >= 0 and self.anneal_lr:
+            raise ValueError("cooldown_from needs anneal_lr off (it replaces the decay)")
+        if not -1 <= self.cooldown_from < self.total_env_steps:
+            raise ValueError("cooldown_from must be -1 (none) or in [0, total_env_steps)")
 
     @property
     def snakes(self) -> dict[str, int]:
@@ -872,7 +879,15 @@ class RunnerState(NamedTuple):
 
 
 def learning_rate(cfg: ModesConfig) -> optax.Schedule:
-    """Constant, or a linear decay from ``lr`` to 0 over the run's gradient steps."""
+    """Constant, a linear decay from ``lr`` to 0 over the run's gradient steps, or constant
+    and then a linear cooldown to 0 from ``cooldown_from`` env steps per mode."""
+    if cfg.cooldown_from >= 0:
+        per_iter = cfg.update_epochs * cfg.num_minibatches
+        start = -(-cfg.cooldown_from // cfg.steps_per_iteration) * per_iter
+        span = max(schedule(cfg).total_updates - start, 1)
+        return optax.join_schedules(
+            [optax.constant_schedule(cfg.lr), optax.linear_schedule(cfg.lr, 0.0, span)], [start]
+        )
     if not cfg.anneal_lr:
         return optax.constant_schedule(cfg.lr)
     return optax.linear_schedule(cfg.lr, 0.0, schedule(cfg).total_updates)
@@ -1465,7 +1480,7 @@ def train(cfg: ModesConfig, resume: bool = False) -> tuple[str, Params]:
         print(f"initialised {', '.join(copied)} from {cfg.init_from}")
     os.makedirs(run_dir, exist_ok=True)
     if not resuming:  # a new run in an old directory: --resume must not find the old run
-        names = ["metrics.jsonl", "runner.npz", "params.npz"]
+        names = ["metrics.jsonl", "runner.npz", "params.npz", "STOP", "STOPPED"]
         names += [os.path.basename(p) for p in glob.glob(os.path.join(run_dir, "params-*.npz"))]
         for name in names:
             if os.path.exists(path := os.path.join(run_dir, name)):
@@ -1533,9 +1548,18 @@ def train(cfg: ModesConfig, resume: bool = False) -> tuple[str, Params]:
                         runner.params, cfg, groups, k, cfg.eval_games, cfg.eval_opponents,
                         cfg.eval_modes, steps, write,
                     )  # fmt: skip
+            # A STOP file (the plateau watcher's) ends the run after a full checkpoint.
+            stop = os.path.exists(stop_path := os.path.join(run_dir, "STOP"))
+            if stop and not evaluate:
+                save_checkpoint(run_dir, runner.params, snapshot_name(steps))
+                save_checkpoint(run_dir, runner.params)
             # After the eval, so an interrupted eval is redone on resume.
-            if last or crossed(cfg.checkpoint_every, steps):
+            if last or stop or crossed(cfg.checkpoint_every, steps):
                 save_runner(run_dir, runner, agent_total)
+            if stop:
+                os.replace(stop_path, os.path.join(run_dir, "STOPPED"))
+                print(f"stopped at {steps:,} env steps per mode (STOP file)", flush=True)
+                return run_dir, runner.params
     print(f"done in {time.perf_counter() - start:.0f}s; checkpoint in {run_dir}")
     return run_dir, runner.params
 
@@ -1600,6 +1624,13 @@ def parse_args(argv: list[str] | None = None) -> tuple[ModesConfig, argparse.Nam
         help="continue an interrupted run from its last full checkpoint, with its saved "
         "config (other flags are ignored)",
     )
+    p.add_argument(
+        "--cooldown",
+        type=int,
+        metavar="STEPS",
+        help="with --resume: continue for STEPS more env steps per mode, the learning rate "
+        "constant until now and then decaying linearly to 0 (needs a run with anneal_lr off)",
+    )
     hints = typing.get_type_hints(ModesConfig)
     for f in dataclasses.fields(ModesConfig):
         default = f.default
@@ -1625,8 +1656,19 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps({k: v for k, v in record.items() if k != "env_steps"}))
         return
     if args.resume:
-        train(dataclasses.replace(load_config(args.resume), run_dir=args.resume), resume=True)
+        cfg = dataclasses.replace(load_config(args.resume), run_dir=args.resume)
+        if args.cooldown:
+            with np.load(os.path.join(args.resume, "runner.npz")) as f:
+                # RunnerState's last leaves are (env_steps, updates).
+                steps = int(f[f"leaf{len(f.files) - 3}"])
+            cfg = dataclasses.replace(
+                cfg, cooldown_from=steps, total_env_steps=steps + args.cooldown
+            )
+            print(f"cooldown: {args.cooldown:,} env steps per mode from {steps:,}")
+        train(cfg, resume=True)
         return
+    if args.cooldown:
+        raise SystemExit("--cooldown needs --resume")
     train(cfg)
 
 

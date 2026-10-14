@@ -738,12 +738,12 @@ def pairs_table(pairs: list[tuple[str, Paired]], a: str, b: str) -> str:
 
 
 def deterministic(record: dict[str, Any]) -> bool:
-    """A constrictor line-up of greedy ``ppo_modes`` networks only: its games are fixed by the
-    start (food is inert and hidden from these networks, and nothing else is random)."""
+    """A constrictor line-up of greedy multi-mode networks only (no search): its games are
+    fixed by the start (food is inert and hidden from these networks, and nothing else is
+    random)."""
+    specs = [registry.parse_agent(v["name"]) for v in record["agents"].values()]
     return record["game_mode"] == "constrictor" and all(
-        registry.parse_agent(v["name"]).kind == "ppo_modes"
-        and registry.parse_agent(v["name"]).greedy
-        for v in record["agents"].values()
+        s.kind in registry.MODES_KINDS and s.greedy and not s.sims for s in specs
     )
 
 

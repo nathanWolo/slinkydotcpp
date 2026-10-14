@@ -43,6 +43,19 @@ Names:
   (``game_mode`` or ``snapshot``), any other item the run dir. The food channel is hidden
   by the real game's ruleset (constrictor), whatever mode the network is told.
   ``ppo:<ppo_modes run>`` is refused, as is ``ppo_modes:<ppo run>``: the networks differ.
+* ``reinforce_modes``, ``dqn_modes`` and ``rainbow_modes``, each
+  ``<kind>[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]``: the
+  multi-mode REINFORCE, DQN and Rainbow DQN (``baselines/<kind>.py``, on
+  :mod:`slinky.unified`), named and told their mode like ``ppo_modes``. Default checkpoints
+  ``baselines/checkpoints/reinforce-modes-seed0`` and so on (the kind with dashes). Sampled
+  play is a move from the policy for REINFORCE, and an epsilon-greedy move (the
+  trainer's ``EVAL_EPSILON``) for the DQNs, whose greedy play is the legal argmax of their
+  Q-values (Rainbow's expected return, noise off).
+* ``az_modes[...][:simulations=<n>]``: the multi-mode AlphaZero (``baselines/az_modes.py``),
+  named like the others. Without ``simulations`` (or with 0) it plays the raw network,
+  greedy (the legal argmax of its policy logits) or sampled; with ``n >= 1`` the move of
+  a decoupled PUCT search of ``n`` simulations with placement values (``-sample`` is
+  refused there: the search picks its most visited move).
 * ``rainbow`` or ``rainbow:<run dir>``: the self-play Rainbow DQN baseline
   (``baselines/rainbow.py``, legal argmax of the expected return, noise off),
   default checkpoint ``baselines/checkpoints/rainbow-duel-seed0``, otherwise
@@ -130,11 +143,14 @@ REINFORCE_SCRIPT = REPO_ROOT / "baselines" / "reinforce.py"
 DEFAULT_REINFORCE_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "reinforce-duel-seed0"
 AZ_SCRIPT = REPO_ROOT / "baselines" / "az.py"
 DEFAULT_AZ_CHECKPOINT = REPO_ROOT / "baselines" / "checkpoints" / "az-duel-seed0"
-# How ``ppo``, ``ppo_modes`` and ``reinforce`` play: "greedy" (legal argmax of the logits)
+# The multi-mode baselines: one network for every game mode, told its mode. Every kind
+# but ppo_modes is built on slinky.unified; their names and agents work alike.
+MODES_KINDS = ("ppo_modes", "reinforce_modes", "dqn_modes", "rainbow_modes", "az_modes")
+# How ``ppo``, ``reinforce`` and the multi-mode kinds play: "greedy" (legal argmax of the logits)
 # or "sample" (from the policy).
 PPO_MODES = ("greedy", "sample")
 PPO_DEFAULT_MODE = "greedy"
-# The ``:field=value`` items of a ``ppo_modes`` name.
+# The ``:field=value`` items of a multi-mode name (``ppo_modes`` and the other MODES_KINDS).
 PPO_MODES_OPTIONS = ("game_mode", "snapshot")
 
 AGENT_NAMES = (
@@ -142,6 +158,10 @@ AGENT_NAMES = (
     "ppo[-greedy|-sample]", "ppo[-greedy|-sample]:<run dir>",
     "ppo_modes[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]", "rainbow",
     "rainbow:<run dir>", "reinforce[-greedy|-sample]", "reinforce[-greedy|-sample]:<run dir>",
+    *(f"{k}[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]"
+      for k in ("reinforce_modes", "dqn_modes", "rainbow_modes")),
+    "az_modes[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]"
+    "[:simulations=<n>]",
     "az-<n>[:<run dir>][:field=value...]", "mcts-<n>[-shorthand...][:field=value...]",
 )  # fmt: skip
 SIMPLE_AGENTS = ("random_legal", "random", "heuristic")
@@ -182,15 +202,15 @@ class AgentSpec:
         ``az-0``.
       checkpoint: the resolved run directory of a trained baseline (``dqn``, ``ppo``,
         ``ppo_modes``, ``rainbow``, ``reinforce`` or ``az``).
-      greedy: how a ``ppo``, ``ppo_modes`` or ``reinforce`` agent plays: the legal argmax of
+      greedy: how a ``ppo``, ``reinforce`` or multi-mode agent plays: the legal argmax of
         its logits (True) or a move sampled from its policy (False). None for other agents.
       overrides: an ``az`` agent's ``:field=value`` search settings, in
         ``MCTSConfig`` field order.
-      game_mode: the mode a ``ppo_modes`` agent is told whatever game it plays (a name
-        in :data:`slinky.modes.MODE_NAMES`); None: the mode of the game
+      game_mode: the mode a multi-mode agent (:data:`MODES_KINDS`) is told whatever game it
+        plays (a name in :data:`slinky.modes.MODE_NAMES`); None: the mode of the game
         (:func:`slinky.modes.mode_of`). None for other agents.
       snapshot: the env steps (per mode) of the ``params-<steps>.npz`` snapshot a
-        ``ppo_modes`` agent plays; None: the run's final ``params.npz``. None for other
+        multi-mode agent plays; None: the run's final ``params.npz``. None for other
         agents.
     """
 
@@ -206,6 +226,8 @@ class AgentSpec:
     @property
     def sims(self) -> int:
         """Simulations per move (0 for agents without a search)."""
+        if self.kind == "az_modes":
+            return dict(self.overrides).get("simulations", 0)
         return self.mcts.num_simulations if self.mcts is not None else 0
 
 
@@ -224,8 +246,9 @@ def parse_agent(name: str) -> AgentSpec:
         raise ValueError(f"{name!r}: write dqn:<run dir>")
     if name == "ppo" or name.startswith(("ppo:", "ppo-", "ppo@")):
         return _parse_policy_gradient(name, "ppo")
-    if name == "ppo_modes" or name.startswith(("ppo_modes:", "ppo_modes-", "ppo_modes@")):
-        return _parse_ppo_modes(name)
+    for kind in MODES_KINDS:
+        if name == kind or name.startswith((f"{kind}:", f"{kind}-", f"{kind}@")):
+            return _parse_modes(name, kind)
     if name == "rainbow" or name.startswith("rainbow:"):
         return _parse_rainbow(name)
     if name.startswith("rainbow@"):
@@ -273,7 +296,7 @@ def make_env(config: GameConfig, obs: bool) -> BattlesnakeEnv:
 def check_game(spec: AgentSpec, config: GameConfig) -> None:
     """Raise ``ValueError`` if the agent can't play games with ``config``.
 
-    A ``ppo_modes`` agent is also refused when the mode it would be told (``:game_mode=``,
+    A multi-mode agent is also refused when the mode it would be told (``:game_mode=``,
     else the mode of ``config``) is not one of its run's ``game_modes``: a specialist
     plays another mode's game only when told its own mode explicitly.
 
@@ -294,7 +317,7 @@ def check_game(spec: AgentSpec, config: GameConfig) -> None:
                 f"({'wrapped' if trained.ruleset.wrapped else 'not wrapped'}) and can't play "
                 f"{config.width}x{config.height} ({config.ruleset.value})"
             )
-        if spec.kind == "ppo_modes":
+        if spec.kind in MODES_KINDS:
             told = _told_mode(spec, config)
             if told not in run.game_modes:
                 known = ", ".join(run.game_modes)
@@ -315,7 +338,7 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
     field (but see :func:`_mcts_fields`), the heuristic weights, a trained baseline's
     run config (network included), how it picks moves and a hash of its parameters;
     an ``az`` agent also gets its simulations and, if it searches, the resolved search
-    (``search``: the ``MCTSConfig`` fields, from its run and name). A ``ppo_modes`` agent
+    (``search``: the ``MCTSConfig`` fields, from its run and name). A multi-mode agent
     also gets ``game_mode``, the mode it is told whatever game it plays (None: the game's
     own), and ``snapshot`` (None: the final parameters); no other kind has these keys, so
     the identities of the others do not change. Benchmarks hash it to tell results of
@@ -334,18 +357,35 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
             "checkpoint": _display_path(path),
             "greedy": spec.greedy is not False,  # the DQN and Rainbow are always greedy
             "params_sha256": hashlib.sha256(params.read_bytes()).hexdigest()[:16],
-            "network": dataclasses.asdict(_run_config(spec)),
+            "network": _run_config_fields(_run_config(spec)),
         }
         if spec.kind == "az":
             search = _az_search(spec)
             config["simulations"] = spec.sims
             config["search"] = None if search is None else _mcts_fields(search)
-        if spec.kind == "ppo_modes":
+        if spec.kind in MODES_KINDS:
             config["game_mode"] = spec.game_mode
             config["snapshot"] = spec.snapshot
+            if spec.kind == "az_modes":
+                config["simulations"] = dict(spec.overrides).get("simulations", 0)
     else:
         config = {"type": "mcts", **_mcts_fields(spec.mcts)}
     return json.loads(json.dumps(config, sort_keys=True))  # as it reads back from JSON
+
+
+_MISSING = object()
+# Training-config fields added after results were stored, with the value every earlier run
+# had: left out at that value, so those agents keep their identities.
+_LATER_RUN_CONFIG_FIELDS = {"cooldown_from": -1, "compute_dtype": "float32"}
+
+
+def _run_config_fields(config: Any) -> dict[str, Any]:
+    """A baseline's training config as data, without the later fields at their old value."""
+    fields = dataclasses.asdict(config)
+    for name, old in _LATER_RUN_CONFIG_FIELDS.items():
+        if name in fields and fields[name] == old:
+            del fields[name]
+    return fields
 
 
 # ``MCTSConfig`` fields that only PUCT reads. Without PUCT they are always at their
@@ -354,14 +394,19 @@ def agent_config(spec: AgentSpec) -> dict[str, Any]:
 # they were added (``benchmarks/results/strength.jsonl``), so the benchmark does not re-run
 # them. A field added later should likewise be left out where it has no effect.
 _PUCT_ONLY_FIELDS = ("c_puct", "fpu_reduction", "prior", "root_noise_frac", "root_dirichlet_alpha")
+# ``MCTSConfig`` fields added after results were stored, with the value every earlier search
+# had: left out at that value, so those agents keep their identities.
+_LATER_MCTS_FIELDS = {"value": "win_loss"}
 
 
 def _mcts_fields(config: Any) -> dict[str, Any]:
-    """An ``MCTSConfig``'s fields as JSON-friendly data (without PUCT's own when not PUCT)."""
+    """An ``MCTSConfig``'s fields as JSON-friendly data (without PUCT's own when not PUCT,
+    nor the later fields at their old value)."""
     fields = {
         f.name: getattr(config, f.name)
         for f in dataclasses.fields(config)
-        if config.selection == "puct" or f.name not in _PUCT_ONLY_FIELDS
+        if (config.selection == "puct" or f.name not in _PUCT_ONLY_FIELDS)
+        and _LATER_MCTS_FIELDS.get(f.name, _MISSING) != getattr(config, f.name)
     }
     return {k: v._asdict() if hasattr(v, "_asdict") else v for k, v in fields.items()}
 
@@ -383,8 +428,8 @@ def _build(spec: AgentSpec, config: GameConfig) -> Agent:
         return _dqn_agent(spec)
     if spec.kind == "ppo":
         return _ppo_agent(spec)
-    if spec.kind == "ppo_modes":
-        return _ppo_modes_agent(spec, config)
+    if spec.kind in MODES_KINDS:
+        return _modes_agent(spec, config)
     if spec.kind == "rainbow":
         return _rainbow_agent(spec)
     if spec.kind == "reinforce":
@@ -412,11 +457,21 @@ BASELINES = {
     "rainbow": (RAINBOW_SCRIPT, "baselines_rainbow", DEFAULT_RAINBOW_CHECKPOINT),
     "reinforce": (REINFORCE_SCRIPT, "baselines_reinforce", DEFAULT_REINFORCE_CHECKPOINT),
     "az": (AZ_SCRIPT, "baselines_az", DEFAULT_AZ_CHECKPOINT),
+    **{
+        kind: (
+            REPO_ROOT / "baselines" / f"{kind}.py",
+            f"baselines_{kind}",
+            REPO_ROOT / "baselines" / "checkpoints" / f"{kind.replace('_', '-')}-seed0",
+        )
+        for kind in MODES_KINDS[1:]
+    },
 }
 # For messages ("no DQN checkpoint in ...").
 BASELINE_LABELS = {
     "dqn": "DQN", "ppo": "PPO", "ppo_modes": "multi-mode PPO", "rainbow": "Rainbow",
-    "reinforce": "REINFORCE", "az": "AlphaZero",
+    "reinforce": "REINFORCE", "az": "AlphaZero", "reinforce_modes": "multi-mode REINFORCE",
+    "dqn_modes": "multi-mode DQN", "rainbow_modes": "multi-mode Rainbow DQN",
+    "az_modes": "multi-mode AlphaZero",
 }  # fmt: skip
 
 
@@ -523,16 +578,19 @@ def _parse_policy_gradient(name: str, kind: str) -> AgentSpec:
     )
 
 
-def _parse_ppo_modes(name: str) -> AgentSpec:
+def _parse_modes(name: str, kind: str) -> AgentSpec:
+    """A multi-mode kind (:data:`MODES_KINDS`) with its play mode, run dir and settings."""
     head, *items = name.split(":")
-    syntax = "write ppo_modes[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]"
-    if head.startswith("ppo_modes@"):
-        raise ValueError(f"{name!r}: write ppo_modes:<run dir>")
+    options = PPO_MODES_OPTIONS + (("simulations",) if kind == "az_modes" else ())
+    syntax = f"write {kind}[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]"
+    syntax += "[:simulations=<n>]" if kind == "az_modes" else ""
+    if head.startswith(f"{kind}@"):
+        raise ValueError(f"{name!r}: write {kind}:<run dir>")
     mode = PPO_DEFAULT_MODE
-    if head != "ppo_modes":
-        mode = head.removeprefix("ppo_modes-")
+    if head != kind:
+        mode = head.removeprefix(f"{kind}-")
         if mode not in PPO_MODES:
-            raise ValueError(f"{name!r}: unknown ppo_modes play mode {mode!r}; {syntax}")
+            raise ValueError(f"{name!r}: unknown {kind} play mode {mode!r}; {syntax}")
     run_text: str | None = None
     settings: dict[str, tuple[str, str]] = {}  # field -> (value text, the item it came from)
     for item in items:
@@ -545,10 +603,10 @@ def _parse_ppo_modes(name: str) -> AgentSpec:
             continue
         field, _, text = item.partition("=")
         field = field.strip()
-        if field not in PPO_MODES_OPTIONS:
+        if field not in options:
             raise ValueError(
-                f"unknown ppo_modes option {field!r} in {name!r}; the options are "
-                + " and ".join(PPO_MODES_OPTIONS)
+                f"unknown {kind} option {field!r} in {name!r}; the options are "
+                + ", ".join(options)
             )
         if field in settings:
             raise ValueError(f"{name!r}: {settings[field][1]!r} and {item!r} both set {field}")
@@ -569,14 +627,23 @@ def _parse_ppo_modes(name: str) -> AgentSpec:
                 f"(the <steps> of params-<steps>.npz), not {text!r}"
             )
         snapshot = int(text)
-    path = _run_dir("ppo_modes", run_text)
-    base = "ppo_modes" if mode == PPO_DEFAULT_MODE else f"ppo_modes-{mode}"
-    text = _with_run_dir(base, "ppo_modes", path)
+    sims = 0
+    if "simulations" in settings:
+        text = settings["simulations"][0]
+        if not re.fullmatch(r"[0-9]+", text):
+            raise ValueError(f"{name!r}: simulations must be a whole number >= 0, not {text!r}")
+        sims = int(text)
+        if sims and mode != PPO_DEFAULT_MODE:
+            raise ValueError(f"{name!r}: a search plays its most visited move; drop -{mode}")
+    path = _run_dir(kind, run_text)
+    base = kind if mode == PPO_DEFAULT_MODE else f"{kind}-{mode}"
+    text = _with_run_dir(base, kind, path)
     text += f":snapshot={snapshot}" if snapshot else ""
     text += f":game_mode={game_mode}" if game_mode else ""
+    text += f":simulations={sims}" if sims else ""
     return AgentSpec(
-        text, "ppo_modes", checkpoint=path, greedy=mode == "greedy", game_mode=game_mode,
-        snapshot=snapshot,
+        text, kind, checkpoint=path, greedy=mode == "greedy", game_mode=game_mode,
+        snapshot=snapshot, overrides=(("simulations", sims),) if sims else (),
     )  # fmt: skip
 
 
@@ -652,7 +719,7 @@ def _ppo_agent(spec: AgentSpec) -> Agent:
 
 
 def _told_mode(spec: AgentSpec, config: GameConfig) -> str:
-    """The mode a ``ppo_modes`` agent is told in games with ``config``."""
+    """The mode a multi-mode agent is told in games with ``config``."""
     if spec.game_mode is not None:
         return spec.game_mode
     try:
@@ -661,16 +728,23 @@ def _told_mode(spec: AgentSpec, config: GameConfig) -> str:
         raise ValueError(f"{spec.name}: {e}") from None
 
 
-def _ppo_modes_agent(spec: AgentSpec, config: GameConfig) -> Agent:
-    ppo_modes = load_ppo_modes_module()
+def _modes_agent(spec: AgentSpec, config: GameConfig) -> Agent:
+    """A multi-mode agent: every :data:`MODES_KINDS` module has ``load_params`` and
+    ``make_policy`` with ``ppo_modes.py``'s signatures."""
+    module = load_baseline_module(spec.kind)
     cfg = _run_config(spec)
     params_file = _checkpoint_files(spec)[0]
-    params = ppo_modes.load_params(str(spec.checkpoint), cfg, name=params_file.name)
+    params = module.load_params(str(spec.checkpoint), cfg, name=params_file.name)
     mode = _told_mode(spec, config)
     how = "greedy" if spec.greedy else "sampled"
     snap = "" if spec.snapshot is None else f", snapshot {spec.snapshot}"
-    desc = f"{how} multi-mode self-play PPO ({spec.checkpoint.name}{snap}), told {mode}"
-    policy = ppo_modes.make_policy(params, cfg, config, mode, bool(spec.greedy))
+    label = BASELINE_LABELS[spec.kind]
+    desc = f"{how} {label} self-play ({spec.checkpoint.name}{snap}), told {mode}"
+    extra = {}
+    if sims := dict(spec.overrides).get("simulations", 0):
+        extra["simulations"] = sims
+        desc += f", {sims} simulations of search"
+    policy = module.make_policy(params, cfg, config, mode, bool(spec.greedy), **extra)
     return Agent(spec.name, policy, True, desc)
 
 

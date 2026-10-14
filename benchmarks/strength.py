@@ -162,7 +162,6 @@ import multiprocessing.connection
 import os
 import platform
 import re
-import resource
 import signal
 import subprocess
 import sys
@@ -172,6 +171,11 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource
+except ImportError:  # Windows: peak_rss_mb reads the peak working set instead
+    resource = None
 
 import jax
 
@@ -205,6 +209,9 @@ ROUGH_MS = {
     "fixed": 0.06, "per_sim": 0.0055, "sim_scale": 48000.0, "dqn": 0.25, "ppo": 0.15,
     "az": 0.15, "az_per_sim": 0.085,
 }  # fmt: skip
+DQN_KINDS = ("dqn", "rainbow")
+PPO_KINDS = ("ppo", "ppo_modes", "reinforce", "reinforce_modes", "dqn_modes", "rainbow_modes")
+AZ_KINDS = ("az", "az_modes")
 ROUGH_TURNS_PER_GAME = 120
 ROUGH_TURNS_VS_RANDOM = 40
 COMPILE_SECONDS = 10.0  # about what compiling a matchup takes
@@ -370,12 +377,14 @@ class Matchup:
         sims = self.a.sims + self.b.sims
         ms = ROUGH_MS["fixed"] + ROUGH_MS["per_sim"] * sims * (1 + sims / ROUGH_MS["sim_scale"])
         # Rainbow's network is the DQN's with a wider head: about the same cost per move.
-        ms += ROUGH_MS["dqn"] * (kinds.count("dqn") + kinds.count("rainbow"))
-        # The multi-mode network is PPO's with a small extra input, and REINFORCE plays with
-        # PPO's network: the same cost per move.
-        ms += ROUGH_MS["ppo"] * sum(kinds.count(k) for k in ("ppo", "ppo_modes", "reinforce"))
-        ms += ROUGH_MS["az"] * kinds.count("az")
-        ms += ROUGH_MS["az_per_sim"] * sum(x.sims for x in (self.a, self.b) if x.spec.kind == "az")
+        ms += ROUGH_MS["dqn"] * sum(kinds.count(k) for k in DQN_KINDS)
+        # The multi-mode networks are PPO's with a small extra input, and REINFORCE plays with
+        # PPO's network: the same cost per move (the multi-mode DQNs' too, at the default size).
+        ms += ROUGH_MS["ppo"] * sum(kinds.count(k) for k in PPO_KINDS)
+        ms += ROUGH_MS["az"] * sum(kinds.count(k) for k in AZ_KINDS)
+        ms += ROUGH_MS["az_per_sim"] * sum(
+            x.sims for x in (self.a, self.b) if x.spec.kind in AZ_KINDS
+        )
         random = {"random", "random_legal"} & set(kinds)
         turns = ROUGH_TURNS_VS_RANDOM if random else ROUGH_TURNS_PER_GAME
         return self.games * turns * ms / 1e3
@@ -508,8 +517,31 @@ def interval_text(wins: int, draws: int, losses: int) -> str:
 
 
 def peak_rss_mb() -> float:
+    if resource is None:
+        return _peak_working_set() / 2**20
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak / (2**20 if sys.platform == "darwin" else 2**10)
+
+
+def _peak_working_set() -> int:
+    """Windows: this process's peak working set in bytes (GetProcessMemoryInfo)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+            (f, ctypes.c_size_t)
+            for f in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage")
+            + ("QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage")
+            + ("PagefileUsage", "PeakPagefileUsage")
+        ]
+
+    c = Counters(cb=ctypes.sizeof(Counters))
+    psapi, kernel32 = ctypes.WinDLL("psapi"), ctypes.WinDLL("kernel32")
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+    ok = psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb)
+    return c.PeakWorkingSetSize if ok else 0
 
 
 def fmt_duration(seconds: float) -> str:

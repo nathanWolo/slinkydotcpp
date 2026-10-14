@@ -211,6 +211,20 @@ for priors and leaf values it is 85-89 us, about 18x: the network is about
 95% of a simulation. Network priors with heuristic leaves take 94 us, and
 root noise costs nothing measurable.
 
+**Placement values** (``value="placement"``, for games of more than two snakes). By
+default (``"win_loss"``) a dead snake is worth -1 whoever outlasted whom, which in a
+4-snake game gives second to fourth place the same value. With ``"placement"`` every
+snake's value is its share of :func:`slinky.env.placement_reward`, summed over the game
+(:func:`placement_values`): ``+1/(N-1)`` for each snake it outlasts, ``-1/(N-1)`` for each
+that outlasts it, 0 for one eliminated on the same turn, so places 1 to 4 of four are
+worth +1, +1/3, -1/3 and -1. A snake's value is exact once it is dead, which is also its
+value inside the tree while the others play on. ``draw_value`` scales the snakes
+eliminated together on the final turn, when nobody survives: each other snake tied with
+it there counts ``draw_value/(N-1)`` instead of 0. In a duel both settings give the same
+values. Network leaf values then estimate the living snakes' placement values, and value
+targets should be :func:`placement_values` of the final state with the search's
+``draw_value``.
+
 **Limits.** The children table has ``4**N`` entries per node, so ``N <= 4``
 (256 joint actions; more snakes raise ``ValueError``). The spec was written for
 duels; 3 and 4 snakes run (values are per player, not constant-sum), but they
@@ -247,6 +261,7 @@ _LEAVES = ("heuristic", "none", "network")
 _PRIORS = ("uniform", "network")
 _ROLLOUT_POLICIES = ("random", "heuristic")
 _FINALS = ("max", "sample")
+_VALUES = ("win_loss", "placement")
 # ``fold_in(key, _ROOT_NOISE_STREAM)`` draws the root's Dirichlet noise. No 4-way split of
 # the search key gives this key (under either threefry mode), and the other keys stay as
 # they were, so turning the noise on changes nothing else about a search.
@@ -299,6 +314,8 @@ class MCTSConfig:
         ``env.step`` and sample the map's food spawn. If False (the default),
         they run ``rules.rules_step`` without a spawn: a deterministic model of
         the game (Schier & Wustenbecker 2019) that skips the costly random draw.
+      value: ``"win_loss"`` (a dead snake -1, a sole survivor +1) or ``"placement"``
+        (:func:`placement_values`; see the module docstring). The same in a duel.
     """
 
     num_simulations: int = 128
@@ -320,6 +337,7 @@ class MCTSConfig:
     final: str = "max"
     draw_value: float = -0.5
     spawn_food: bool = False
+    value: str = "win_loss"
 
     def __post_init__(self) -> None:
         if self.num_simulations < 1:
@@ -348,6 +366,7 @@ class MCTSConfig:
             ("prior", _PRIORS),
             ("rollout_policy", _ROLLOUT_POLICIES),
             ("final", _FINALS),
+            ("value", _VALUES),
         ):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}, got {getattr(self, name)!r}")
@@ -473,15 +492,49 @@ def _static_value(
 
     ``net_value`` is the evaluator's value of ``state`` (needed for ``leaf="network"``).
     """
-    exact = heuristic.terminal_values(state, env.config, config.draw_value)
-    if config.leaf == "heuristic":
-        estimate = heuristic.evaluate(state, env.config, config.weights)
-    elif config.leaf == "network":
-        estimate = jnp.where(state.alive, jnp.clip(net_value, -1.0, 1.0), -1.0)
+    if config.value == "placement":
+        exact = placement_values(state, env.config, config.draw_value)
     else:
-        estimate = jnp.where(state.alive, 0.0, -1.0)
+        exact = heuristic.terminal_values(state, env.config, config.draw_value)
+    dead = exact if config.value == "placement" else -1.0  # a dead snake's value is final
+    if config.leaf == "heuristic":
+        estimate = jnp.where(
+            state.alive, heuristic.evaluate(state, env.config, config.weights), dead
+        )
+    elif config.leaf == "network":
+        estimate = jnp.where(state.alive, jnp.clip(net_value, -1.0, 1.0), dead)
+    else:
+        estimate = jnp.where(state.alive, 0.0, dead)
     # ``done`` covers truncation too (living snakes get 0 there, as a draw).
     return jnp.where(state.done, exact, estimate).astype(jnp.float32)
+
+
+def placement_values(state: State, config: GameConfig, draw_value: float = 0.0) -> jax.Array:
+    """float32[N] placement values: ``(outlasted - outlasted by) / (N - 1)`` per snake.
+
+    A snake outlasts those eliminated on an earlier turn (a living snake outlasts every
+    dead one), and snakes eliminated on the same turn, or alive together, are tied
+    (0 to each other). When nobody survives, the snakes eliminated on the final turn
+    count ``draw_value / (N - 1)`` for each other snake tied with them there. A dead
+    snake's value is final; a living snake's is exact only when the game is over (the
+    caller replaces it with an estimate otherwise). Summed over a game,
+    :func:`slinky.env.placement_reward` pays the same (with ``draw_value=0``); in a duel
+    this is ``heuristic.terminal_values``.
+    """
+    n = config.num_snakes
+    if n < 2:
+        return heuristic.terminal_values(state, config, draw_value)
+    alive = state.alive
+    never = jnp.iinfo(jnp.int32).max
+    out = jnp.where(alive, never, state.elim_turn.astype(jnp.int32))  # [N]
+    outlasted = jnp.sum(out[:, None] > out[None, :], axis=1)
+    outlasted_by = jnp.sum(out[None, :] > out[:, None], axis=1)
+    value = (outlasted - outlasted_by).astype(jnp.float32) / (n - 1)
+    last = out == jnp.max(out)
+    final_tie = ~jnp.any(alive) & last
+    tied = jnp.sum(final_tie) - 1
+    value = value + jnp.where(final_tie, draw_value * tied / (n - 1), 0.0)
+    return value.astype(jnp.float32)
 
 
 def _check_evaluator(config: MCTSConfig, evaluator: Evaluator | None) -> None:
