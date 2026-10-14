@@ -19,6 +19,10 @@ reward, and a loss that weighs every mode the same. Changes from ``reinforce.py`
 * **The learning rate** is constant (``reinforce.py``'s 3e-3) with the campaign's
   optional cooldown (:func:`slinky.unified.lr_factor`), and env steps are per mode:
   the mean over the modes of their games' turns.
+* **Bad gradients are skipped.** An update whose raw gradient norm is not finite or
+  above :data:`MAX_RAW_GRAD_NORM` changes neither the parameters nor Adam's moments
+  (``skipped_updates``, ``grad_norm_max`` in the logs). The GPU campaign's first chunk
+  had raw norms summing to 5e7; the same code and config on the CPU peaked at 5.3.
 
 The reward is the placement reward (zero-sum, the win/loss reward in a duel), so the
 returns of every mode have the same baseline of 0 under self-play and one value head
@@ -35,6 +39,7 @@ Commands::
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -51,6 +56,10 @@ from slinky.unified import Group, Params
 
 ALGORITHM = "reinforce_modes"
 BASELINES = ("value", "none")
+# Raw (pre-clip) gradient norms above this are a fault, not a gradient: healthy updates of
+# the M network stay below about 20 (CPU replays of the campaign config and of the duel
+# baseline). Clipping bounds such a vector's size, but Adam would still step along it.
+MAX_RAW_GRAD_NORM = 1e3
 
 
 @dataclasses.dataclass(frozen=True)
@@ -399,6 +408,11 @@ def make_train_chunk(
         lr = cfg.lr * unified.lr_factor(runner.env_steps, cfg)
         step, opt_state = optimizer.update(grads, runner.opt_state, runner.params)
         params = optax.apply_updates(runner.params, unified.scale_updates(step, lr))
+        # A non-finite or absurd gradient moves nothing, Adam's moments included.
+        grad_norm = optax.tree.norm(grads)
+        ok = jnp.isfinite(grad_norm) & (grad_norm <= MAX_RAW_GRAD_NORM)
+        params = unified.tree_where(ok, params, runner.params)
+        opt_state = unified.tree_where(ok, opt_state, runner.opt_state)
 
         per_mode = []
         for gm, e in zip(games, cfg.envs, strict=True):
@@ -418,7 +432,9 @@ def make_train_chunk(
             )
         metrics = {k: jnp.stack([p[k] for p in per_mode]) for k in per_mode[0]}
         metrics.update(sums)
-        metrics["grad_norm"] = optax.tree.norm(grads)
+        metrics["grad_norm"] = jnp.where(ok, grad_norm, 0.0)  # the mean is over steps taken
+        metrics["grad_norm_max"] = grad_norm
+        metrics["skipped"] = (~ok).astype(jnp.int32)
         metrics["lr"] = lr
         steps_all = runner.env_steps_all + jnp.sum(metrics["game_turns"])
         runner = RunnerState(
@@ -434,7 +450,7 @@ def make_train_chunk(
     def train_chunk(runner: RunnerState) -> tuple[RunnerState, dict[str, jax.Array]]:
         runner, metrics = jax.lax.scan(update, runner, None, length=cfg.updates_per_log)
         out = {
-            k: jnp.max(v, 0) if k == "max_game_len" else jnp.sum(v, 0)
+            k: jnp.max(v, 0) if k in ("max_game_len", "grad_norm_max") else jnp.sum(v, 0)
             for k, v in metrics.items() if k != "lr"
         }  # fmt: skip
         out["lr"] = metrics["lr"][-1]
@@ -473,6 +489,8 @@ def chunk_record(m: dict[str, Any], seconds: float, chunk_steps: int, cfg: Confi
             "v_loss": mean("v_loss"),
             "entropy": mean("entropy"),
             "value_mean": mean("value"),
+            # ~0 with an explained_var of ~0: the value ignores the board (a dead torso).
+            "value_std": math.sqrt(max(mean("value_sq") - mean("value") ** 2, 0.0)),
             "return_mean": mean("ret"),
             "return_var": var_ret,
             "explained_var": unified.finite(1.0 - var_err / var_ret) if var_ret > 0 else None,
@@ -484,6 +502,7 @@ def chunk_record(m: dict[str, Any], seconds: float, chunk_steps: int, cfg: Confi
     v = sum(w * p["v_loss"] for w, p in zip(weights, modes_, strict=True))
     ent = sum(w * p["entropy"] for w, p in zip(weights, modes_, strict=True))
     vf = cfg.vf_coef if cfg.baseline == "value" else 0.0
+    skipped = int(m["skipped"])
     return {
         "type": "train",
         "env_steps": int(m["env_steps"]),
@@ -495,7 +514,9 @@ def chunk_record(m: dict[str, Any], seconds: float, chunk_steps: int, cfg: Confi
         "pg_loss": pg,
         "v_loss": v,
         "entropy": ent,
-        "grad_norm": float(m["grad_norm"]) / n_upd,
+        "grad_norm": float(m["grad_norm"]) / max(n_upd - skipped, 1),
+        "grad_norm_max": unified.finite(float(m["grad_norm_max"])),  # None: not finite
+        "skipped_updates": skipped,
         **{k: head[k] for k in ("games", "mean_game_len", "draws", "truncated", "deaths")},
         "explained_var": head["explained_var"],
         "value_mean": head["value_mean"],
@@ -516,7 +537,12 @@ def format_record(r: dict[str, Any], total_steps: int) -> str:
         ev = f"{p['explained_var']:.2f}" if p["explained_var"] is not None else "-"
         lines.append(
             f"  {name:>11} | pg {p['pg_loss']:+.4f} v {p['v_loss']:.4f} ent {p['entropy']:.3f} "
-            f"ev {ev} V {p['value_mean']:+.2f} busy {p['busy']:.2f} | {unified.format_games(p)}"
+            f"ev {ev} V {p['value_mean']:+.2f} sd {p.get('value_std', 0.0):.1e} "
+            f"busy {p['busy']:.2f} | {unified.format_games(p)}"
+        )
+    if r.get("skipped_updates"):
+        lines.append(
+            f"  skipped {r['skipped_updates']} update(s): raw grad norm up to {r['grad_norm_max']}"
         )
     return "\n".join(lines)
 

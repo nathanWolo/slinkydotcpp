@@ -23,7 +23,7 @@ from slinky import agents, heuristic, mcts, modes, unified
 from slinky.env import BattlesnakeEnv, placement_reward
 from slinky.types import State
 
-pytest.importorskip("optax")
+optax = pytest.importorskip("optax")
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,6 +40,7 @@ def _load(module_name: str, file_name: str):
 
 
 rm = _load("baselines_reinforce_modes", "reinforce_modes.py")
+rf = _load("baselines_reinforce", "reinforce.py")
 dq = _load("baselines_dqn_modes", "dqn_modes.py")
 rb = _load("baselines_rainbow_modes", "rainbow_modes.py")
 azm = _load("baselines_az_modes", "az_modes.py")
@@ -152,6 +153,68 @@ def test_join_and_split_are_inverse():
     assert joined.shape == (sum(e * g.num_snakes for g, e in zip(groups, envs, strict=True)), 5)
     for x, y in zip(xs, unified.split(joined, groups, envs), strict=True):
         np.testing.assert_array_equal(x, y)
+
+
+# --- REINFORCE's gradient ---------------------------------------------------------------------
+
+
+def test_reinforce_modes_duel_gradient_is_reinforce_py_s():
+    """Playing only duels and told nothing, reinforce_modes' loss is reinforce.py's: the same
+    gradient and sums on the same games, with a first-update norm far below the guard (the
+    GPU campaign's first chunk logged a mean raw norm of 1.5e6)."""
+    net = dict(conv_channels=(4, 8), conv_strides=(2, 2), hidden=16, max_turns=60, block_turns=20)
+    cfg = rm.Config(
+        **net, game_modes=("duel",), mode_envs=("duel=4",), features="none", reward="win_loss",
+        eval_games=0,
+    )  # fmt: skip
+    ref_cfg = rf.ReinforceConfig(**net, num_envs=4)
+    params = rf.init_network(jax.random.key(0), ref_cfg)
+    assert jax.tree.structure(params) == jax.tree.structure(rm.init_network(jax.random.key(0), cfg))
+    env, sim = rf.make_envs(ref_cfg)
+    games = jax.jit(rf.make_play(ref_cfg, env, sim))(params, jax.random.key(1))
+    want, want_sums = jax.jit(lambda p, g: rf.batch_gradient(p, g, ref_cfg, env))(params, games)
+    groups = unified.make_groups(cfg)
+    same = rm.Games(*(getattr(games, f) for f in rm.Games._fields))
+    got, got_sums = jax.jit(lambda p, g, t: rm.batch_gradient(p, (g,), t, cfg, groups))(
+        params, same, games.turns
+    )
+    norm = float(optax.tree.norm(want))
+    assert 0.0 < norm < rm.MAX_RAW_GRAD_NORM
+    for a, b in zip(jax.tree.leaves(got), jax.tree.leaves(want), strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-6 * norm)
+    for k in rm.SUMS:
+        np.testing.assert_allclose(got_sums[k][0], want_sums[k], rtol=1e-4, atol=1e-5)
+    assert float(got_sums["samples"][0]) == float(want_sums["samples"])
+
+
+@pytest.mark.parametrize("fault", [1e12, float("nan")])
+def test_reinforce_modes_skips_a_faulty_gradient(fault, monkeypatch):
+    """A raw gradient that is not finite or absurdly large changes neither the parameters nor
+    Adam's state, and the record says so; a healthy one is taken."""
+    cfg = rm.Config(**TINY, **TINY_RUNS["reinforce_modes"][1])
+    groups = unified.make_groups(cfg)
+    runner = rm.init_runner(cfg, groups, jax.random.key(0))
+    healthy, m = jax.jit(rm.make_train_chunk(cfg, groups))(runner)
+    assert int(m["skipped"]) == 0 and float(m["grad_norm_max"]) < rm.MAX_RAW_GRAD_NORM
+    assert not np.array_equal(healthy.params["value"]["b"], runner.params["value"]["b"])
+
+    real = rm.batch_gradient
+
+    def faulty(*args):
+        grads, sums = real(*args)
+        return jax.tree.map(lambda g: g * fault, grads), sums
+
+    monkeypatch.setattr(rm, "batch_gradient", faulty)
+    after, m = jax.jit(rm.make_train_chunk(cfg, groups))(runner)
+    jax.tree.map(
+        np.testing.assert_array_equal,
+        (after.params, after.opt_state), (runner.params, runner.opt_state),
+    )  # fmt: skip
+    assert int(after.env_steps) > 0  # the games were played all the same
+    record = rm.chunk_record(jax.device_get(m), 1.0, 1, cfg)
+    assert record["skipped_updates"] == cfg.updates_per_log and record["grad_norm"] == 0.0
+    assert (record["grad_norm_max"] is None) == bool(np.isnan(fault))
+    assert all(p["value_std"] >= 0.0 for p in record["game_modes"].values())
 
 
 # --- Placement values -----------------------------------------------------------------------
