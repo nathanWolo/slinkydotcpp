@@ -347,6 +347,39 @@ python benchmarks/plot_az_ladder.py   # results/az_ladder.svg
   its parameters' hash (`params_sha256` in `a_config`); the snapshots
   themselves are not committed.
 
+## Modes
+
+`modes.py` plays the four leaderboard modes (standard, duel, royale and
+constrictor) at their own tables, with 4, 2, 4 and 4 snakes. It compares the
+multi-mode PPO generalist with the specialist trained on each mode alone, and
+with fixed references (the heuristic, `ppo`, `random_legal`).
+[`baselines/README.md`](../baselines/README.md#multi-mode-ppo-ppo_modespy)
+has the tables, read from `results/modes.jsonl` (`python
+benchmarks/modes.py --table`).
+
+| mode | generalist vs specialist, greedy | sampled | generalist vs the heuristic (3 copies; 1 in the duel) |
+|---|---|---|---|
+| standard | 0.813 [0.788, 0.836] | 0.811 [0.786, 0.834] | 0.139 [0.119, 0.162] |
+| duel | 0.624 [0.594, 0.653] | 0.678 [0.648, 0.706] | 0.388 [0.358, 0.418] |
+| royale | 0.705 [0.676, 0.732] | 0.698 [0.669, 0.726] | 0.341 [0.313, 0.371] |
+| constrictor | 0.406 (12 distinct games) | 0.494 [0.463, 0.524] | 0.225 [0.201, 0.252] |
+
+- **Share of the win** is the measure: 1 for a sole survivor and 1/k for each
+  of k snakes alive at a draw, summed over a policy's seats.
+- **Parity** is 0.5 head to head (2 seats of 4, or 1 of 2) and 0.25 for one
+  seat against three heuristics (0.5 in the duel).
+- **Games:** 1,024 per cell, seats rotated, 95% Wilson intervals.
+- **Same games in every cell of a mode.** All cells of a mode play the same
+  start positions and food, so two cells that differ in one agent are
+  compared game by game.
+- **Deterministic line-ups.** Greedy networks in constrictor play the same
+  game from the same start, because food is inert there and hidden from them.
+  The standard map has 2 start layouts, so the greedy constrictor
+  head-to-head is 12 distinct games and its interval means nothing. `--table`
+  marks such a line-up *deterministic*; read the sampled head-to-head.
+  [`docs/research/multimode_constrictor.md`](../docs/research/multimode_constrictor.md)
+  has the investigation.
+
 ## The opponents
 
 - **`random_legal`** (`slinky.evaluate.random_legal`) moves uniformly at

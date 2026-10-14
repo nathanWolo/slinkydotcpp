@@ -1,0 +1,13 @@
+games whose first head-on is a G-S collision among four living snakes: 557 of 2048
+Voronoi cells of each role at the state before the collision (mean, game-level bootstrap):
+   G in the collision     4.27 [3.59, 4.95]
+   S in the collision     6.99 [6.00, 8.00]
+   other G (survivor)     13.55 [12.90, 14.17]
+   other S (survivor)     14.35 [13.52, 15.17]
+   other G minus other S: -0.80 [-1.55, -0.03] *
+   G minus S in the collision: -2.73 [-4.10, -1.38] *
+G share of these games: 0.291 [0.261, 0.320]
+share of games won by the survivor that had more Voronoi cells at the collision (decisive games only): 0.644 (n=376)
+   S survivor has >=3 more cells        33.0% [29.2, 36.9] of these games, G share 0.122 [0.079, 0.169] (n=184)
+   G survivor has >=3 more cells        28.0% [24.3, 31.8] of these games, G share 0.317 [0.253, 0.383] (n=156)
+   within 2 cells                       39.0% [34.9, 43.1] of these games, G share 0.415 [0.377, 0.452] (n=217)

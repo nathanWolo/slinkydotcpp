@@ -1,0 +1,49 @@
+games with a 1G-vs-1S state while undecided: 1347 of 2048
+  G share: all 0.406 [0.382, 0.431]; connected 0.426 [0.395, 0.456] (n=654); separated 0.387 [0.352, 0.424] (n=693)
+  mean k0 22.0
+  --- separated duels: pure pocket races. room = free cells reachable from the head.
+  mean room: G 20.80  S 37.58  (G-S -16.79)
+     G room - S room in [-999, -10] n=399  G share 0.000 [0.000, 0.000]
+     G room - S room in [  -9,  -4] n= 10  G share 0.000 [0.000, 0.000]
+     G room - S room in [  -3,  -1] n= 12  G share 0.000 [0.000, 0.000]
+     G room - S room in [   0,   0] n=  2  G share 0.500 [nan, nan]
+     G room - S room in [   1,   3] n=100  G share 0.995 [0.984, 1.000]
+     G room - S room in [   4,   9] n=  5  G share 1.000 [nan, nan]
+     G room - S room in [  10, 999] n=165  G share 0.988 [0.968, 1.000]
+  the side with the bigger room wins how often, by policy:
+     room advantage 1..3: G bigger n=100 wins 0.995 [0.984, 1.000] | S bigger n=12 wins 1.000 [1.000, 1.000] | S-G 0.005 [0.000, 0.016] 
+     room advantage 4..9: G bigger n=5 wins 1.000 [nan, nan] | S bigger n=10 wins 1.000 [1.000, 1.000] | S-G 0.000 [nan, nan] 
+     room advantage 10..999: G bigger n=165 wins 0.988 [0.968, 1.000] | S bigger n=399 wins 1.000 [1.000, 1.000] | S-G 0.012 [0.000, 0.032] 
+  loser filling in separated duels (moves survived after k0 / room at k0):
+     G as loser: n=423 moves 6.32 [5.97, 6.69], room 8.96 [8.38, 9.55], moves/room 0.705 [0.658, 0.754]
+     S as loser: n=267 moves 3.76 [3.37, 4.20], room 3.03 [2.53, 3.59], moves/room 1.241 [1.156, 1.341]
+  separated duels lost by the side that had >= the room of the winner (it wasted room):
+     G: lost 2 of 272 duels in which it had >= the other's room: 0.7% [0.0, 1.9]
+     S: lost 0 of 423 duels in which it had >= the other's room: 0.0% [0.0, 0.0]
+     G - S: 0.007 [0.000, 0.019] 
+  --- connected duels (the fight): territory (Voronoi) and outcome
+  n=654; draws 225; G wins 166; S wins 263
+  mean Voronoi cells G 21.95 S 36.15; mean room G 61.6 S 61.1
+     Voronoi G-S in [-999, -10] n=295  G wins 16, draws 156, S wins 123; G share 0.319 [0.286, 0.352]
+     Voronoi G-S in [  -9,  -4] n= 95  G wins 5, draws 10, S wins 80; G share 0.105 [0.057, 0.160]
+     Voronoi G-S in [  -3,   3] n=135  G wins 84, draws 28, S wins 23; G share 0.726 [0.659, 0.787]
+     Voronoi G-S in [   4,   9] n= 26  G wins 6, draws 6, S wins 14; G share 0.346 [0.187, 0.518]
+     Voronoi G-S in [  10, 999] n=103  G wins 55, draws 25, S wins 23; G share 0.655 [0.576, 0.733]
+  route into the duel (the two other seats' death classes):
+     545  G:head-on with opponent + S:head-on with opponent                      connected 384/545  G share 0.288 [0.259, 0.317]
+     202  G:wall + S:self-body                                                   connected 78/202  G share 0.376 [0.310, 0.442]
+     133  G:body of opponent + S:self-body                                       connected 16/133  G share 0.838 [0.776, 0.894]
+     124  G:self-body + S:body of opponent                                       connected 23/124  G share 0.746 [0.669, 0.818]
+     112  G:self-body + S:self-body                                              connected 74/112  G share 0.433 [0.349, 0.521]
+      88  G:body of opponent + S:body of opponent                                connected 10/88  G share 0.114 [0.054, 0.180]
+      31  G:wall + S:body of opponent                                            connected 12/31  G share 0.145 [0.032, 0.273]
+      27  G:self-body + S:body of teammate                                       connected 16/27  G share 0.333 [0.161, 0.519]
+      25  G:self-body + S:wall                                                   connected 14/25  G share 0.400 [0.222, 0.581]
+      16  G:body of teammate + S:self-body                                       connected 6/16  G share 0.344 [0.136, 0.571]
+       9  G:body of opponent + S:wall                                            connected 4/9  G share 0.667 [0.357, 0.929]
+       7  G:wall + S:body of teammate                                            connected 3/7  G share 0.643 [nan, nan]
+       7  G:wall + S:wall                                                        connected 3/7  G share 0.571 [nan, nan]
+       7  G:body of teammate + S:body of opponent                                connected 6/7  G share 0.357 [nan, nan]
+       6  G:body of opponent + S:body of teammate                                connected 2/6  G share 0.417 [nan, nan]
+       6  G:body of teammate + S:body of teammate                                connected 1/6  G share 0.250 [nan, nan]
+       2  G:body of teammate + S:wall                                            connected 2/2  G share 0.750 [nan, nan]

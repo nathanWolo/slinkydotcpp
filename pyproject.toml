@@ -38,6 +38,8 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Exploratory analysis scripts kept as a record (docs/research/multimode_constrictor.md).
+extend-exclude = ["docs/research/multimode_constrictor_analysis"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,12 @@
+512 games; mean length of living snakes (contested states) at move t
+  t=  0: G 3.00 [3.00, 3.00]  S 3.00 [3.00, 3.00]  G-S 0.00 [0.00, 0.00] 
+  t= 25: G 5.25 [5.20, 5.30]  S 4.93 [4.87, 4.98]  G-S 0.32 [0.23, 0.40] *
+  t= 50: G 6.49 [6.41, 6.57]  S 6.18 [6.09, 6.26]  G-S 0.31 [0.18, 0.44] *
+  t= 75: G 7.70 [7.59, 7.80]  S 7.46 [7.34, 7.58]  G-S 0.24 [0.06, 0.41] *
+  t=100: G 8.90 [8.76, 9.03]  S 8.86 [8.71, 9.02]  G-S 0.03 [-0.19, 0.25] 
+  t=150: G 11.17 [10.92, 11.41]  S 11.92 [11.61, 12.22]  G-S -0.75 [-1.15, -0.34] *
+  t=200: G 13.88 [13.15, 14.62]  S 15.02 [14.17, 15.89]  G-S -1.14 [-2.34, -0.02] *
+  pooled over all contested snake-moves: G 7.36 [7.27, 7.45] S 7.24 [7.11, 7.38] G-S 0.12 [-0.03, 0.26]
+  G-vs-S head-on events: 356; G longer 267, equal 10, S longer 79; mean length difference (G - S) at the collision 0.94
+  share of G-S head-ons where G is longer: 75.0% [70.5, 79.4]
+  (the longer snake survives by rule; equal length kills both)

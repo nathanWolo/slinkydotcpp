@@ -1,0 +1,58 @@
+E1013 18:28:23.971543   12536 slow_operation_alarm.cc:73] Constant folding an instruction is taking > 1s:
+
+  %reduce_or.148 = pred[512,4,11,11]{3,2,1,0} reduce(%and.455, %constant.425), dimensions={2}, to_apply=%region_10.23, metadata={op_name="jit(run)/vmap(vmap())/reduce_or" stack_frame_id=42}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+E1013 18:28:25.295615   12523 slow_operation_alarm.cc:140] The operation took 2.324216729s
+Constant folding an instruction is taking > 1s:
+
+  %reduce_or.148 = pred[512,4,11,11]{3,2,1,0} reduce(%and.455, %constant.425), dimensions={2}, to_apply=%region_10.23, metadata={op_name="jit(run)/vmap(vmap())/reduce_or" stack_frame_id=42}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+S->G K=  0: G-team share 0.417 [0.312, 0.521] (exact mean over 96 starts 0.4167; 512-sample 0.4121)  wins/draws/losses 32/16/48  [25s]
+S->G K=  2: G-team share 0.583 [0.505, 0.662] (exact mean over 96 starts 0.5833; 512-sample 0.5645)  wins/draws/losses 40/32/24  [38s]
+S->G K=  4: G-team share 0.208 [0.146, 0.271] (exact mean over 96 starts 0.2083; 512-sample 0.2109)  wins/draws/losses 16/8/72  [50s]
+S->G K=  6: G-team share 0.458 [0.380, 0.531] (exact mean over 96 starts 0.4583; 512-sample 0.4580)  wins/draws/losses 32/24/40  [61s]
+S->G K=  8: G-team share 0.375 [0.271, 0.479] (exact mean over 96 starts 0.3750; 512-sample 0.3506)  wins/draws/losses 24/24/48  [73s]
+S->G K= 10: G-team share 0.333 [0.255, 0.411] (exact mean over 96 starts 0.3333; 512-sample 0.3398)  wins/draws/losses 24/16/56  [84s]
+S->G K= 12: G-team share 0.125 [0.073, 0.182] (exact mean over 96 starts 0.1250; 512-sample 0.1211)  wins/draws/losses 8/8/80  [95s]
+S->G K= 14: G-team share 0.292 [0.229, 0.354] (exact mean over 96 starts 0.2917; 512-sample 0.2852)  wins/draws/losses 24/8/64  [105s]
+S->G K= 16: G-team share 0.167 [0.104, 0.229] (exact mean over 96 starts 0.1667; 512-sample 0.1602)  wins/draws/losses 16/0/80  [115s]
+S->G K= 18: G-team share 0.250 [0.177, 0.323] (exact mean over 96 starts 0.2500; 512-sample 0.2539)  wins/draws/losses 24/0/72  [125s]
+S->G K= 20: G-team share 0.417 [0.365, 0.469] (exact mean over 96 starts 0.4167; 512-sample 0.4258)  wins/draws/losses 40/0/56  [137s]
+S->G K= 24: G-team share 0.500 [0.500, 0.500] (exact mean over 96 starts 0.5000; 512-sample 0.5078)  wins/draws/losses 48/0/48  [145s]
+S->G K= 28: G-team share 0.500 [0.500, 0.500] (exact mean over 96 starts 0.5000; 512-sample 0.5078)  wins/draws/losses 48/0/48  [152s]
+S->G K=100: G-team share 0.500 [0.500, 0.500] (exact mean over 96 starts 0.5000; 512-sample 0.5078)  wins/draws/losses 48/0/48  [159s]
+E1013 18:30:58.508348   12536 slow_operation_alarm.cc:73] Constant folding an instruction is taking > 2s:
+
+  %reduce_or.148 = pred[512,4,11,11]{3,2,1,0} reduce(%and.455, %constant.425), dimensions={2}, to_apply=%region_10.23, metadata={op_name="jit(run)/vmap(vmap())/reduce_or" stack_frame_id=42}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+E1013 18:30:58.734152   12523 slow_operation_alarm.cc:140] The operation took 2.225917475s
+Constant folding an instruction is taking > 2s:
+
+  %reduce_or.148 = pred[512,4,11,11]{3,2,1,0} reduce(%and.455, %constant.425), dimensions={2}, to_apply=%region_10.23, metadata={op_name="jit(run)/vmap(vmap())/reduce_or" stack_frame_id=42}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+G->S K=  0: G-team share 0.500 [0.500, 0.500] (exact mean over 96 starts 0.5000; 512-sample 0.5078)  wins/draws/losses 48/0/48  [17s]
+G->S K=  2: G-team share 0.500 [0.385, 0.615] (exact mean over 96 starts 0.5000; 512-sample 0.5215)  wins/draws/losses 48/0/48  [29s]
+G->S K=  4: G-team share 0.542 [0.438, 0.646] (exact mean over 96 starts 0.5417; 512-sample 0.5459)  wins/draws/losses 48/8/40  [43s]
+G->S K=  6: G-team share 0.667 [0.552, 0.771] (exact mean over 96 starts 0.6667; 512-sample 0.6670)  wins/draws/losses 56/16/24  [52s]
+G->S K=  8: G-team share 0.542 [0.464, 0.615] (exact mean over 96 starts 0.5417; 512-sample 0.5029)  wins/draws/losses 40/24/32  [63s]
+G->S K= 10: G-team share 0.292 [0.229, 0.354] (exact mean over 96 starts 0.2917; 512-sample 0.2852)  wins/draws/losses 16/24/56  [76s]
+G->S K= 12: G-team share 0.542 [0.453, 0.625] (exact mean over 96 starts 0.5417; 512-sample 0.5303)  wins/draws/losses 48/8/40  [89s]
+G->S K= 14: G-team share 0.458 [0.359, 0.562] (exact mean over 96 starts 0.4583; 512-sample 0.4365)  wins/draws/losses 40/8/48  [103s]
+G->S K= 16: G-team share 0.250 [0.146, 0.365] (exact mean over 96 starts 0.2500; 512-sample 0.2480)  wins/draws/losses 24/0/72  [116s]
+G->S K= 18: G-team share 0.375 [0.297, 0.453] (exact mean over 96 starts 0.3750; 512-sample 0.3594)  wins/draws/losses 32/8/56  [127s]
+G->S K= 20: G-team share 0.333 [0.271, 0.396] (exact mean over 96 starts 0.3333; 512-sample 0.3164)  wins/draws/losses 32/0/64  [138s]
+G->S K= 24: G-team share 0.417 [0.323, 0.510] (exact mean over 96 starts 0.4167; 512-sample 0.4121)  wins/draws/losses 40/0/56  [150s]
+G->S K= 28: G-team share 0.417 [0.323, 0.510] (exact mean over 96 starts 0.4167; 512-sample 0.4121)  wins/draws/losses 40/0/56  [162s]
+G->S K=100: G-team share 0.417 [0.312, 0.521] (exact mean over 96 starts 0.4167; 512-sample 0.4121)  wins/draws/losses 32/16/48  [173s]

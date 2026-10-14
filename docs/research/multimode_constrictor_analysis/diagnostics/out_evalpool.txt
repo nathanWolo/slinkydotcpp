@@ -1,0 +1,13 @@
+G constrictor vs heuristic pooled 5 pts: 0.188 ± 0.020; chi2 vs const 7.9 (4 dof)
+   mid (2.10,3.15M) 0.158±0.030  vs others (1.05,4.19,5.24M) 0.214±0.028  diff -0.056±0.041  (post hoc)
+   5.24M minus 1.05M +0.005 ± 0.066;  5.24 minus 2.10: +0.050±0.063
+   last two (4.19,5.24M) pooled 0.218±0.034
+S constrictor vs heuristic pooled 5 pts: 0.186 ± 0.020; chi2 vs const 27.9 (4 dof)
+   mid (2.10,3.15M) 0.212±0.034  vs others (1.05,4.19,5.24M) 0.173±0.025  diff +0.039±0.042  (post hoc)
+   5.24M minus 1.05M +0.123 ± 0.060;  5.24 minus 2.10: +0.038±0.067
+   last two (4.19,5.24M) pooled 0.232±0.034
+G-S constrictor vs heuristic pooled over all 5: -0.005 ± 0.029;  last 3: -0.034 ± 0.039; first: +0.093±0.059
+standard     G-S vs heuristic: last 3 pooled +0.082 ± 0.023; all 5 pooled +0.044 ± 0.015
+duel         G-S vs heuristic: last 3 pooled -0.031 ± 0.042; all 5 pooled -0.056 ± 0.029
+royale       G-S vs heuristic: last 3 pooled +0.133 ± 0.042; all 5 pooled +0.099 ± 0.030
+constrictor  G-S vs heuristic: last 3 pooled -0.034 ± 0.039; all 5 pooled -0.005 ± 0.029

@@ -1,0 +1,24 @@
+96 distinct games, 48 placements, multiplicity min/median/max in the 512-game sample: 1/5/13
+exact G share (unweighted over all 96 starts x seat parities): 0.4167; wins 32 draws 16 losses 48
+512-game sample (multiplicity-weighted): 0.4121  <- what the benchmark's first 512 games estimate
+per-game sd of G share over the 96 configs 0.449; so an n-game benchmark estimate has sampling sd 0.020 (n=512) and 0.014 (n=1024) about the exact value; its reported +-1.96*se is about the same size -- but note the draws are NOT independent games of a continuing process, they are repeats of a fixed set
+-- fate of a seat during the contest (fraction of seats), start-level 95% intervals
+   no safe move left (wall/self/body: forced)    G     45.8% [37.5, 54.7]  S     41.7% [33.3, 51.0]  G-S  0.042 [-0.094, 0.182]   (seats 88 of 192, 80 of 192)
+   head-on with an opponent (both die)           G     25.0% [17.7, 32.3]  S     25.0% [17.7, 32.3]  G-S   0.000 [0.000, 0.000]   (seats 48 of 192, 48 of 192)
+   head-on with a teammate (both die)            G       8.3% [3.1, 13.5]  S        0.0% [0.0, 0.0]  G-S   0.083 [0.031, 0.135] * (seats 16 of 192, 0 of 192)
+   alive when the contest ended                  G     20.8% [14.6, 27.1]  S     33.3% [25.5, 41.1]  G-S -0.125 [-0.260, 0.010]   (seats 40 of 192, 64 of 192)
+-- G share by start type and seat parity (exact over the games in each cell)
+   corner starts                    n= 48  G share 0.500 [0.420,0.583]  W/D/L 16/16/16
+   cardinal starts                  n= 48  G share 0.333 [0.158,0.529]  W/D/L 16/0/32
+   G in seats 0,2 (even game id)    n= 48  G share 0.417 [0.292,0.542]  W/D/L 16/8/24
+   G in seats 1,3 (odd game id)     n= 48  G share 0.417 [0.292,0.542]  W/D/L 16/8/24
+   per placement (mean of both parities): G ahead in 16, level in 8, behind in 24 of 48
+   sign test over placements (ties dropped): 16 vs 24, two-sided p = 0.268
+-- outcome by the first head-on of the contest
+   head-on GG     n=  8 (8% of games; mean move 21.0)  G share 0.000  W/D/L 0/0/8
+   head-on GS     n= 32 (33% of games; mean move 17.0)  G share 0.250  W/D/L 0/16/16
+   no head-on     n= 56 (58% of games; mean move nan)  G share 0.571  W/D/L 32/0/24
+-- accounting of G's deficit vs parity (exact): sum over games of (G share - 0.5) = -8.0 (= -0.0833 per game)
+   head-on GG     contributes   -4.0 game-units (-0.0417 per game)
+   head-on GS     contributes   -8.0 game-units (-0.0833 per game)
+   no head-on     contributes   +4.0 game-units (+0.0417 per game)

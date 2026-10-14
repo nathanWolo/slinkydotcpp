@@ -1,7 +1,8 @@
 # Baselines
 
 Single-file reinforcement-learning baselines for the 1v1 duel (11×11,
-standard rules), trained by self-play on slinky.
+standard rules), trained by self-play on slinky, and one network for all four
+leaderboard modes ([multi-mode PPO](#multi-mode-ppo-ppo_modespy)).
 
 | baseline | file | training | vs `random_legal` | vs heuristic | checkpoint |
 |---|---|---|---|---|---|
@@ -9,10 +10,11 @@ standard rules), trained by self-play on slinky.
 | PPO | `ppo.py` | 67 min, 5.24M env steps | 0.998 | 0.296 | `checkpoints/ppo-duel-seed0/` |
 | Rainbow DQN | `rainbow.py` | 81 min, 1.28M env steps | 0.983 | 0.084 | `checkpoints/rainbow-duel-seed0/` |
 | AlphaZero (`az-64`) | `az.py` | 9.7 h, 8.39M env steps | 0.999 | 0.853 | `checkpoints/az-duel-seed0/` |
+| Multi-mode PPO (generalist, in the duel) | `ppo_modes.py` | 9.75 h, 21M env steps (5.24M per mode) | 1.000 | 0.388 | `checkpoints/ppo-modes-seed0/` |
 
 - **Hardware:** the DQN and PPO trained on a 4-core cloud CPU (PPO pinned to
   3 cores), Rainbow on a thermally throttled laptop CPU, AlphaZero on the
-  4-core cloud CPU; no GPU.
+  4-core cloud CPU, multi-mode PPO on 2 pinned cores of it; no GPU.
 - **AlphaZero** is scored as `az-64`: the network with 64 simulations of
   search per move (7 ms per move with 32 games in flight on one core). The
   raw network alone (`az-0`) scores
@@ -26,6 +28,12 @@ standard rules), trained by self-play on slinky.
   (5,000 games against `random_legal`, 1,000 against the heuristic). In its
   own 5,000-game evaluation below, the DQN scores 0.993 against
   `random_legal`.
+- **Multi-mode PPO** is one network trained on standard, duel, royale and
+  constrictor games at once, told the mode. Its duel scores are from the mode
+  benchmark (`benchmarks/modes.py`; 256 games against `random_legal`, 1,024
+  against the heuristic). It beats its single-mode specialists head to head
+  in standard, the duel and royale, and is level with them in constrictor.
+  See [multi-mode PPO](#multi-mode-ppo-ppo_modespy).
 
 ### The three compared
 
@@ -71,6 +79,7 @@ python baselines/dqn.py --resume runs/dqn-<timestamp>   # continue an interrupte
 python baselines/rainbow.py          # Rainbow DQN; same flags, plus its own
 python baselines/rainbow.py --n-step 1 --per-alpha 0    # ablate components
 python baselines/az.py               # AlphaZero, 4-4.5 h on 4 cores (see below)
+python baselines/ppo_modes.py --num-minibatches 16   # one network for all four modes, ~10 h on 2 cores
 python baselines/dashboard.py        # live training dashboard (see below)
 ```
 
@@ -638,3 +647,300 @@ except 128 games, ± up to 0.085, against MCTS-24000):
 The final network is kept in
 [`checkpoints/az-duel-seed0/`](checkpoints/az-duel-seed0/) (1.3 MB) as the
 default `az-<n>` agent.
+
+## Multi-mode PPO (`ppo_modes.py`)
+
+One network for all four Battlesnake leaderboard modes, told which mode it is
+playing. It is `ppo.py` with one group of games per mode, a small side input
+and a reward that ranks the finishers. Run on one mode (`--game-modes duel`),
+the same file trains a *specialist*, so a generalist and its specialists differ
+only in the modes they see. The question: does one policy for every mode play
+as well as one policy per mode, given the same experience of each mode?
+
+| mode | rules | snakes |
+|---|---|---|
+| `standard` | standard rules and map | 4 |
+| `duel` | standard rules and map | 2 |
+| `royale` | royale rules and map: a hazard zone grows from one edge every 25 turns, 14 damage a turn | 4 |
+| `constrictor` | constrictor: snakes grow every turn and never shrink, food is inert | 4 |
+
+All are on the 11×11 board (`slinky.modes`).
+
+- **Inputs.** `ppo.py`'s egocentric `21×21×13` board, plus 7 numbers added
+  into the dense layer: the mode one-hot, the turn, the phase of the royale
+  shrink cycle and the share of opponents still alive. A real game request
+  carries all of them. In constrictor the food channel is zeroed, because
+  food is inert there; that follows the real ruleset, whatever mode the
+  network is told.
+- **Reward.** Placement: +1/(N−1) for each opponent a snake outlives and
+  −1/(N−1) for each that outlives it, paid when it happens. It is zero-sum in
+  every mode, so one value head serves all four, and in the duel it is the
+  win/loss reward. In 4-snake games it pays second place more than fourth,
+  where win/loss gives both −1.
+- **Training.** 64 games per mode, 128 turns per iteration, and one network
+  call per turn on every mode's snakes together. GAE and advantage
+  normalisation are per mode, and every minibatch takes an equal share of each
+  mode. Each mode's value loss is weighted by 1/variance of its returns,
+  rescaled so that the weights average 1. The rest is `ppo.py`: its network
+  (plus the 7 inputs, 314k parameters), learning rate, clipping and entropy
+  bonus.
+- **Budget.** 5.24M env steps per mode, a specialist's budget, so 21M in all:
+  the generalist costs as much as its four specialists together.
+- **Minibatches.** With `ppo.py`'s 8 minibatches the generalist's updates were
+  too small. From 0.16M to 0.33M env steps per mode, its duel KL was 0.47× the
+  duel specialist's and its clip fraction 0.49×. A rule fixed before training
+  said to restart with 16 minibatches if that KL ratio was under one half, and
+  the 16-minibatch run is the one reported here. (Against the 4-snake
+  specialists, trained later, the 8-minibatch ratios were 0.59–0.74×.) With
+  16, its KL over the first 1M env steps was 1.03–1.29× each specialist's.
+  The specialists keep `ppo.py`'s 8, which leaves the generalist twice their
+  gradient steps. Specialists retrained with 16 are the control below.
+
+### Results
+
+Seed 0 throughout, and three seeds of the duel specialist.
+
+- **The generalist (G)** took **9.75 hours** on 2 pinned cores of the 4-core
+  cloud CPU: 21M env steps, 59M agent samples and 40,960 gradient steps.
+- **Each specialist (S)** took 1.3 hours (duel) or 2.7–2.8 hours (the 4-snake
+  modes) on the other 2 cores, 9.5 hours together, with 20,480 gradient steps
+  each.
+
+All games below are fresh games from `benchmarks/modes.py`
+([`benchmarks/README.md`](../benchmarks/README.md)), with the seats rotated.
+*Share* is the share of the win: 1 for a sole survivor and 1/k for each of k
+snakes alive at a draw, summed over a policy's seats. Brackets are 95% Wilson
+intervals.
+
+**Head to head.** The primary result, fixed before the games were played, is
+G's share when it holds 2 of the 4 seats against its specialist's 2 (G,S,G,S;
+in the duel G against S), with both networks greedy. Parity is 0.5. W / T / L
+counts the games where G's seats took all of the win, part of it (a draw) or
+none. The sampled columns are the same line-ups with both networks sampling
+their moves (`ppo_modes-sample`), added after the greedy results.
+
+| mode | G vs S, greedy | W / T / L | G vs S, sampled | W / T / L |
+|---|---|---|---|---|
+| standard | **0.813** [0.788, 0.836] | 833 / 0 / 191 | **0.811** [0.786, 0.834] | 829 / 3 / 192 |
+| duel | **0.624** [0.594, 0.653] | 637 / 4 / 383 | **0.678** [0.648, 0.706] | 688 / 12 / 324 |
+| royale | **0.705** [0.676, 0.732] | 720 / 4 / 300 | **0.698** [0.669, 0.726] | 714 / 2 / 308 |
+| constrictor | 0.406 (12 distinct games) | 327 / 177 / 520 | **0.494** [0.463, 0.524] | 455 / 102 / 467 |
+
+- **The generalist beats its specialist in standard, the duel and royale**,
+  greedy or sampled, 1,024 games each.
+- **In constrictor the two are level.** The greedy result looked like a loss,
+  but it is 12 games repeated. Constrictor food is inert and hidden from both
+  networks, so with greedy play nothing random reaches the game. The 1,024
+  games are then the 2 start layouts of the standard map times 6 seatings:
+  G wins 4, draws 2 and loses 6. A bootstrap over those 12 games gives
+  [0.17, 0.67], not the [0.376, 0.436] that 1,024 independent games would
+  give. Every other cell has a source of randomness (the heuristic breaks ties
+  at random, `ppo` sees the food, the other modes' food matters), and
+  `--table` now marks a line-up like this one *deterministic*.
+
+**Against fixed opponents.** These are the share of one seat against three
+copies of the opponent, or one copy in the duel. Parity is 0.25 at a 4-snake
+table and 0.5 in the duel. H is the heuristic, P the `ppo` duel checkpoint
+(playing the 4-snake modes zero-shot) and R `random_legal`.
+
+| mode | G vs H | S vs H | G vs P | S vs P | G vs R | S vs R | P vs H |
+|---|---|---|---|---|---|---|---|
+| standard | 0.139 | 0.028 | 0.634 | 0.316 | 0.992 | 0.977 | 0.020 |
+| duel | 0.388 | 0.350 | 0.644 | 0.492 | 1.000 | 0.996 | 0.296 |
+| royale | 0.341 | 0.216 | 0.763 | 0.566 | 0.992 | 0.969 | 0.033 |
+| constrictor | 0.225 | 0.237 | 0.398 | 0.343 | 0.742 | 0.706 | 0.098 |
+
+Cells against R have 256 games, P against H 512 and the rest 1,024. The
+duel's P vs H is from the strength benchmark.
+
+**Paired G − S differences** in share per seat. These compare the same games
+with G in place of S, and ± is the 95% interval of the per-game differences.
+G,S,H,H puts both in one game against two heuristics.
+
+| mode | G,S,H,H (within) | vs 3 H | vs 3 P |
+|---|---|---|---|
+| standard | +0.179 ± 0.030 | +0.111 ± 0.024 | +0.317 ± 0.042 |
+| duel | | +0.038 ± 0.039 | +0.151 ± 0.041 |
+| royale | +0.187 ± 0.044 | +0.125 ± 0.038 | +0.197 ± 0.039 |
+| constrictor | +0.019 ± 0.037 | −0.012 ± 0.032 | +0.056 ± 0.039 |
+
+- **Standard, royale: clear wins over every reference.**
+  - The standard specialist barely learns. In its 256-game training
+    evaluations against the heuristic it scores 0.016 at 1M env steps and
+    0.025 at 5.24M, while the generalist rises from 0.020 to 0.111.
+  - In royale the generalist scores 0.341 against three heuristics, above
+    parity; its specialist scores 0.216.
+- **Duel.** The generalist beats all three duel specialists head to head:
+  0.624, 0.714 and 0.698 against seeds 0, 1 and 2.
+  - **Against the heuristic** its 0.388 is above all three (0.350, 0.376,
+    0.251). Paired, it is level with seeds 0 and 1 (+0.038 ± 0.039,
+    +0.011 ± 0.036) and ahead of seed 2 (+0.137 ± 0.038).
+  - **Against `ppo`**, at 0.644, it is well above all three (0.492, 0.445,
+    0.471). They play `ppo` about level, as the same algorithm on the same
+    budget should.
+  - **It also plays a different game.** The specialists draw often against
+    the heuristic (both snakes out on the same turn): 347, 521 and 112 of
+    1,024 games, where the generalist draws 12. The generalist wins 391 of
+    those games, specialist seed 0 185.
+- **Constrictor: level** under sampled play, against the heuristic and against
+  `ppo`. Both are weak: about 0.7 against `random_legal`. The board fills and
+  games are decided by turn 25–30.
+
+**Controls: specialists with 16 minibatches.** The generalist takes twice its
+specialists' gradient steps per env step. So each food-mode specialist was
+trained again with 16 minibatches (S16), which gives it the generalist's
+40,960 gradient steps. Each S16 cell has 1,024 games.
+
+| mode | G vs S16 | S16 vs S | vs 3 H: S16 / S | vs 3 P: S16 / S | S16 − S, paired within S16,S | G − S16 vs 3 H, paired |
+|---|---|---|---|---|---|---|
+| standard | 0.830 | 0.481 | 0.042 / 0.028 | 0.260 / 0.316 | −0.019 ± 0.031 | +0.097 ± 0.024 |
+| duel | 0.678 | 0.447 | 0.385 / 0.350 | 0.432 / 0.492 | −0.106 ± 0.049 | +0.002 ± 0.036 |
+| royale | 0.717 | 0.456 | 0.166 / 0.216 | 0.538 / 0.566 | −0.044 ± 0.030 | +0.176 ± 0.037 |
+
+- **More gradient steps do not make a specialist stronger.** S16 is level with
+  S or slightly behind it head to head. The generalist beats S16 by as much
+  as it beats S, so its lead is not its extra gradient steps.
+- **The duel is the exception against the heuristic**, where G and S16 are
+  level. The duel's edge against the heuristic is within the spread of the
+  specialist seeds anyway (above).
+- **The constrictor control** was stopped at 2.9M of its 5.24M env steps
+  (see the caveats).
+
+**Is the mode input used? Hardly.** Told a wrong mode, the generalist plays
+about as well.
+
+- **Strength.** G − G@m is measured over 256 paired games for each wrong mode
+  against the heuristic, 12 pairs in all. The differences run from −0.023 to
+  +0.064, averaging +0.018. Eleven of the twelve 95% intervals include 0. The
+  twelfth, constrictor told duel, is +0.040 ± 0.039.
+- **Moves.** Its greedy move changes on only 2–6% of decisions with at least
+  two legal moves, in its own self-play games.
+- **Why.** The board gives the mode away: the duel has two snakes, royale has
+  hazards, and constrictor's food channel is blank.
+
+**Specialists out of their mode** play badly. This is the cross-mode matrix:
+each network is told its own mode and plays one seat against three
+heuristics, one in the duel. Off its own mode, each cell has 256 games.
+
+| network, played in → | standard | duel | royale | constrictor |
+|---|---|---|---|---|
+| standard specialist | **0.028** | 0.100 | 0.098 | 0.108 |
+| duel specialist | 0.020 | **0.350** | 0.031 | 0.066 |
+| royale specialist | 0.025 | 0.045 | **0.216** | 0.109 |
+| constrictor specialist | 0.000 | 0.010 | 0.004 | **0.237** |
+| generalist | 0.139 | 0.388 | 0.341 | 0.225 |
+
+- **No specialist carries over to another mode.** The best transfers, about
+  0.1, are the standard and royale specialists in constrictor and the
+  standard specialist in the duel and royale. Each is well under the mode's
+  own specialist.
+- **The generalist in every mode** is at least level with each mode's own
+  specialist.
+
+**Self-play dynamics** (the last 32k env steps of each mode):
+
+- **Entropy.** The generalist's policy is sharper than the specialists'. Its
+  entropy is 0.23 nats in every mode but constrictor (0.15). The specialists'
+  is 0.34 (standard), 0.25 (duel), 0.33 (royale) and 0.12 (constrictor).
+- **The 16 minibatches explain part of that.** The 16-minibatch specialists
+  sit at 0.29 (standard, royale) and 0.24 (duel).
+- **Game length.** Self-play games last 257, 208, 175 and 32 turns for the
+  generalist (standard, duel, royale, constrictor), against 272, 151, 179 and
+  32 for the specialists.
+
+### Why no gain in constrictor
+
+The generalist gains a lot in the three food modes and nothing in
+constrictor. No ablation was run that separates the causes, but an
+investigation
+([`docs/research/multimode_constrictor.md`](../docs/research/multimode_constrictor.md))
+narrowed them down:
+
+- **Specialist headroom.**
+  - Constrictor games last about 32 turns, against 150–270 in the other
+    modes, so per env step its specialist sees 5–9 times as many complete
+    games as the others.
+  - It plateaus: 0.230, 0.230 and 0.234 against the heuristic from 3M env
+    steps on.
+  - The royale specialist is still climbing at the end, and the standard one
+    barely learns, so pooled experience has room to help there.
+- **Shared skills.**
+  - Royale is standard plus a visible hazard. The food modes' value-loss
+    gradients point the same way, and constrictor's is close to orthogonal to
+    theirs.
+  - That is mostly in the value head. On the shared layers there is no direct
+    evidence that constrictor learns less.
+- **Small interference costs.** These are real but too small to show in the
+  results:
+  - a moving-tail habit from the food modes, where constrictor's tails never
+    move;
+  - a value-loss weight of about 0.3 (8% of the total), from constrictor's
+    larger return variance;
+  - a dip in the middle of training that recovered.
+- **Ruled out:**
+  - mode confusion (above);
+  - the extra gradient steps (the controls);
+  - a broken constrictor critic.
+
+### Caveats
+
+- **One seed** of the generalist and of the 4-snake specialists. The duel has
+  three specialist seeds, which spread from 0.251 to 0.376 against the
+  heuristic, so a 4-snake seed spread of that size is possible.
+- **The pre-registered constrictor head-to-head is degenerate** (12 distinct
+  games); the sampled head-to-head is the one to read. The other modes'
+  greedy head-to-heads are 1,024 distinct games.
+- **The mode input is barely needed**, because the board shows the mode. A
+  mode the board cannot reveal would need it.
+- **Constrictor is weak for both** (about 0.7 against `random_legal`). A
+  dedicated study (longer games on bigger boards, or a better reward) is open.
+- **Two experiments were stopped unfinished:**
+  - the 16-minibatch constrictor control, stopped at 2.9M of 5.24M env steps;
+  - a fine-tuning test, in which the generalist and the constrictor specialist
+    each get 1M more constrictor env steps and then play each other, stopped
+    at 0.46M and 0.43M.
+  - Neither is reported.
+- **The training snapshots are not committed**, only the final networks; the
+  snapshot head-to-heads in the investigation are not reproducible from the
+  repository alone.
+
+### Checkpoints and commands
+
+The final networks are kept in `checkpoints/` (1.3 MB each, with their
+`config.json` and `metrics.jsonl`):
+
+| directory | network |
+|---|---|
+| [`ppo-modes-seed0/`](checkpoints/ppo-modes-seed0/) | the generalist; the default `ppo_modes` agent |
+| `ppo-modes-{standard,duel,royale,constrictor}-seed0/` | the specialists |
+| `ppo-modes-duel-seed{1,2}/` | duel specialist seeds 1 and 2 |
+| `ppo-modes-{standard,duel,royale}-m16-seed0/` | the 16-minibatch controls |
+
+```bash
+python baselines/ppo_modes.py --num-minibatches 16 --run-dir runs/ppo-modes-seed0   # the generalist
+python baselines/ppo_modes.py --game-modes duel --run-dir runs/ppo-modes-duel-seed0 # a specialist
+python baselines/ppo_modes.py --game-modes royale --num-minibatches 16 \
+    --run-dir runs/ppo-modes-royale-m16-seed0                                      # a control
+python benchmarks/modes.py --table      # every table above, from benchmarks/results/modes.jsonl
+```
+
+The benchmark results were played from `runs/<directory>`, of which the
+checkpoints are byte-identical copies. A cell's id includes the agent's
+name, which is its path. So to replay or extend the benchmark without
+replaying finished cells, first copy the checkpoints into `runs/`
+(`cp -r baselines/checkpoints/ppo-modes-* runs/`). Then run:
+
+```bash
+python benchmarks/modes.py --protocol --generalist runs/ppo-modes-seed0 \
+    --specialist standard=runs/ppo-modes-standard-seed0 --specialist duel=runs/ppo-modes-duel-seed0 \
+    --specialist royale=runs/ppo-modes-royale-seed0 \
+    --specialist constrictor=runs/ppo-modes-constrictor-seed0 --matrix
+python benchmarks/modes.py --game-mode duel --seats G,S1 \
+    --agent G=ppo_modes:runs/ppo-modes-seed0 --agent S1=ppo_modes:runs/ppo-modes-duel-seed1 --games 1024
+```
+
+The protocol then finds all its 68 cells finished. The extra cells (the
+other duel seeds and the controls) are played one at a time, as in the last
+command. As an agent (`slinky.agents`) the generalist is `ppo_modes`, told the
+mode of the game it plays; `ppo_modes:game_mode=<mode>` overrides what it is
+told.

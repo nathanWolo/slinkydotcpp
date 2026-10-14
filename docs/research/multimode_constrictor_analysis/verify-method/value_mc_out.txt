@@ -1,0 +1,8 @@
+runs/ppo-modes-seed0: (1920, 32, 4) collected in 27s
+  GAE lambda=0.95 (trainer targets)  EV 0.234 [0.226,0.243]  Var(ret) 0.1770 [0.1756,0.1783]  MSE 0.1357 [0.1346,0.1369]
+  Monte Carlo lambda=1               EV 0.134 [0.128,0.140]  Var(ret) 0.3418 [0.3398,0.3439]  MSE 0.2962 [0.2933,0.2986]
+  Var(V) 0.0311  samples 202907
+runs/ppo-modes-constrictor-seed0: (1920, 32, 4) collected in 27s
+  GAE lambda=0.95 (trainer targets)  EV 0.303 [0.291,0.313]  Var(ret) 0.1918 [0.1902,0.1932]  MSE 0.1337 [0.1320,0.1354]
+  Monte Carlo lambda=1               EV 0.166 [0.157,0.175]  Var(ret) 0.3450 [0.3428,0.3476]  MSE 0.2877 [0.2840,0.2922]
+  Var(V) 0.0664  samples 206159

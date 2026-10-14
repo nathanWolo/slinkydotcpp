@@ -178,8 +178,9 @@ own core, which is the fast path on a 4-core machine.
 
 ## Baselines
 
-Reference opponents for the 1v1 duel, roughly from weakest to strongest. Full
-results and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md).
+Reference opponents for the 1v1 duel, roughly from weakest to strongest, then
+one policy for all four leaderboard modes. Full results and the MCTS sweep are
+in [`benchmarks/README.md`](benchmarks/README.md).
 
 - **`random_legal`** (`slinky.evaluate`): uniformly random among the moves
   that don't certainly die next turn.
@@ -235,6 +236,19 @@ results and the MCTS sweep are in [`benchmarks/README.md`](benchmarks/README.md)
     [0.499, 0.668] over 128 games, at a seventh of the time. So is `az-64`
     with `c_puct` 0.25 at play time instead of the training's 0.5: 0.574
     [0.488, 0.656], at a 25th of the time.
+- **Multi-mode PPO** (`baselines/ppo_modes.py`, see
+  [`baselines/README.md`](baselines/README.md#multi-mode-ppo-ppo_modespy)):
+  one PPO network for all four leaderboard modes (standard, duel, royale and
+  constrictor, with 4, 2, 4 and 4 snakes), told which one it is playing. It
+  trained for 9.75 hours on 2 CPU cores, with each mode's share being one
+  specialist's budget (5.24M env steps per mode).
+  - It beats the specialist trained on each mode alone head to head: 0.81 in
+    standard, 0.62–0.71 in the duel (three specialist seeds) and 0.70 in
+    royale.
+  - In constrictor it is level (0.494 with sampled play).
+  - In the duel it scores 0.388 against the heuristic and 0.644 against PPO.
+  - Specialists retrained with its 16 minibatches are no stronger, so its lead
+    is not its extra gradient steps.
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 
@@ -371,7 +385,9 @@ should scale much better with batch size.
    - self-play PPO (done; see `baselines/`);
    - population or league training;
    - AlphaZero-style search with a learned value and policy, on top of
-     `slinky.mcts` (done; see `baselines/` and `benchmarks/README.md`).
+     `slinky.mcts` (done; see `baselines/` and `benchmarks/README.md`);
+   - one policy for all four leaderboard modes, told the mode (done; see
+     `baselines/` and `docs/research/multimode_constrictor.md`).
 
 ## Layout
 
@@ -380,12 +396,13 @@ src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   engine_json, policies, evaluate (matches between policies),
                   heuristic (hand-written snake), mcts (simultaneous-move MCTS),
                   agents (named-agent registry), replay (+ viewer.html)
-baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN and AlphaZero), their
-                  checkpoints and a live training dashboard (dashboard.py)
+baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN, AlphaZero and multi-mode
+                  PPO), their checkpoints and a live training dashboard (dashboard.py)
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
-benchmarks/       throughput and strength benchmarks, results/ (strength sweep data)
-docs/research/    literature notes: simultaneous-move MCTS, Battlesnake heuristics
+benchmarks/       throughput, strength and mode benchmarks, results/ (their data)
+docs/research/    literature notes (simultaneous-move MCTS, Battlesnake heuristics) and
+                  the multi-mode constrictor investigation
 docs/battlesnake/ official rules/API docs (MIT) + ENGINE_RULES.md
 legacy/           the original C++ prototype
 ```

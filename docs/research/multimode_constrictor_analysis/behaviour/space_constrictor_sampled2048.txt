@@ -1,0 +1,22 @@
+games where the teams were separated while both were alive: 1662 of 2048  (81.2% [79.4, 82.8]); mean separation move 21.28 [20.98, 21.59]
+  composition at separation (G alive, S alive): {np.str_('1G+1S'): 431, np.str_('1G+2S'): 317, np.str_('2G+1S'): 189, np.str_('2G+2S'): 725}
+  G share: games separated 0.473 [0.450, 0.496], not separated 0.555 [0.517, 0.595]
+  draws: separated 77, not separated 133
+  at separation: mean room G 19.1  S 21.5  (G-S) -2.37 [-3.76, -0.94]
+  room G 19.11 [18.24, 19.92]   room S 21.49 [20.57, 22.36]
+   1G+1S: n=431  G share 0.478 [0.430, 0.525]  room G 21.7 S 25.1
+   1G+2S: n=317  G share 0.242 [0.198, 0.287]  room G 10.6 S 28.3
+   2G+1S: n=189  G share 0.691 [0.628, 0.754]  room G 24.9 S 10.8
+   2G+2S: n=725  G share 0.513 [0.478, 0.549]  room G 19.8 S 19.1
+  G share by room difference at separation (G room - S room):
+     [ -999,  -10] n=575  G share 0.107 [0.083, 0.132]
+     [   -9,   -4] n=166  G share 0.248 [0.185, 0.315]
+     [   -3,    3] n=264  G share 0.518 [0.462, 0.577]
+     [    4,    9] n=168  G share 0.733 [0.667, 0.798]
+     [   10,  999] n=489  G share 0.865 [0.835, 0.893]
+     G has >=4 more room: n=657, share of the bigger-room side 0.831 [0.803, 0.859]
+     S has >=4 more room: n=741, share of the bigger-room side 0.861 [0.837, 0.886]
+  per game: G has >=4 more room 32.1% [30.1, 34.2], S has >=4 more room 36.2% [34.0, 38.2], diff -0.041 [-0.077, -0.005]
+  filling efficiency after separation: for the side that lost the pocket race, (moves survived after separation) / (room at separation)
+   G lost 723 separated races: moves survived after separation 9.44 [8.93, 9.94], room at separation 12.91 [12.14, 13.67], moves/room 0.731 [0.695, 0.769]
+   S lost 661 separated races: moves survived after separation 9.04 [8.55, 9.58], room at separation 12.61 [11.77, 13.49], moves/room 0.717 [0.678, 0.760]

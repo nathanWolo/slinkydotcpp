@@ -1,0 +1,127 @@
+== constrictor: 1024 games, contest ends after mean 29.0 moves; natural game length mean 31.6
+G share 0.494 [0.465, 0.524]  S share 0.506 [0.476, 0.535]
+G wins 44.4% [41.5, 47.6]  S wins 45.6% [42.5, 48.6]  draws 10.0% [8.2, 11.8]
+mean placement G 2.513 [2.472, 2.552] S 2.487 [2.448, 2.528] diff(G-S) 0.026 [-0.055, 0.104]
+-- survival, full game
+  k=  5  G 1.000 [0.999, 1.000]  S 1.000 [0.999, 1.000]  G-S 0.000 [0.000, 0.000] 
+  k=  8  G 0.990 [0.986, 0.994]  S 0.986 [0.979, 0.992]  G-S 0.004 [-0.001, 0.010] 
+  k= 10  G 0.970 [0.962, 0.977]  S 0.975 [0.967, 0.982]  G-S -0.005 [-0.014, 0.004] 
+  k= 12  G 0.952 [0.943, 0.961]  S 0.962 [0.952, 0.971]  G-S -0.010 [-0.021, 0.001] 
+  k= 14  G 0.926 [0.914, 0.937]  S 0.938 [0.926, 0.949]  G-S -0.012 [-0.026, 0.002] 
+  k= 16  G 0.906 [0.893, 0.918]  S 0.924 [0.911, 0.936]  G-S -0.018 [-0.034, -0.001] *
+  k= 18  G 0.874 [0.860, 0.888]  S 0.891 [0.876, 0.906]  G-S -0.017 [-0.036, 0.002] 
+  k= 20  G 0.814 [0.798, 0.832]  S 0.844 [0.828, 0.860]  G-S -0.030 [-0.052, -0.007] *
+  k= 22  G 0.725 [0.707, 0.744]  S 0.757 [0.738, 0.777]  G-S -0.032 [-0.061, -0.004] *
+  k= 24  G 0.603 [0.583, 0.623]  S 0.611 [0.591, 0.631]  G-S -0.008 [-0.040, 0.024] 
+  k= 26  G 0.472 [0.452, 0.492]  S 0.483 [0.462, 0.504]  G-S -0.011 [-0.045, 0.022] 
+  k= 28  G 0.386 [0.366, 0.405]  S 0.388 [0.367, 0.408]  G-S -0.002 [-0.033, 0.032] 
+  k= 30  G 0.342 [0.324, 0.360]  S 0.343 [0.323, 0.362]  G-S -0.001 [-0.031, 0.031] 
+  k= 35  G 0.285 [0.268, 0.303]  S 0.287 [0.269, 0.304]  G-S -0.002 [-0.032, 0.030] 
+  k= 40  G 0.256 [0.240, 0.273]  S 0.255 [0.238, 0.272]  G-S 0.000 [-0.027, 0.031] 
+  area under curve (mean moves alive per seat): G 30.358 [29.847, 30.894] S 30.636 [30.088, 31.173] diff -0.278 [-1.208, 0.710]
+-- survival (fraction of seats alive after k moves), contested (frozen at contest end)
+  k=  5  G 1.000 [0.999, 1.000]  S 1.000 [0.999, 1.000]  G-S 0.000 [0.000, 0.000] 
+  k=  8  G 0.990 [0.986, 0.994]  S 0.986 [0.979, 0.992]  G-S 0.004 [-0.001, 0.010] 
+  k= 10  G 0.970 [0.962, 0.977]  S 0.975 [0.967, 0.982]  G-S -0.005 [-0.014, 0.004] 
+  k= 12  G 0.952 [0.943, 0.961]  S 0.962 [0.952, 0.971]  G-S -0.010 [-0.021, 0.001] 
+  k= 14  G 0.926 [0.914, 0.937]  S 0.938 [0.926, 0.949]  G-S -0.012 [-0.026, 0.002] 
+  k= 16  G 0.906 [0.893, 0.918]  S 0.924 [0.911, 0.936]  G-S -0.018 [-0.034, -0.001] *
+  k= 18  G 0.875 [0.860, 0.889]  S 0.892 [0.876, 0.906]  G-S -0.017 [-0.036, 0.002] 
+  k= 20  G 0.816 [0.800, 0.833]  S 0.845 [0.829, 0.861]  G-S -0.029 [-0.052, -0.006] *
+  k= 22  G 0.727 [0.708, 0.746]  S 0.758 [0.739, 0.778]  G-S -0.031 [-0.060, -0.002] *
+  k= 24  G 0.608 [0.588, 0.628]  S 0.618 [0.597, 0.638]  G-S -0.009 [-0.042, 0.023] 
+  k= 26  G 0.487 [0.467, 0.507]  S 0.496 [0.474, 0.517]  G-S -0.009 [-0.044, 0.027] 
+  k= 28  G 0.416 [0.395, 0.437]  S 0.418 [0.396, 0.439]  G-S -0.002 [-0.039, 0.035] 
+  k= 30  G 0.382 [0.362, 0.404]  S 0.383 [0.361, 0.404]  G-S -0.000 [-0.038, 0.039] 
+  k= 35  G 0.338 [0.317, 0.361]  S 0.344 [0.322, 0.365]  G-S -0.006 [-0.044, 0.034] 
+  k= 40  G 0.320 [0.299, 0.342]  S 0.326 [0.304, 0.347]  G-S -0.006 [-0.044, 0.034] 
+  area under curve (mean moves alive per seat): G 32.075 [31.419, 32.779] S 32.468 [31.754, 33.168] diff -0.393 [-1.648, 0.940]
+  contested curve: G-S interval excludes 0 at 6 of 54 moves
+deaths with unidentified killer: 0 of 3213
+decision states (game,move) with unequal lengths among living snakes: 0
+-- death causes per seat, contested deaths only (deaths while both policies alive); denominator = seats
+  [contested]  cause                                               G                          S                        G-S
+        wall                                  6.9% [5.8, 8.0]            8.3% [7.1, 9.5] -0.014 [-0.030, 0.002]    (n=141,170)
+        self-body                          27.1% [25.0, 29.1]         23.3% [21.5, 25.2]   0.038 [0.010, 0.064] *  (n=555,478)
+        body of teammate                      3.2% [2.5, 4.0]            3.1% [2.4, 3.9]  0.001 [-0.009, 0.011]    (n=66,64)
+        body of opponent                   13.0% [11.5, 14.5]          11.1% [9.7, 12.5]  0.019 [-0.002, 0.041]    (n=266,227)
+        head-on with teammate                 4.5% [3.2, 5.9]            8.0% [6.3, 9.8] -0.035 [-0.056, -0.014] *  (n=92,164)
+        head-on with opponent              16.2% [14.6, 17.8]         16.3% [14.7, 17.9] -0.000 [-0.001, 0.000]    (n=332,333)
+        head-on with both                     0.1% [0.0, 0.3]            0.0% [0.0, 0.0]   0.001 [0.000, 0.003]    (n=2,0)
+        survived                           29.0% [26.9, 31.2]         29.9% [27.7, 32.1] -0.009 [-0.048, 0.033]    (n=594,612)
+  [all]  cause                                               G                          S                        G-S
+        wall                                  8.1% [6.9, 9.2]           8.8% [7.6, 10.1] -0.008 [-0.025, 0.009]    (n=165,181)
+        self-body                          30.9% [28.8, 32.9]         27.1% [25.2, 28.9]   0.038 [0.012, 0.064] *  (n=632,554)
+        body of teammate                      4.6% [3.8, 5.5]            4.7% [3.8, 5.6] -0.000 [-0.013, 0.012]    (n=95,96)
+        body of opponent                   13.0% [11.5, 14.5]          11.1% [9.7, 12.5]  0.019 [-0.002, 0.041]    (n=266,227)
+        head-on with teammate                 5.6% [4.2, 7.0]          10.5% [8.7, 12.4] -0.050 [-0.071, -0.027] *  (n=114,216)
+        head-on with opponent              16.2% [14.6, 17.8]         16.3% [14.7, 17.9] -0.000 [-0.001, 0.000]    (n=332,333)
+        head-on with both                     0.1% [0.0, 0.3]            0.0% [0.0, 0.0]   0.001 [0.000, 0.003]    (n=2,0)
+        survived                           21.6% [20.1, 23.1]         21.5% [20.0, 23.0]  0.000 [-0.027, 0.030]    (n=442,441)
+-- length at death (contested deaths), mean per dying seat
+  G 25.12 [24.78, 25.46]  S 25.29 [24.91, 25.66]  diff -0.17 [-0.69, 0.33]
+-- mean death move number (contested deaths): G 24.12 [23.78, 24.46] S 24.29 [23.91, 24.66] diff -0.17 [-0.69, 0.33]
+-- share of first-death-of-the-game seats (ties split) : G 0.519 [0.492, 0.547] S 0.481 [0.453, 0.508]
+   mean move of first death 19.05 [18.75, 19.34]
+-- non-head-on deaths (wall/self/body) that were forced (mask all-True at t>0 = no safe move): 2216 of 2216
+-- head-on events: >=2 living snakes enter the same on-board cell on the same move
+  composition GG   :   46 events, per game 0.045 [0.032, 0.059]
+  composition GGS  :    1 events, per game 0.001 [0.000, 0.003]
+  composition GS   :  332 events, per game 0.324 [0.293, 0.356]
+  composition SS   :   82 events, per game 0.080 [0.063, 0.098]
+  events where some participant survived the collision: 0 of 461
+  GG minus SS events per game: -0.035 [-0.056, -0.014] *
+  seats dying in a head-on: G 20.8% [18.9, 22.8] S 24.3% [22.2, 26.5] diff -0.035 [-0.056, -0.013]
+-- head-on between one G and one S snake: who survives (length decides in the rules; ties kill both)
+   events (one G vs one S, two snakes only): 330 {'G only survives': 0, 'S only survives': 0, 'both die': 330}  lengths: {'G longer': 0, 'S longer': 0, 'equal': 330}
+   G only survives  0.0% [0.0, 0.0]
+   S only survives  0.0% [0.0, 0.0]
+   both die         100.0% [100.0, 100.0]
+-- after a G-S head-on that kills both (composition 'GS', both die): who is left, and who wins
+  left 0 G + 0 S alive:  86 events, G share of the game 0.506 [0.495, 0.517]
+  left 0 G + 1 S alive:  45 events, G share of the game 0.000 [0.000, 0.000]
+  left 1 G + 0 S alive:  58 events, G share of the game 1.000 [1.000, 1.000]
+  left 1 G + 1 S alive: 143 events, G share of the game 0.514 [0.438, 0.588]
+-- how the losing side's last snake went out (decisive games; head-on = it took a surviving partner's team-mate-not-involved with it)
+  G lost 467 games; last G snake died by:
+      self-body                  n=225  share of its losses 48.2% [43.7, 52.6]  per game 22.0% [19.4, 24.5]
+      body of opponent           n=114  share of its losses 24.4% [20.6, 28.4]  per game 11.1% [9.3, 13.1]
+      head-on with teammate      n= 44  share of its losses 9.4% [6.8, 12.2]  per game 4.3% [3.0, 5.6]
+      wall                       n= 41  share of its losses 8.8% [6.2, 11.5]  per game 4.0% [2.8, 5.3]
+      head-on with opponent      n= 41  share of its losses 8.8% [6.3, 11.4]  per game 4.0% [2.8, 5.3]
+      head-on with both          n=  1  share of its losses 0.2% [0.0, 0.7]  per game 0.1% [0.0, 0.3]
+      body of teammate           n=  1  share of its losses 0.2% [0.0, 0.7]  per game 0.1% [0.0, 0.3]
+  S lost 455 games; last S snake died by:
+      self-body                  n=167  share of its losses 36.7% [32.5, 41.0]  per game 16.3% [14.2, 18.7]
+      body of opponent           n=102  share of its losses 22.4% [18.6, 26.3]  per game 10.0% [8.2, 11.8]
+      head-on with teammate      n= 76  share of its losses 16.7% [13.4, 20.2]  per game 7.4% [5.9, 9.1]
+      wall                       n= 58  share of its losses 12.7% [9.8, 15.8]  per game 5.7% [4.3, 7.1]
+      head-on with opponent      n= 51  share of its losses 11.2% [8.4, 14.2]  per game 5.0% [3.7, 6.3]
+      body of teammate           n=  1  share of its losses 0.2% [0.0, 0.7]  per game 0.1% [0.0, 0.3]
+   difference per game, G-lost minus S-lost, by mode of loss:
+      body of opponent           G 114 S 102  per-game diff 0.012 [-0.018, 0.040] 
+      body of teammate           G   1 S   1  per-game diff 0.000 [-0.003, 0.003] 
+      head-on with both          G   1 S   0  per-game diff 0.001 [0.000, 0.003] 
+      head-on with opponent      G  41 S  51  per-game diff -0.010 [-0.027, 0.009] 
+      head-on with teammate      G  44 S  76  per-game diff -0.031 [-0.052, -0.010] *
+      self-body                  G 225 S 167  per-game diff 0.057 [0.018, 0.094] *
+      wall                       G  41 S  58  per-game diff -0.017 [-0.036, 0.002] 
+-- draws (contest ended with nobody alive and >= 2 snakes eliminated on the last move)
+   75 draws: final group GS    causes ('head-on', 'head-on')
+    4 draws: final group GS    causes ('self', 'wall')
+    4 draws: final group GS    causes ('self', 'self')
+    4 draws: final group GSS   causes ('head-on', 'head-on', 'other-body')
+    3 draws: final group GGS   causes ('head-on', 'head-on', 'wall')
+    2 draws: final group GGSS  causes ('head-on', 'head-on', 'head-on', 'head-on')
+    2 draws: final group GGS   causes ('head-on', 'head-on', 'other-body')
+    2 draws: final group GSS   causes ('head-on', 'head-on', 'wall')
+    2 draws: final group GSS   causes ('head-on', 'head-on', 'self')
+    1 draws: final group GGSS  causes ('other-body', 'other-body', 'self', 'wall')
+    1 draws: final group GSS   causes ('self', 'self', 'self')
+    1 draws: final group GGS   causes ('head-on', 'head-on', 'self')
+    1 draws: final group GGSS  causes ('head-on', 'head-on', 'other-body', 'other-body')
+  draws involving a head-on: 92 of 102
+  per game: draws with head-on 9.0% [7.2, 10.8] ; draws without 1.0% [0.4, 1.7]
+-- decisive games: winner and how the winner's last opponent went out
+  G won 455; the loser's last snake died by: self-body 167, body of opponent 102, head-on with teammate 76, wall 58, head-on with opponent 51, body of teammate 1
+  S won 467; the loser's last snake died by: self-body 225, body of opponent 114, head-on with teammate 44, wall 41, head-on with opponent 41, head-on with both 1, body of teammate 1

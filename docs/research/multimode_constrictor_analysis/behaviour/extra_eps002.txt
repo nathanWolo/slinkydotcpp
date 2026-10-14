@@ -1,0 +1,12 @@
+-- fate of a seat during the contest (fraction of seats)
+   no safe move left (wall/self/any body)   G     49.4% [47.7, 51.2]  S     41.7% [39.8, 43.5]  G-S   0.078 [0.054, 0.103] *
+   head-on with an opponent                 G     21.1% [19.7, 22.5]  S     21.1% [19.8, 22.6]  G-S -0.000 [-0.001, 0.000]  
+   head-on with a teammate                  G        6.2% [5.2, 7.3]  S        4.5% [3.6, 5.4]  G-S   0.017 [0.003, 0.031] *
+   alive when the contest ended             G     23.2% [21.7, 24.7]  S     32.7% [31.2, 34.3]  G-S -0.095 [-0.123, -0.069] *
+-- outcome by the type of the first head-on of the contest (G share; contribution to G's deficit in share-units per game)
+   first head-on GG   :        6.2% [5.2, 7.3] of games, G share 0.013 [0.000, 0.030], W/D/L 0/3/124, contribution -0.0302 [-0.0354, -0.0251]
+   first head-on GGS  :        0.0% [0.0, 0.1] of games, G share 0.000 [nan, nan], W/D/L 0/0/1, contribution -0.0002 [-0.0007, 0.0000]
+   first head-on GS   :     34.0% [31.9, 36.1] of games, G share 0.312 [0.286, 0.339], W/D/L 102/231/364, contribution -0.0639 [-0.0737, -0.0541]
+   first head-on SS   :        4.5% [3.6, 5.4] of games, G share 0.986 [0.963, 1.000], W/D/L 90/2/0, contribution 0.0218 [0.0174, 0.0263]
+   first head-on none :     55.2% [53.0, 57.4] of games, G share 0.480 [0.450, 0.509], W/D/L 540/6/585, contribution -0.0110 [-0.0276, 0.0051]
+   total G deficit vs parity per game: -0.0835
