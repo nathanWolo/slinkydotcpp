@@ -185,12 +185,18 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     <button class="ghost" id="refresh" type="button" aria-pressed="true" title="Re-read the runs every 5 seconds">Auto-refresh on</button>
   </div>
   <p class="error" id="error" hidden></p>
+  <p class="hint" id="link-note" role="status" hidden></p>
   <section class="runs" id="runs" aria-label="Runs (select to plot)"></section>
-  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence, AlphaZero policy cross-entropy plus value MSE; PPO's, REINFORCE's and AlphaZero's value loss and policy entropy have their own charts.</p>
+  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence, AlphaZero policy cross-entropy plus value MSE; PPO's, REINFORCE's and AlphaZero's value loss and policy entropy have their own charts. Multi-mode runs (<code>*_modes</code>) count env steps per game mode; while one is in its main phase its total is a cap, as the plateau watcher may stop it sooner. Link to a run with <code>#run=&lt;run id or directory name&gt;</code>.</p>
   <h2>Training curves</h2>
   <section class="charts" id="charts"></section>
+  <div id="modes-section" hidden>
+    <h2>By game mode</h2>
+    <p class="sub" style="margin-top:-6px">Multi-mode runs: each game mode's own training metrics, from the game_modes block of every record.</p>
+    <section class="charts" id="mode-charts"></section>
+  </div>
   <h2>How snakes die in self-play</h2>
-  <p class="sub" style="margin-top:-6px">Share of eliminations by cause in each logged chunk, per selected run.</p>
+  <p class="sub" style="margin-top:-6px">Share of eliminations by cause in each logged chunk, per selected run (multi-mode runs: per game mode).</p>
   <section class="charts" id="deaths"></section>
   </div>
   <div id="panel-games" role="tabpanel" aria-labelledby="tab-games" hidden>
@@ -244,6 +250,9 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     timer: null,
     lastOk: 0,
   };
+  // A #run=<run id or directory name> link waits here (pending) until the run list is known;
+  // reveal: scroll that run's card into view once it is drawn.
+  const link = { pending: null, reveal: null };
 
   // --- Formatting ----------------------------------------------------------------
   // @pure-begin (DOM-free up to @pure-end: tests/test_dashboard.py runs it under node)
@@ -269,20 +278,35 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
   // "raw"). DQN and Rainbow evaluate only against random_legal and log no opponent or mode;
   // PPO and REINFORCE also play the heuristic and the DQN, greedy and sampled.
   //
-  // ppo_modes runs (algorithm "ppo_modes") play every game mode and tag their evals with
-  // game_mode; their score is the share of the win (1 for a sole survivor, 1/k when k snakes
-  // tie). The charts above them match records without a game_mode, and a chart per game mode
+  // Multi-mode runs ("ppo_modes", "reinforce_modes", "dqn_modes", "rainbow_modes", "az_modes")
+  // play every game mode at once and are charted like their single-mode namesakes (family()).
+  // Their top-level train metrics follow the first game mode (the losses are weighted means
+  // over the modes), and every train record also has a game_modes block with each mode's
+  // own: the per-mode charts below plot those. Their evals, if they log any, carry game_mode;
+  // the score is then the share of the win (1 for a sole survivor, 1/k when k snakes tie).
+  // The eval charts above them match records without a game_mode, and a chart per game mode
   // and opponent follows for the runs that log one. A run that logs no game_mode is a duel
   // (every baseline before ppo_modes), where its score is that share too, so it joins the
   // duel charts as a reference; the charts themselves are shown only if a selected run logs
   // game_mode.
+  const family = (d) => String(d.algorithm).replace(/_modes$/, "");  // dqn_modes -> dqn
+  const isModes = (d) => String(d.algorithm).endsWith("_modes");
   const isPPO = (d) => String(d.algorithm).startsWith("ppo");  // ppo and ppo_modes
-  const isPG = (d) => isPPO(d) || d.algorithm === "reinforce";  // policy gradient: no "loss"
-  const isAZ = (d) => d.algorithm === "az";
+  const isPG = (d) => isPPO(d) || family(d) === "reinforce";  // policy gradient: no "loss"
+  const isAZ = (d) => family(d) === "az";
   const MAIN_MODES = ["greedy", "search"];
   const GAME_MODES = ["standard", "duel", "royale", "constrictor"];  // slinky.modes.MODE_NAMES
   const MODE_OPPONENTS = ["random_legal", "heuristic"];
-  const logsGameMode = (d) => d.algorithm === "ppo_modes" || d.evals.some((r) => r.game_mode != null);
+  const logsGameMode = (d) => isModes(d) || d.evals.some((r) => r.game_mode != null);
+  // The game modes a run's train records have their own blocks for, in the run's order.
+  const loggedModes = (d) => {
+    const seen = new Set();
+    for (const r of d.train) if (r.game_modes) Object.keys(r.game_modes).forEach((m) => seen.add(m));
+    const order = Array.isArray((d.config || {}).game_modes) ? d.config.game_modes : GAME_MODES;
+    return [...order.filter((m) => seen.has(m)), ...[...seen].filter((m) => !order.includes(m))];
+  };
+  // The run a link (#run=<key>) names: by id, else by directory name (the runs come newest first).
+  const findRun = (runs, key) => runs.find((r) => r.id === key) || runs.find((r) => r.name === key) || null;
   const isMainEval = (opponent) => (r) =>
     (r.opponent ?? "random_legal") === opponent && MAIN_MODES.includes(r.mode ?? "greedy");
   const evalChart = (opponent, sub) => {
@@ -311,6 +335,50 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
       visible: (datas) => datas.some((d) => d.evals.some(logged)),
     };
   };
+  // The train charts of one run. Multi-mode runs also get a per-mode twin of each of the
+  // first six (modeTrainChart): the same measure from one game mode's block of every record.
+  const lossChart = {
+    id: "loss", title: "Training loss", sub: "DQN, Rainbow and AlphaZero: mean over the updates in each chunk (log scale; multi-mode runs: the weighted mean over the game modes).",
+    modeSub: "Mean over the updates in each chunk (log scale).",
+    source: "train", y: (r) => r.loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => !isPG(d),
+  };
+  const vlossChart = {
+    id: "vloss", title: "Value loss", sub: "PPO, REINFORCE and AlphaZero runs: the value head's squared error, mean over each chunk (log scale; multi-mode runs: the weighted mean over the game modes).",
+    modeSub: "The value head's squared error on this mode's games, mean over each chunk (log scale).",
+    source: "train", y: (r) => r.v_loss ?? r.value_loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => isPG(d) || isAZ(d),
+  };
+  const qChart = {
+    id: "q", title: "Value estimate", sub: "Mean Q of the moves taken (DQN, Rainbow) or mean value-head output (PPO, REINFORCE; AlphaZero logs none; multi-mode runs: the first game mode's). An unbiased value in this symmetric zero-sum game is near 0.",
+    modeSub: "Mean Q of the moves taken (DQN, Rainbow) or mean value-head output (PPO, REINFORCE) in this mode's games. An unbiased value in this symmetric zero-sum game is near 0.",
+    source: "train", y: (r) => r.mean_q ?? r.value_mean, fmt: (v) => (v >= 0 ? "+" : "") + v.toFixed(3), zero: true,
+    applies: (d) => !isAZ(d),
+  };
+  const entropyChart = {
+    id: "entropy", title: "Policy entropy", sub: "PPO, REINFORCE and AlphaZero runs: mean entropy of the network's move distribution, in nats (ln 4 ≈ 1.386 is uniform; multi-mode runs: the weighted mean over the game modes).",
+    modeSub: "Mean entropy of the network's move distribution in this mode's games, in nats (ln 4 ≈ 1.386 is uniform).",
+    source: "train", y: (r) => r.entropy ?? r.net_entropy, fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => isPG(d) || isAZ(d),
+  };
+  const lenChart = {
+    id: "len", title: "Self-play game length", sub: "Mean turns of the games that finished in each chunk (multi-mode runs: the first game mode's).",
+    modeSub: "Mean turns of this mode's games that finished in each chunk.",
+    source: "train", y: (r) => r.mean_game_len, fmt: (v) => v.toFixed(0), zeroBase: true,
+  };
+  const drawsChart = {
+    id: "draws", title: "Self-play draw rate", sub: "Share of finished games that were draws (all snakes out on the same turn; multi-mode runs: the first game mode's).",
+    modeSub: "Share of this mode's finished games that were draws (all snakes out on the same turn).",
+    source: "train", y: (r) => (r.games ? r.draws / r.games : null), fmt: pct, zeroBase: true,
+  };
+  const modeTrainChart = (base, gameMode) => {
+    const y = (r, d) => {
+      const m = r.game_modes && r.game_modes[gameMode];
+      return m ? base.y(m, d) : null;
+    };
+    return {
+      ...base, id: `${base.id}-${gameMode}`, title: `${base.title}, ${gameMode}`, sub: base.modeSub, y,
+      section: "modes",  // drawn under "By game mode"
+      applies: (d) => (!base.applies || base.applies(d)) && d.train.some((r) => y(r, d) != null),
+    };
+  };
   const CHARTS = [
     evalChart("random_legal", "Greedy policy (AlphaZero: with search); duel games: win = 1, draw = ½. Band: 95% confidence interval."),
     evalChart("heuristic", "PPO, REINFORCE and AlphaZero runs; greedy policy or search. Band: 95% confidence interval."),
@@ -319,24 +387,16 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     evalChart("ppo", "AlphaZero runs, against the committed PPO; with search. Band: 95% confidence interval."),
     evalChart("mcts-64", "AlphaZero runs, against 64-iteration MCTS; with search. Band: 95% confidence interval."),
     ...GAME_MODES.flatMap((m) => MODE_OPPONENTS.map((o) => modeEvalChart(m, o))),
-    { id: "loss", title: "Training loss", sub: "DQN, Rainbow and AlphaZero: mean over the updates in each chunk (log scale).",
-      source: "train", y: (r) => r.loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => !isPG(d) },
-    { id: "vloss", title: "Value loss", sub: "PPO, REINFORCE and AlphaZero runs: the value head's squared error, mean over each chunk (log scale).",
-      source: "train", y: (r) => r.v_loss ?? r.value_loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => isPG(d) || isAZ(d) },
-    { id: "q", title: "Value estimate", sub: "Mean Q of the moves taken (DQN, Rainbow) or mean value-head output (PPO, REINFORCE, AlphaZero; ppo_modes: the first game mode's). An unbiased value in this symmetric zero-sum game is near 0.",
-      source: "train", y: (r) => r.mean_q ?? r.value_mean, fmt: (v) => (v >= 0 ? "+" : "") + v.toFixed(3), zero: true },
-    { id: "entropy", title: "Policy entropy", sub: "PPO, REINFORCE and AlphaZero runs: mean entropy of the network's move distribution, in nats (ln 4 ≈ 1.386 is uniform).",
-      source: "train", y: (r) => r.entropy ?? r.net_entropy, fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => isPG(d) || isAZ(d) },
-    { id: "len", title: "Self-play game length", sub: "Mean turns of the games that finished in each chunk (ppo_modes: the first game mode's).",
-      source: "train", y: (r) => r.mean_game_len, fmt: (v) => v.toFixed(0), zeroBase: true },
-    { id: "draws", title: "Self-play draw rate", sub: "Share of finished games that were draws (all snakes out on the same turn; ppo_modes: the first game mode's).",
-      source: "train", y: (r) => (r.games ? r.draws / r.games : null), fmt: pct, zeroBase: true },
-    { id: "speed", title: "Throughput", sub: "Env steps per second (one game advancing one turn; ppo_modes: per game mode), evaluations excluded.",
+    lossChart, vlossChart, qChart, entropyChart, lenChart, drawsChart,
+    { id: "speed", title: "Throughput", sub: "Env steps per second (one game advancing one turn; multi-mode runs: per game mode), evaluations excluded.",
       source: "train", y: (r) => r.env_steps_per_s, fmt: (v) => compact(Math.round(v)), zeroBase: true },
     { id: "eps", title: "Exploration rate ε", sub: "Epsilon-greedy runs.", source: "train", y: (r) => r.eps,
       fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => "eps_start" in d.config && d.config.noisy !== true },
     { id: "sigma", title: "Noise scale σ", sub: "Noisy-net runs: mean |σ| of the noisy hidden layer.",
       source: "train", y: (r) => r.noise_sigma, fmt: (v) => v.toFixed(4), zeroBase: true, applies: (d) => d.config.noisy === true },
+    // A measure at a time, so the modes line up side by side.
+    ...[lossChart, vlossChart, qChart, entropyChart, lenChart, drawsChart]
+      .flatMap((base) => GAME_MODES.map((m) => modeTrainChart(base, m))),
   ];
 
   // The points one run contributes to a chart (null: the chart does not apply to the run).
@@ -373,6 +433,11 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
   function saveSelection() {
     try { localStorage.setItem("slinky-dashboard-selected", JSON.stringify([...state.colors.keys()])); } catch (e) { /* storage unavailable */ }
   }
+  // After the selection changed: remember it, and keep the URL a link to it.
+  function commitSelection() {
+    saveSelection();
+    writeHash();
+  }
   function select(id) {
     if (state.colors.has(id) || state.colors.size >= MAX_SELECTED) return false;
     const used = new Set(state.colors.values());
@@ -390,7 +455,27 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     const live = state.runs.filter((r) => r.live);
     (live.length ? live : state.runs.slice(0, 1)).forEach((r) => select(r.id));
     state.runs.filter((r) => r.id.startsWith("baselines/checkpoints/")).forEach((r) => select(r.id));
-    saveSelection();
+    commitSelection();
+  }
+  // #run=<id or directory name>: plot that run alone. False while the run list is unknown, or
+  // if no run matches (the usual selection stays).
+  function applyRunLink() {
+    const key = link.pending;
+    if (key == null || !state.runs.length) return false;
+    link.pending = null;
+    const run = findRun(state.runs, key);
+    if (!run) {
+      $("link-note").textContent = `No run has the id or directory name “${key}”; showing the usual selection.`;
+      $("link-note").hidden = false;
+      writeHash();  // the URL stops naming a run that is not there
+      return false;
+    }
+    state.colors.clear();
+    select(run.id);
+    link.reveal = run.id;
+    $("link-note").hidden = true;
+    commitSelection();
+    return true;
   }
   const color = (id) => css(SLOTS[state.colors.get(id)]);
 
@@ -414,7 +499,8 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
       for (const id of [...state.colors.keys()]) {
         if (now - (state.seen.get(id) || 0) > 10 * 60e3) state.colors.delete(id);
       }
-      if (first) initialSelection();
+      if (!applyRunLink() && first) initialSelection();
+      if (first) writeHash();  // a saved selection of one run is a link too
       // Fetch metrics for selected runs that changed since we last read them.
       await Promise.all(runs.filter((r) => state.colors.has(r.id)).map(async (r) => {
         const have = state.data.get(r.id);
@@ -458,6 +544,7 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
       const on = state.colors.has(r.id);
       const card = el("button", "run");
       card.type = "button";
+      card.dataset.id = r.id;
       card.setAttribute("aria-pressed", String(on));
 
       const head = el("div", "run-head");
@@ -485,11 +572,16 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
       const ev = r.last_eval;
       const facts = el("div", "facts");
       const fact = (label, value) => { const f = el("span", null, label); f.prepend(el("b", null, value)); facts.append(f); };
-      fact(r.total_steps ? `of ${compact(r.total_steps)} · ${pct(frac)}` : "env steps", compact(r.env_steps));
+      // A multi-mode run in its main phase may be stopped by the plateau watcher before its
+      // total, which is then a cap (and the ETA the one to the cap); in its cooldown it is the end.
+      const cap = r.phase === "main" ? " cap" : "";
+      fact(r.total_steps ? `of ${compact(r.total_steps)}${cap} · ${pct(frac)}${r.phase === "cooldown" && !r.finished ? " · cooldown" : ""}` : "env steps", compact(r.env_steps));
       // A run that tags its evals with a game mode shows its first mode's (the headline).
       fact(ev ? `vs random_legal${ev.game_mode ? ` in ${ev.game_mode}` : ""} ±${ev.score_ci95.toFixed(3)}` : "no eval yet", ev ? ev.score.toFixed(3) : "–");
       if (r.live && t.env_steps_per_s && r.total_steps) {
-        fact(`ETA · ${Math.round(t.env_steps_per_s)} steps/s`, duration((r.total_steps - r.env_steps) / t.env_steps_per_s));
+        fact(`ETA${cap ? " to cap" : ""} · ${Math.round(t.env_steps_per_s)} steps/s`, duration((r.total_steps - r.env_steps) / t.env_steps_per_s));
+      } else if (isModes(r) && r.train_seconds) {
+        fact("training time", duration(r.train_seconds));  // "elapsed" restarts at a resume
       } else {
         fact(t.elapsed != null ? "training time" : "updated", t.elapsed != null ? duration(t.elapsed) : ago(r.updated));
       }
@@ -502,10 +594,15 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
           $("error").hidden = false;
           return;
         }
-        saveSelection();
+        $("link-note").hidden = true;
+        commitSelection();
         refresh();
       });
       box.append(card);
+    }
+    if (link.reveal && !$("panel-training").hidden) {
+      const card = [...box.children].find((c) => c.dataset.id === link.reveal);
+      if (card) { link.reveal = null; card.scrollIntoView({ block: "nearest" }); }
     }
   }
 
@@ -802,18 +899,28 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
   }
 
   // --- Death causes: 100% stacked areas, one chart per selected run ----------------------
-  function deathChart(run, d) {
-    const causes = CAUSES.filter((c) => c.key !== "hazard" || d.train.some((r) => r.deaths && r.deaths.hazard));
+  // A record's deaths by cause: the top-level block (the first game mode's, for a multi-mode
+  // run), or one game mode's own.
+  const deathsOf = (rec, mode) => (mode ? rec.game_modes && rec.game_modes[mode] && rec.game_modes[mode].deaths : rec.deaths);
+
+  function deathChart(run, d, mode) {
+    const causes = CAUSES.filter((c) => c.key !== "hazard" || d.train.some((r) => (deathsOf(r, mode) || {}).hazard));
     const rows = d.train.map((r) => {
-      const total = causes.reduce((a, c) => a + ((r.deaths || {})[c.key] || 0), 0);
-      return { x: r.env_steps, total, share: causes.map((c) => (total ? ((r.deaths || {})[c.key] || 0) / total : 0)) };
+      const deaths = deathsOf(r, mode) || {};
+      const total = causes.reduce((a, c) => a + (deaths[c.key] || 0), 0);
+      return { x: r.env_steps, total, share: causes.map((c) => (total ? (deaths[c.key] || 0) / total : 0)) };
     }).filter((r) => r.total > 0);
     const series = causes.map((c, i) => ({
       name: c.label, color: css(c.slot), points: rows.map((r) => ({ x: r.x, y: r.share[i] })),
     }));
-    // A ppo_modes run's top-level deaths are its first game mode's.
-    const headMode = Array.isArray(d.config.game_modes) ? d.config.game_modes[0] : null;
-    const def = { id: `deaths:${run.id}`, title: run.name, sub: `${run.algorithm} · ${run.id}${headMode ? ` · ${headMode} games` : ""}`, fmt: pct };
+    // A multi-mode run's top-level deaths (no mode asked for) are its first game mode's.
+    const headMode = !mode && Array.isArray(d.config.game_modes) ? d.config.game_modes[0] : null;
+    const def = {
+      id: mode ? `deaths:${run.id}:${mode}` : `deaths:${run.id}`,
+      title: mode ? `${run.name} · ${mode}` : run.name,
+      sub: `${run.algorithm} · ${run.id}${headMode ? ` · ${headMode} games` : ""}`,
+      fmt: pct,
+    };
     const { card, toggle } = chartCard(def.title, def.sub);
     card.append(legend(series, "area"));
     const plot = el("div", "plot");
@@ -833,7 +940,7 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
       const xEnd = xMax;
       const xScale = (v) => m.l + (W - m.l - m.r) * (v / xEnd);
       const yScale = (v) => m.t + (H - m.t - m.b) * (1 - v);
-      const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `Death causes of ${run.name}` });
+      const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `Death causes of ${def.title}` });
       const surface = css("--surface");
       const cum = rows.map(() => 0);
       series.forEach((s, i) => {
@@ -862,7 +969,7 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
       plot.append(root);
       plot.tabIndex = 0;
       plot.setAttribute("role", "group");
-      plot.setAttribute("aria-label", `Deaths of ${run.name}: use the arrow keys to read values`);
+      plot.setAttribute("aria-label", `Deaths of ${def.title}: use the arrow keys to read values`);
       let at = -1;
       const show = (i, cx, cy) => {
         at = Math.max(0, Math.min(rows.length - 1, i));
@@ -886,7 +993,7 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
           e.preventDefault();
           reading = true;
           show(at < 0 ? rows.length - 1 : at + (e.key === "ArrowRight" ? 1 : -1));
-          announce(`Deaths of ${run.name}`);
+          announce(`Deaths of ${def.title}`);
         } else if (e.key === "Escape") hide();
       };
       plot.onblur = hide;
@@ -909,8 +1016,9 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     // and not under a keyboard readout (the next poll after it closes catches up).
     if (version === drawn || reading) return;
     drawn = version;
-    const charts = $("charts");
+    const charts = $("charts"), modeCharts = $("mode-charts");
     charts.replaceChildren();
+    modeCharts.replaceChildren();
     $("tooltip").hidden = true;
     const selected = state.runs.filter((r) => state.colors.has(r.id) && state.data.has(r.id)).map((r) => state.data.get(r.id));
     for (const def of CHARTS) {
@@ -918,18 +1026,24 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
       const series = seriesFor(def);
       if (!series.length) continue;  // e.g. no noisy-net run selected for the sigma chart
       const card = lineChart(def, series);
-      charts.append(card);
+      (def.section === "modes" ? modeCharts : charts).append(card);
       card._redraw && card._redraw();  // drawn in place, sized to its column
     }
-    if (!charts.children.length) charts.append(el("p", "hint", "Select a run above to plot it."));
+    $("modes-section").hidden = !modeCharts.children.length;
+    if (!charts.children.length && !modeCharts.children.length) charts.append(el("p", "hint", "Select a run above to plot it."));
     const deaths = $("deaths");
     deaths.replaceChildren();
     for (const r of state.runs) {
       const d = state.data.get(r.id);
       if (!state.colors.has(r.id) || !d) continue;
-      const card = deathChart(r, d);
-      deaths.append(card);
-      card._redraw && card._redraw();
+      // A multi-mode run has a card per game mode (its first, the headline, is the top-level
+      // block); any other run one card.
+      const modes = loggedModes(d).filter((m) => d.train.some((rec) => deathsOf(rec, m)));
+      for (const mode of modes.length ? modes : [null]) {
+        const card = deathChart(r, d, mode);
+        deaths.append(card);
+        card._redraw && card._redraw();
+      }
     }
   }
 
@@ -952,7 +1066,9 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
   });
 
   // --- Tabs and the Games view ------------------------------------------------------------
-  // The URL hash keeps the view: #games, or #games=<replay id> for one replay file.
+  // The URL hash keeps the view: #games, or #games=<replay id> for one replay file; on the
+  // Training tab #run=<run> (the run's directory name, or its id if the name is not unique)
+  // while exactly one run is plotted.
   const games = { list: null, current: null, loading: null };
   const TABS = ["training", "games"];
 
@@ -972,17 +1088,28 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     writeHash();
   }
 
+  function linkKey(id) {
+    const run = state.runs.find((r) => r.id === id);
+    return run && state.runs.filter((r) => r.name === run.name).length === 1 ? run.name : id;
+  }
+
   function writeHash() {
-    const hash = !$("panel-games").hidden
-      ? (games.current ? `#games=${encodeURIComponent(games.current)}` : "#games")
-      : "";
+    if (link.pending != null) return;  // a link not yet followed stays in the URL
+    let hash = "";
+    if (!$("panel-games").hidden) hash = games.current ? `#games=${encodeURIComponent(games.current)}` : "#games";
+    else if (state.colors.size === 1) hash = `#run=${encodeURIComponent(linkKey([...state.colors.keys()][0]))}`;
     if (location.hash !== hash) history.replaceState(null, "", hash || location.pathname + location.search);
   }
 
+  const unescapeHash = (text) => {
+    try { return decodeURIComponent(text); } catch (e) { return null; }
+  };
   function readHash() {
+    const run = /^#run=(.+)$/.exec(location.hash);
+    if (run) return unescapeHash(run[1]) == null ? null : { run: unescapeHash(run[1]) };
     const m = /^#games(?:=(.*))?$/.exec(location.hash);
     if (!m) return null;
-    try { return { replay: m[1] ? decodeURIComponent(m[1]) : null }; } catch (e) { return { replay: null }; }
+    return { replay: m[1] ? unescapeHash(m[1]) : null };
   }
 
   for (const t of TABS) {
@@ -1093,6 +1220,13 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     const h = readHash();
     if (!h) {
       if ($("panel-training").hidden) showTab("training");
+      return;
+    }
+    if (h.run != null) {
+      link.pending = h.run;
+      const applied = applyRunLink();  // not yet if the run list is still loading: refresh() does it
+      if ($("panel-training").hidden) showTab("training");
+      if (applied) refresh();
       return;
     }
     if (h.replay && h.replay !== games.current) {

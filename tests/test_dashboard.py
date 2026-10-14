@@ -392,7 +392,9 @@ CHART_POINTS = """({runs}) => {
       const pts = pointsOf(def, d);
       if (pts) per[d.name] = pts.map((p) => [p.x, p.y]);
     });
-    if (Object.keys(per).length) out[def.id] = { title: def.title, sub: def.sub, runs: per };
+    if (Object.keys(per).length) {
+      out[def.id] = { title: def.title, sub: def.sub, section: def.section ?? null, runs: per };
+    }
   }
   return out;
 }"""
@@ -497,3 +499,316 @@ def test_page_markers_and_headline_fact():
     assert 'String(d.algorithm).startsWith("ppo")' in page  # ppo and ppo_modes
     # The run card names the game mode of the headline eval it shows.
     assert "ev.game_mode" in page
+
+
+# --- The multi-mode trainers: reinforce_modes, dqn_modes, rainbow_modes, az_modes -----------
+
+CAMPAIGN_MODES = ["standard", "duel", "royale", "constrictor"]
+SNAKES = {"standard": 4, "duel": 2, "royale": 4, "constrictor": 4}
+
+# What each trainer's config.json adds to the shared fields (src/slinky/unified.py's
+# ModesSettings), as the campaign runs them: the budget is the cap of the main phase.
+CAMPAIGN_CONFIGS = {
+    "reinforce_modes": {"total_env_steps": 33_554_432, "mode_envs": ["duel=10"],
+                        "updates_per_log": 32},
+    "dqn_modes": {"total_env_steps": 33_554_432, "num_envs": 32, "log_every": 32_768,
+                  "eps_start": 1.0, "eps_end": 0.05},
+    "rainbow_modes": {"total_env_steps": 33_554_432, "num_envs": 32, "log_every": 32_768,
+                      "noisy": True, "eps_start": 1.0, "eps_end": 0.05},
+    "az_modes": {"total_env_steps": 16_777_216, "num_envs": 256, "num_steps": 32,
+                 "log_every": 32_768},
+}  # fmt: skip
+
+
+def campaign_config(algorithm: str, **extra) -> dict:
+    base = {"algorithm": algorithm, "game_modes": CAMPAIGN_MODES, "cooldown_from": -1}
+    return {**base, **CAMPAIGN_CONFIGS[algorithm], **extra}
+
+
+# The metrics each trainer's chunk_record puts in a game mode's block (value of mode number i).
+MODE_METRICS = {
+    "reinforce_modes": lambda i: {"pg_loss": 0.001, "v_loss": 0.05 + 0.01 * i,
+                                  "entropy": 1.0 - 0.1 * i, "value_mean": 0.01 * i},
+    "dqn_modes": lambda i: {"loss": 0.02 * (i + 1), "mean_q": 0.1 * i},
+    "rainbow_modes": lambda i: {"loss": 0.5 * (i + 1), "mean_q": 0.1 * i},
+    "az_modes": lambda i: {"policy_loss": 1.2, "value_loss": 0.3 + 0.01 * i,
+                           "net_entropy": 1.1 - 0.05 * i, "target_entropy": 1.0},
+}  # fmt: skip
+# ... and at the top of the record, besides the first mode's game statistics.
+TOP_METRICS = {
+    "reinforce_modes": {"loss": 0.02, "pg_loss": 0.001, "v_loss": 0.06, "entropy": 0.9,
+                        "value_mean": 0.0},
+    "dqn_modes": {"loss": 0.03, "mean_q": 0.0, "eps": 0.05},
+    "rainbow_modes": {"loss": 0.6, "mean_q": 0.0, "eps": 0.05, "noise_sigma": 0.4},
+    "az_modes": {"loss": 1.5, "policy_loss": 1.2, "value_loss": 0.3, "net_entropy": 1.1,
+                 "target_entropy": 1.0},
+}  # fmt: skip
+
+
+def modes_train(algorithm: str, steps: int, seconds: float = 10.0) -> str:
+    """A train record as ``<algorithm>.chunk_record`` writes it (the fields the dashboard reads)."""
+    per_mode = {
+        mode: {
+            "num_snakes": SNAKES[mode], "games": 20, "mean_game_len": 100.0 + 10 * i,
+            "draws": i, "truncated": 0,
+            "deaths": {"wall": 1, "self": 2 + i, "body": 3, "h2h": 4, "starve": 5,
+                       "hazard": 6 if mode == "royale" else 0},
+            **MODE_METRICS[algorithm](i),
+        }
+        for i, mode in enumerate(CAMPAIGN_MODES)
+    }  # fmt: skip
+    head = per_mode[CAMPAIGN_MODES[0]]
+    return json.dumps(
+        {
+            "type": "train", "env_steps": steps, "lr": 1e-3, "seconds": seconds,
+            "env_steps_per_s": 3000.0, "elapsed": steps / 3000.0,
+            **{k: head[k] for k in ("games", "mean_game_len", "draws", "truncated", "deaths")},
+            **TOP_METRICS[algorithm], "game_modes": per_mode,
+        }
+    )  # fmt: skip
+
+
+def test_total_steps_of_the_multi_mode_trainers():
+    # The campaign's real configs: a cap that is whole chunks already ...
+    for algorithm in ("dqn_modes", "rainbow_modes", "az_modes"):
+        config = campaign_config(algorithm)
+        assert dash.total_steps(config) == config["total_env_steps"], algorithm
+    # ... and a cooldown's end (config.json is rewritten with cooldown_from and the new total).
+    ppo = {"algorithm": "ppo_modes", "num_envs": 64, "num_steps": 128, "log_every": 32_768,
+           "total_env_steps": 12_845_056, "cooldown_from": 10_747_904}  # fmt: skip
+    assert dash.total_steps(ppo) == 12_845_056
+    # REINFORCE's chunks are whole games of varying length: the budget itself, which the
+    # last chunk overshoots a little (the real run ended at 9,631,980 of 9,628,083).
+    cooled = campaign_config("reinforce_modes", total_env_steps=9_628_083, cooldown_from=7_530_931)
+    assert dash.total_steps(cooled) == 9_628_083
+    assert dash.total_steps({"algorithm": "reinforce_modes"}) is None
+    # Otherwise rounded up to whole chunks: DQN and Rainbow take num_envs steps per iteration,
+    # log_every // num_envs of them per chunk (9 x 32 = 288) ...
+    for algorithm in ("dqn_modes", "rainbow_modes"):
+        small = campaign_config(algorithm, total_env_steps=1000, log_every=300)
+        assert dash.total_steps(small) == 1152, algorithm
+        assert dash.total_steps({**small, "log_every": 1}) == 1024  # at least one iteration
+    # ... AlphaZero whole iterations of num_envs * num_steps = 2048 steps.
+    az = campaign_config("az_modes", total_env_steps=21_000, num_envs=64, log_every=4096)
+    assert dash.total_steps(az) == 24_576  # chunks of 4096
+    assert dash.total_steps({**az, "log_every": 1000}) == 22_528  # chunks of 2048
+
+
+def test_phase_of_a_multi_mode_run():
+    assert dash.phase(campaign_config("dqn_modes")) == "main"
+    assert dash.phase(campaign_config("reinforce_modes", cooldown_from=7_530_931)) == "cooldown"
+    # A run that anneals its learning rate over total_env_steps runs to its end: no phases.
+    assert dash.phase({**MODES_CONFIG, "anneal_lr": True, "cooldown_from": -1}) is None
+    assert dash.phase({**MODES_CONFIG, "anneal_lr": False, "cooldown_from": -1}) == "main"
+    for config in ({}, {"algorithm": "reinforce"}, {"algorithm": "az"}, {"gae_lambda": 0.9}):
+        assert dash.phase(config) is None and not dash.is_modes(config)
+    assert dash.phase({"algorithm": "az_modes", "cooldown_from": "x"}) == "main"
+
+
+def test_multi_mode_run_summaries(tmp_path):
+    steps = (32_768, 65_536)
+    for algorithm in CAMPAIGN_CONFIGS:
+        lines = [modes_train(algorithm, s) for s in steps]
+        write_run(tmp_path, f"{algorithm}-M-s0", campaign_config(algorithm), lines)
+    found = dash.find_runs([tmp_path])
+    by_name = {p.name: dash.run_summary(i, p) for i, p in found.items()}
+    assert set(by_name) == {f"{a}-M-s0" for a in CAMPAIGN_CONFIGS}
+    for algorithm, config in CAMPAIGN_CONFIGS.items():
+        s = by_name[f"{algorithm}-M-s0"]
+        assert s["algorithm"] == algorithm and s["phase"] == "main"
+        # A cap, 65,536 steps in: not finished, no eval (the campaign evaluates snapshots).
+        assert s["total_steps"] == config["total_env_steps"] and s["env_steps"] == 65_536
+        assert not s["finished"] and s["last_eval"] is None
+        assert s["train_seconds"] == 20.0 and s["last_train"]["env_steps"] == 65_536
+
+    # The cooldown rewrites config.json: the run ends at the new total, and is finished there.
+    run = write_run(
+        tmp_path, "cooled",
+        campaign_config("reinforce_modes", total_env_steps=9_628_083, cooldown_from=7_530_931),
+        [modes_train("reinforce_modes", 7_530_931), modes_train("reinforce_modes", 9_631_980)],
+    )  # fmt: skip
+    s = dash.run_summary("cooled", run)
+    assert s["phase"] == "cooldown" and s["total_steps"] == 9_628_083 and s["finished"]
+    # DONE marks a finished run whatever its steps; a stopped main phase is not finished.
+    run = tmp_path / "az_modes-M-s0"
+    (run / "STOPPED").write_text("")
+    assert not dash.run_summary("x", run)["finished"]
+    (run / "DONE").write_text("")
+    assert dash.run_summary("x", run)["finished"]
+    # The runs that were there before have no phase.
+    for name in ("rainbow-a", "reinforce-d"):
+        config = {"algorithm": name.split("-")[0], "total_env_steps": 10_000, "num_envs": 32}
+        s = dash.run_summary(name, write_run(tmp_path, name, config, [train(6_123)]))
+        assert s["phase"] is None
+
+
+def test_run_list_rereads_only_the_runs_that_changed(runs, monkeypatch):
+    # The run list is polled every few seconds: a finished run's metrics are parsed once.
+    run, other = runs / "rainbow-a", runs / "ppo-c"
+    first = dash.run_summary("a", run)
+    reads = []
+    real = dash.read_records
+    monkeypatch.setattr(dash, "read_records", lambda r: reads.append(r) or real(r))
+    again = dash.run_summary("a", run)
+    assert not reads and again == first
+    with open(run / "metrics.jsonl", "a") as f:
+        f.write(train(900, seconds=5.0) + "\n")
+    changed = dash.run_summary("a", run)
+    assert reads == [run] and changed["env_steps"] == 900 and changed["train_seconds"] == 5.0
+    assert changed["version"] != first["version"]
+    # Another run is read once, then served from the cache; /api/metrics always reads.
+    dash.run_summary("b", other)
+    dash.run_summary("b", other)
+    dash.read_run(run)
+    assert reads == [run, other, run]
+
+
+def test_multi_mode_http_api(tmp_path):
+    for algorithm in CAMPAIGN_CONFIGS:
+        lines = [modes_train(algorithm, s) for s in (32_768, 65_536)]
+        name = algorithm.replace("_", "-")
+        write_run(tmp_path, f"{name}-M-s0", campaign_config(algorithm), lines)
+    dash.Handler.roots = [tmp_path]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(base + "/api/runs", timeout=10) as r:
+            listed = {s["algorithm"]: s for s in json.loads(r.read())}
+        assert set(listed) == set(CAMPAIGN_CONFIGS)
+        for algorithm, config in CAMPAIGN_CONFIGS.items():
+            s = listed[algorithm]
+            assert s["total_steps"] == config["total_env_steps"] and s["env_steps"] == 65_536
+            assert s["phase"] == "main" and not s["finished"] and s["name"].endswith("-M-s0")
+        run_id = urllib.request.quote(listed["az_modes"]["id"])
+        with urllib.request.urlopen(f"{base}/api/metrics?run={run_id}", timeout=10) as r:
+            data = json.loads(r.read())
+        # The page gets the per-mode blocks of every train record (and the config's mode order).
+        assert data["config"]["game_modes"] == CAMPAIGN_MODES and data["phase"] == "main"
+        assert list(data["records"][-1]["game_modes"]) == CAMPAIGN_MODES
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def campaign_page_run(algorithm: str, name: str | None = None, steps=(32_768, 65_536)):
+    lines = [modes_train(algorithm, s) for s in steps]
+    return page_run(name or f"{algorithm}-M", campaign_config(algorithm), lines)
+
+
+def test_page_families_of_the_multi_mode_trainers():
+    algorithms = [
+        "ppo", "ppo_modes", "reinforce", "reinforce_modes", "dqn", "dqn_modes", "rainbow",
+        "rainbow_modes", "az", "az_modes", "unknown", "modes",
+    ]  # fmt: skip
+    code = """(names) => names.map((algorithm) => {
+      const d = { algorithm, evals: [], train: [] };
+      return [family(d), isModes(d), isPG(d), isAZ(d), logsGameMode(d)];
+    })"""
+    got = dict(zip(algorithms, page_js(code, algorithms), strict=True))
+    # family, multi-mode, policy gradient (no "loss"), AlphaZero, plays every game mode
+    assert got == {
+        "ppo": ["ppo", False, True, False, False],
+        "ppo_modes": ["ppo", True, True, False, True],
+        "reinforce": ["reinforce", False, True, False, False],
+        "reinforce_modes": ["reinforce", True, True, False, True],
+        "dqn": ["dqn", False, False, False, False],
+        "dqn_modes": ["dqn", True, False, False, True],
+        "rainbow": ["rainbow", False, False, False, False],
+        "rainbow_modes": ["rainbow", True, False, False, True],
+        "az": ["az", False, False, True, False],
+        "az_modes": ["az", True, False, True, True],
+        "unknown": ["unknown", False, False, False, False],
+        "modes": ["modes", False, False, False, False],
+    }  # fmt: skip
+
+
+def test_page_charts_of_the_multi_mode_trainers():
+    top = {  # the charts of each trainer, as its single-mode namesake has them
+        "reinforce_modes": {"vloss", "q", "entropy", "len", "draws", "speed"},
+        "dqn_modes": {"loss", "q", "len", "draws", "speed", "eps"},
+        "rainbow_modes": {"loss", "q", "len", "draws", "speed", "sigma"},  # noisy: no epsilon
+        "az_modes": {"loss", "vloss", "entropy", "len", "draws", "speed"},  # no value estimate
+    }
+    per_mode = {  # ... and the per-mode twin of each of those that the records have per mode
+        "reinforce_modes": {"vloss", "q", "entropy", "len", "draws"},
+        "dqn_modes": {"loss", "q", "len", "draws"},
+        "rainbow_modes": {"loss", "q", "len", "draws"},
+        "az_modes": {"vloss", "entropy", "len", "draws"},  # AlphaZero logs no loss per mode
+    }
+    modes = tuple(f"-{m}" for m in CAMPAIGN_MODES)
+    for algorithm in top:
+        shown = page_js(CHART_POINTS, {"runs": [campaign_page_run(algorithm)]})
+        by_mode = {k for k in shown if k.endswith(modes)}
+        assert set(shown) - by_mode == top[algorithm], algorithm
+        assert by_mode == {f"{c}-{m}" for c in per_mode[algorithm] for m in CAMPAIGN_MODES}
+        # No eval charts: these runs log no evals (the campaign evaluates snapshots elsewhere),
+        # and the duel-style "Score vs random_legal" chart is not theirs.
+        assert not [k for k in shown if k.startswith("eval-")], algorithm
+        for k in by_mode:
+            assert shown[k]["runs"] and shown[k]["section"] == "modes", k
+        assert all(shown[k]["section"] is None for k in set(shown) - by_mode)
+
+    # Each per-mode chart plots its own mode's block; the top-level chart the first mode's.
+    run = campaign_page_run("dqn_modes", "dqn-M")
+    shown = page_js(CHART_POINTS, {"runs": [run]})
+    steps = (32_768, 65_536)
+    assert shown["len"]["runs"] == {"dqn-M": [[s, 100.0] for s in steps]}
+    assert shown["len-duel"]["runs"] == {"dqn-M": [[s, 110.0] for s in steps]}
+    assert shown["len-constrictor"]["title"] == "Self-play game length, constrictor"
+    assert shown["draws-duel"]["runs"] == {"dqn-M": [[s, 1 / 20] for s in steps]}
+    assert shown["q-royale"]["runs"]["dqn-M"][0][1] == pytest.approx(0.2)
+    assert shown["loss-constrictor"]["runs"]["dqn-M"][0][1] == pytest.approx(0.08)
+    # REINFORCE's per-mode value loss, AlphaZero's per-mode policy entropy.
+    run = campaign_page_run("reinforce_modes", "pg-M")
+    shown = page_js(CHART_POINTS, {"runs": [run]})
+    assert shown["vloss-royale"]["runs"]["pg-M"][0][1] == pytest.approx(0.07)
+    run = campaign_page_run("az_modes", "az-M")
+    shown = page_js(CHART_POINTS, {"runs": [run]})
+    assert shown["entropy-duel"]["runs"]["az-M"][0][1] == pytest.approx(1.05)
+
+    # Runs of several trainers share the per-mode charts that apply to each; a single-mode
+    # run (no game_modes blocks) is not in any of them.
+    runs = [campaign_page_run("dqn_modes"), campaign_page_run("az_modes"), legacy_duel_run()]
+    shown = page_js(CHART_POINTS, {"runs": runs})
+    assert set(shown["len-duel"]["runs"]) == {"dqn_modes-M", "az_modes-M"}
+    assert set(shown["q-duel"]["runs"]) == {"dqn_modes-M"}
+    assert set(shown["entropy-duel"]["runs"]) == {"az_modes-M"}
+    # With no multi-mode run selected there are no per-mode charts at all.
+    shown = page_js(CHART_POINTS, {"runs": [legacy_duel_run()]})
+    assert not [k for k in shown if k.endswith(modes)]
+
+
+def test_page_logged_modes_and_run_links():
+    run = campaign_page_run("dqn_modes")
+    code = "(run) => loggedModes({ ...run, train: run.records.filter((r) => r.type === 'train') })"
+    assert page_js(code, run) == CAMPAIGN_MODES
+    # In the order of the config's game_modes, then any others; none without per-mode blocks.
+    config = {**run["config"], "game_modes": ["royale", "duel"]}
+    assert page_js(code, {**run, "config": config}) == ["royale", "duel", "standard", "constrictor"]
+    plain = {**run, "records": [{"type": "train", "env_steps": 1}]}
+    assert page_js(code, plain) == [] and page_js(code, legacy_duel_run()) == []
+
+    # #run=<key>: a run's id, else the name of its directory (the newest of that name first).
+    runs = [
+        {"id": "/root/runs/dqn-modes-M-s0", "name": "dqn-modes-M-s0"},
+        {"id": "/old/runs/dqn-modes-M-s0", "name": "dqn-modes-M-s0"},
+        {"id": "runs/az", "name": "az"},
+    ]  # fmt: skip
+    keys = ["/old/runs/dqn-modes-M-s0", "dqn-modes-M-s0", "az", "runs/az", "nope", ""]
+    code = "({ runs, keys }) => keys.map((k) => { const r = findRun(runs, k); return r && r.id; })"
+    assert page_js(code, {"runs": runs, "keys": keys}) == [
+        "/old/runs/dqn-modes-M-s0", "/root/runs/dqn-modes-M-s0", "runs/az", "runs/az", None, None,
+    ]  # fmt: skip
+    assert page_js(code, {"runs": [], "keys": ["az"]}) == [None]
+
+
+def test_page_links_to_a_run_and_labels_a_cap():
+    page = (ROOT / "baselines" / "dashboard.html").read_text(encoding="utf-8")
+    # The hash that selects a run (documented in dashboard.py's docstring), read at load and
+    # on hashchange, and kept up to date while one run is plotted.
+    assert "#run=" in page and "/^#run=(.+)$/" in page
+    assert "link.pending" in page and "applyRunLink" in page and "commitSelection" in page
+    assert "#run=" in dash.__doc__ and "directory" in dash.__doc__
+    # The run card says "cap" for a multi-mode run's main phase, and a cooldown for its end.
+    assert 'r.phase === "main"' in page and 'r.phase === "cooldown"' in page

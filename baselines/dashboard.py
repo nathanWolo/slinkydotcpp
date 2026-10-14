@@ -1,6 +1,9 @@
-"""A live training dashboard for the baselines (DQN, PPO, Rainbow, AlphaZero) in the browser.
+"""A live training dashboard for the baselines (DQN, PPO, REINFORCE, Rainbow, AlphaZero).
 
-Including the multi-mode PPO runs (``ppo_modes``), which get per-game-mode eval charts.
+Including the multi-mode runs of ``ppo_modes``, ``reinforce_modes``, ``dqn_modes``,
+``rainbow_modes`` and ``az_modes`` (``config.json`` has ``"algorithm": "<name>_modes"``): each
+is charted like its single-mode namesake, plus a chart per game mode (``game_modes`` blocks of
+the train records, and the evals' ``game_mode``). Their step counts are env steps *per mode*.
 
 ::
 
@@ -12,6 +15,17 @@ run directory it finds (any directory with a ``metrics.jsonl``, searched up to
 two levels below each root; default roots: ``runs/`` and
 ``baselines/checkpoints/``). The page re-reads them every few seconds, so a run
 in progress updates live.
+
+Links to a run: ``http://host:8050/#run=<run>`` opens the Training tab with that run
+(and only that run) plotted, where ``<run>`` is the run's id (the ``id`` of ``/api/runs``:
+its directory, relative to the repository if inside it), or just the name of its directory
+(``#run=dqn-modes-M-s0``; the most recently updated if several roots have one of that name).
+The page keeps the hash up to date while exactly one run is plotted. ``#games`` and
+``#games=<replay id>`` open the Games tab.
+
+A multi-mode run's ``total_env_steps`` is a cap while it is in its main phase (the plateau
+watcher of ``benchmarks/plateau.py`` may stop it sooner) and the run's end once ``cooldown_from``
+is set; ``/api/runs`` says which in ``phase``.
 
 Its Games tab plays recorded games: every ``slinky-replay/1`` JSON file (as
 written by ``python -m slinky.replay --out``) up to two levels below the replay
@@ -95,32 +109,67 @@ def read_records(run: Path) -> list[dict[str, Any]]:
 
 def algorithm(config: dict[str, Any]) -> str:
     # dqn.py's and ppo.py's config.json have no "algorithm" key (rainbow.py's,
-    # reinforce.py's, az.py's and ppo_modes.py's do).
+    # reinforce.py's, az.py's and the multi-mode trainers' do: "ppo_modes", "reinforce_modes",
+    # "dqn_modes", "rainbow_modes", "az_modes").
     if not config:
         return "unknown"
     return str(config.get("algorithm") or ("ppo" if "gae_lambda" in config else "dqn"))
+
+
+def is_modes(config: dict[str, Any]) -> bool:
+    """A multi-mode run (``<algorithm>_modes``): it trains on every game mode at once."""
+    return str(config.get("algorithm")).endswith("_modes")
+
+
+# Algorithms whose update is a batch of whole games, so a chunk is as long as the games in it.
+WHOLE_GAME_ALGORITHMS = ("reinforce", "reinforce_modes")
 
 
 def total_steps(config: dict[str, Any]) -> int | None:
     """The env steps a run will take: ``total_env_steps`` rounded up to whole log chunks.
 
     A chunk is whole env-step batches (``num_envs`` each; ``num_envs * num_steps``
-    for PPO's iterations), as many as fit in ``log_every`` and at least one.
-    REINFORCE's chunks are whole batches of games, of varying length: its runs
-    stop at the first chunk that reaches ``total_env_steps``.
+    for PPO's and AlphaZero's iterations), as many as fit in ``log_every`` and at least
+    one. The multi-mode DQN, Rainbow and AlphaZero count env steps per mode and chunk the
+    same way. REINFORCE's chunks (also ``reinforce_modes``') are whole batches of games, of
+    varying length: its runs stop at the first chunk that reaches ``total_env_steps``.
+
+    A multi-mode run's cooldown (``cooldown_from`` >= 0, ``total_env_steps`` = that + the
+    cooldown) continues the chunks of its main phase, which stopped at a chunk boundary, so
+    the same rounding holds.
     """
-    if config.get("algorithm") == "reinforce":
-        try:
-            return int(config["total_env_steps"])
-        except (KeyError, TypeError, ValueError):
-            return None
     try:
-        total, every, envs = (int(config[k]) for k in ("total_env_steps", "log_every", "num_envs"))
+        total = int(config["total_env_steps"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if config.get("algorithm") in WHOLE_GAME_ALGORITHMS:
+        return total
+    try:
+        every, envs = (int(config[k]) for k in ("log_every", "num_envs"))
         step = max(envs, 1) * max(int(config.get("num_steps", 1)), 1)
     except (KeyError, TypeError, ValueError):
         return None
     chunk = max(every // step, 1) * step
     return -(-total // chunk) * chunk
+
+
+def phase(config: dict[str, Any]) -> str | None:
+    """Where a multi-mode run is: ``"main"``, ``"cooldown"`` or None (not such a run).
+
+    In the main phase the learning rate is constant and the plateau watcher may stop the run
+    before ``total_env_steps``, which is then only a cap. From ``cooldown_from`` on the
+    learning rate decays to 0 at ``total_env_steps``, which is then where the run ends. A run
+    that anneals its learning rate over ``total_env_steps`` (``ppo_modes --anneal-lr``) has no
+    phases: it runs to its end.
+    """
+    if not is_modes(config):
+        return None
+    try:
+        if int(config.get("cooldown_from", -1)) >= 0:
+            return "cooldown"
+    except (TypeError, ValueError):
+        pass
+    return None if config.get("anneal_lr") else "main"
 
 
 def is_headline_eval(record: dict[str, Any], config: dict[str, Any] | None = None) -> bool:
@@ -158,42 +207,79 @@ def read_run(run: Path) -> tuple[list[dict[str, Any]], float, str]:
     version older than the records, which costs the page one extra fetch, never a
     missed update. The version includes the size, which changes with every append.
     """
+    mtime, version = _stat_metrics(run)
+    return read_records(run), mtime, version
+
+
+def _stat_metrics(run: Path) -> tuple[float, str]:
+    """``(mtime, version)`` of the run's ``metrics.jsonl`` (see :func:`read_run`)."""
     try:
         st = (run / "metrics.jsonl").stat()
-        mtime, version = st.st_mtime, f"{st.st_mtime_ns}:{st.st_size}"
     except OSError:
-        mtime, version = 0.0, "missing"
-    return read_records(run), mtime, version
+        return 0.0, "missing"
+    return st.st_mtime, f"{st.st_mtime_ns}:{st.st_size}"
 
 
 def _number(x: Any) -> int | float | None:
     return x if isinstance(x, int | float) and not isinstance(x, bool) else None
 
 
-def run_summary(run_id: str, run: Path, read: tuple | None = None) -> dict[str, Any]:
-    """What the run list shows: identity, status, progress and the latest numbers."""
-    config = read_config(run)
-    records, mtime, version = read_run(run) if read is None else read
+def _digest(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    """What :func:`run_summary` takes from a run's records."""
     train = [r for r in records if r.get("type") == "train"]
     evals = [r for r in records if r.get("type") == "eval"]
     headline = [r for r in evals if is_headline_eval(r, config)]
+    return {
+        "steps": (_number(train[-1].get("env_steps")) or 0) if train else 0,
+        # The last chunk's and eval's wall time: how often this run writes.
+        "cadence": sum(_number(r.get("seconds")) or 0.0 for r in (train[-1:] + evals[-1:])),
+        # The chunks' wall time, summed: unlike "elapsed" it survives a resume or a reboot.
+        "train_seconds": sum(_number(r.get("seconds")) or 0.0 for r in train),
+        "last_train": train[-1] if train else None,
+        "last_eval": headline[-1] if headline else None,
+    }
+
+
+# Run directory -> (metrics version and headline game mode, digest). The run list reads every
+# run on every poll (and a campaign has dozens, of megabytes each), but most runs are
+# finished: their digest is kept until their metrics.jsonl changes.
+_digests: dict[Path, tuple[tuple[str, str | None], dict[str, Any]]] = {}
+
+
+def run_summary(run_id: str, run: Path, read: tuple | None = None) -> dict[str, Any]:
+    """What the run list shows: identity, status, progress and the latest numbers."""
+    config = read_config(run)
+    if read is None:
+        mtime, version = _stat_metrics(run)  # before the read, as in read_run
+        key = (version, headline_game_mode(config))
+        cached = _digests.get(run)
+        if cached is None or cached[0] != key:
+            cached = _digests[run] = (key, _digest(read_records(run), config))
+        digest = cached[1]
+    else:
+        records, mtime, version = read
+        digest = _digest(records, config)
     total = total_steps(config)
-    steps = (_number(train[-1].get("env_steps")) or 0) if train else 0
-    # Live: written to within LIVE_SECONDS, or within 3 of this run's own chunk + eval
-    # times (a slow run logs less often).
-    cadence = sum(_number(r.get("seconds")) or 0.0 for r in (train[-1:] + evals[-1:]))
+    steps = digest["steps"]
+    # DONE: the campaign's marker of a run that is completely finished (its cooldown included).
+    finished = (total is not None and steps >= total) or (run / "DONE").exists()
     return {
         "id": run_id,
         "name": run.name,
         "algorithm": algorithm(config),
+        # "main" (total_steps is a cap), "cooldown" (it is the end) or None: see phase().
+        "phase": phase(config),
         "updated": mtime,
         "version": version,
-        "live": time.time() - mtime < max(LIVE_SECONDS, 3 * cadence),
-        "finished": total is not None and steps >= total,
+        # Live: written to within LIVE_SECONDS, or within 3 of this run's own chunk + eval
+        # times (a slow run logs less often).
+        "live": time.time() - mtime < max(LIVE_SECONDS, 3 * digest["cadence"]),
+        "finished": finished,
         "env_steps": steps,
         "total_steps": total,
-        "last_train": train[-1] if train else None,
-        "last_eval": headline[-1] if headline else None,
+        "train_seconds": digest["train_seconds"],
+        "last_train": digest["last_train"],
+        "last_eval": digest["last_eval"],
     }
 
 
