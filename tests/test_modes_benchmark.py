@@ -363,6 +363,10 @@ def test_deterministic_constrictor_line_ups_are_marked(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "| A,B,A,B (deterministic) |" in text and "Deterministic: only greedy ppo_modes" in text
     assert "| As,Bs,As,Bs |" in text and "| A,H,H,H |" in text
+    # Paired rows built from a deterministic line-up say so too.
+    titles = {t for t, _ in M.pair_records(recs, a="A", b="B")}
+    assert "A,B,A,B (within, deterministic)" in titles and "A,B,A,B (within)" in titles
+    assert {t for t, _ in M.pair_records(recs, a="As", b="Bs")} == {"As,Bs,As,Bs (within)"}
 
 
 def test_pairing_needs_the_same_other_agents_and_the_same_games(tmp_path):

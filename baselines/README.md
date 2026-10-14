@@ -32,7 +32,8 @@ leaderboard modes ([multi-mode PPO](#multi-mode-ppo-ppo_modespy)).
   constrictor games at once, told the mode. Its duel scores are from the mode
   benchmark (`benchmarks/modes.py`; 256 games against `random_legal`, 1,024
   against the heuristic). It beats its single-mode specialists head to head
-  in standard, the duel and royale, and is level with them in constrictor.
+  in standard, the duel and royale, and has no overall gain in constrictor
+  (level under sampled play).
   See [multi-mode PPO](#multi-mode-ppo-ppo_modespy).
 
 ### The three compared
@@ -743,10 +744,10 @@ their moves (`ppo_modes-sample`), added after the greedy results.
   - Every other cell has a source of randomness: the heuristic breaks ties at
     random, `ppo` sees the food, and the other modes' food matters. `--table`
     now marks a line-up like this one *deterministic*.
-- **Near-greedy play shows a small constrictor deficit.** With a random legal
-  move 2%, 5% or 10% of the time, the generalist scores 0.417, 0.438 and 0.461
-  head to head (2,048 games each). Only full sampling brings it to level.
-  These come from the
+- **Perturbed greedy play shows a small constrictor deficit.** With a random
+  legal move 2%, 5% or 10% of the time, the generalist scores 0.417, 0.438
+  and 0.461 head to head (2,048 games each). With 3 sampled opening moves
+  and then greedy play it is level (0.490). These come from the
   [investigation](../docs/research/multimode_constrictor.md)'s scripts.
 
 **Against fixed opponents.** These are the share of one seat against three
@@ -784,8 +785,8 @@ G,S,H,H puts both in one game against two heuristics.
     +0.125) are about the size of the duel specialists' seed spread
     (0.251–0.376); the head-to-head margins are much larger.
   - The standard specialist's score against the heuristic stays at the floor.
-    In its 256-game training evaluations it scores 0.016 at 1M env steps and
-    0.025 at 5.24M, while the generalist rises from 0.020 to 0.111. It did
+    In its 256-game training evaluations it scores 0.008–0.025 from 1M to
+    5.24M env steps, while the generalist rises from 0.020 to 0.111. It did
     learn something: it scores 0.316 against three copies of `ppo`, above
     parity.
   - In royale the generalist scores 0.341 against three heuristics, above
@@ -872,14 +873,14 @@ heuristics, one in the duel. Off its own mode, each cell has 256 games.
 **Self-play dynamics** (the last 32k env steps of each mode):
 
 - **Entropy.** The generalist's policy is sharper than the standard and
-  royale specialists': 0.23 nats against 0.34 and 0.33. It is about as sharp
+  royale specialists': 0.23 and 0.22 nats against 0.34 and 0.33. It is about as sharp
   as the duel specialist's (0.23 against 0.25). In constrictor it is less
   sharp: 0.15 against 0.12.
 - **The 16 minibatches explain part of the gap.** The 16-minibatch specialists
-  sit at 0.29 (standard, royale) and 0.24 (duel).
+  sit at 0.28 (standard), 0.29 (royale) and 0.24 (duel).
 - **Game length.** Self-play games last 257, 208, 175 and 32 turns for the
   generalist (standard, duel, royale, constrictor), against 272, 151, 179 and
-  32 for the specialists.
+  31 for the specialists.
 
 ### Why no gain in constrictor
 
@@ -890,7 +891,7 @@ investigation
 narrowed them down:
 
 - **Specialist headroom** (consistent with the data, not tested).
-  - Constrictor games last about 32 turns, against 150–270 in the other modes
+  - Constrictor games last about 31 turns, against 150–270 in the other modes
     at the end of training. Per env step, its specialist completes 3–7 times
     as many games as the others over the run.
   - Its score against the heuristic is flat from 3M env steps on (0.230,
@@ -902,20 +903,28 @@ narrowed them down:
     steps, 0.203 at 5.24M).
 - **Shared skills.**
   - Royale is standard plus a visible hazard.
-  - The food modes' value-loss gradients point the same way (de-noised cosine
-    0.66–0.87). Constrictor's is much less aligned with theirs (0.04–0.46),
-    and by the end of training it points against standard's.
-  - That is mostly in the value head. On the shared layers there is no direct
-    evidence that constrictor learns less.
-- **Small interference costs.** These are real but too small to show in the
-  results:
+  - At 1–3M env steps the food modes' value-loss gradients point the same
+    way (mean de-noised cosine 0.66–0.87 over the three pairs). Constrictor's
+    is clearly less aligned with theirs at 1M and 3M.
+  - Later the food modes no longer agree with each other either. At 5.24M
+    constrictor's points against standard's (raw cosine −0.31
+    [−0.43, −0.19]).
+  - Most of the value gradient sits in the value head. On the shared layers,
+    constrictor's value gradient lines up with the food modes' at 2–3M but
+    not at 1M or 4M, and opposes them at 5.24M.
+  - The policy-gradient term, which dominates those layers, could not be
+    measured. So there is no direct evidence either way about what the
+    shared layers learn for constrictor.
+- **Candidate interference effects.** These are differences between the two
+  networks whose cost was not shown:
   - a moving-tail habit from the food modes, where constrictor's tails never
     move;
   - a value-loss weight of about 0.3 (8% of the total), from constrictor's
     larger return variance;
   - a dip in the middle of training that recovered.
 - **Ruled out:**
-  - mode confusion (above);
+  - a wrong mode input (above). Habits carried over from the board, like the
+    moving-tail one, are a separate question;
   - a broken constrictor critic.
 - **Not tested: the extra gradient steps.** The food-mode controls show they
   do not explain the gains there, and they tend to weaken a specialist head
@@ -928,19 +937,21 @@ narrowed them down:
   heuristic, so a 4-snake seed spread of that size is possible.
 - **The pre-registered constrictor head-to-head is degenerate** (12 distinct
   games); the sampled head-to-head is the one to read. The other modes'
-  greedy head-to-heads are 1,024 distinct games.
+  greedy head-to-heads are varied games: in a check of 128 games per
+  line-up, all 128 were distinct.
 - **The mode input is barely needed**, because the board shows the mode. A
   mode the board cannot reveal would need it.
 - **Constrictor is weak for both** (about 0.7 against `random_legal`). A
   dedicated study (longer games on bigger boards, or a better reward) is open.
-- **Two experiments were stopped unfinished:**
-  - the 16-minibatch constrictor control, stopped at 2.9M of 5.24M env steps;
-  - a fine-tuning test, in which the generalist and the constrictor specialist
-    each get 1M more constrictor env steps and then play each other. The runs
-    reached about 0.45M before a container restart stopped them (seen in
-    their live logs, since overwritten); the last saved checkpoint is at
-    0.26M.
-  - Neither is reported.
+- **Two experiments were cut short.** A container restart interrupted them.
+  They were restarted, then stopped for good when no more training was
+  wanted. Neither is reported.
+  - The 16-minibatch constrictor control was stopped at 2.9M of 5.24M env
+    steps.
+  - In the fine-tuning test, the generalist and the constrictor specialist
+    each get 1M more constrictor env steps and then play each other. Its last
+    saved checkpoint is at 0.26M. The live logs, since overwritten, showed
+    about 0.45M before the restart, which can no longer be checked.
 - **The training snapshots are not committed**, only the final networks; the
   snapshot head-to-heads in the investigation are not reproducible from the
   repository alone.

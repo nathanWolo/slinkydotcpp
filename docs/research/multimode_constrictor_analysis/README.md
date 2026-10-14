@@ -5,9 +5,12 @@ results of [`../multimode_constrictor.md`](../multimode_constrictor.md). They ar
 kept as a record, not as maintained code:
 
 - **Not linted or tested**, and excluded from ruff.
-- **Paths.** Paths into the original scratch directory were rewritten to this
-  directory. Others are absolute (`/home/user/slinkydotcpp/...`) or relative
-  to the repository root, and `runs/...` are the training runs.
+- **Paths.** In the scripts, paths into the original scratch directory were
+  rewritten to this directory. Others are absolute (`/home/user/slinkydotcpp/...`)
+  or relative to the repository root, and `runs/...` are the training runs.
+  The commands recorded at the top of the re-run outputs keep the original
+  `scratch/multimode/analysis/...` paths: that is where the scripts and their
+  data were when they ran.
 - **Many cannot be re-run from the repository.** They read the training
   snapshots (`runs/<run>/params-<steps>.npz`) or intermediate files (`.npz`,
   `cells.jsonl`), which are not committed. Only the final networks are, in
@@ -15,7 +18,8 @@ kept as a record, not as maintained code:
 - **Large outputs were left out**: arrays (`.npz`, `.npy`), logs and any text
   file over 200 kB.
 - **Printed outputs.** Where a script printed its results, they are next to it
-  (`*.txt`, `*.json`; `*_out.txt` for the outputs re-run for this archive).
+  (`*.txt`, `*.json`; `diagnostics/out_*.txt`; `*_out.txt` for the outputs re-run
+  for this archive).
 - **`investigation_log.json`** is the raw output of the investigation: five
   investigations, a synthesis, and two reviews that re-ran key scripts.
   Several claims in the investigations and the synthesis were corrected or

@@ -3,8 +3,9 @@
 One actor-critic network plays every mode of :mod:`slinky.modes` (``standard``:
 4 snakes, ``duel``: 2, ``royale``: 4 with shrinking hazards, ``constrictor``: 4)
 and is told which one it is playing. The same file trains a *specialist* on a
-single mode (``--game-modes duel``), so a generalist and its specialists differ
-in nothing but the modes they see. It is ``baselines/ppo.py`` (self-play with
+single mode (``--game-modes duel``), so at the same settings a generalist and its
+specialists differ in nothing but the modes they see (the reported generalist used
+``--num-minibatches 16``; see "Defaults and why"). It is ``baselines/ppo.py`` (self-play with
 parameter sharing, masked policy, per-agent episodes, PPO-clip, the same
 hyperparameters) with these changes:
 
@@ -68,9 +69,10 @@ hyperparameters) with these changes:
 * **Budgets count per mode.** ``num_envs``, ``total_env_steps``,
   ``log_every``, ``eval_every`` and ``checkpoint_every`` are per mode, so every
   mode gets exactly a specialist's env steps, and one iteration takes
-  ``update_epochs * num_minibatches`` gradient steps, the specialist's count (the
-  learning-rate decay is the same). The generalist's minibatches are the
-  union of the specialists', so it costs about as much as all of them together.
+  ``update_epochs * num_minibatches`` gradient steps, the specialist's count at the
+  same ``num_minibatches`` (the learning-rate decay is the same). The generalist's
+  minibatches are the union of the specialists', so it costs about as much as all of
+  them together.
 
 **Records.** ``metrics.jsonl`` holds ``ppo.py``'s train records (``env_steps``
 per mode; ``env_steps_all`` over all modes; the losses are the weighted means

@@ -17,11 +17,11 @@ How to read this file:
   trainer's own functions. Two independent reviews re-ran the key scripts and
   checked the numbers. Several claims were corrected or weakened in that
   review, and only the checked versions are given here.
-- **The scripts and their small outputs** are kept as a record in
-  [`multimode_constrictor_analysis/`](multimode_constrictor_analysis/). They
-  are unmaintained and not linted, their paths are those of the original
-  session, and many need the training snapshots (`params-<steps>.npz`),
-  which are not committed.
+- **The scripts and their printed outputs** are kept as a record in
+  [`multimode_constrictor_analysis/`](multimode_constrictor_analysis/) (see
+  its README). They are unmaintained and not linted, and many need the
+  training snapshots (`params-<steps>.npz`) or intermediate arrays, which are
+  not committed.
 - Everything rests on one training seed per run, except the duel specialist
   (three seeds).
 
@@ -49,12 +49,13 @@ How to read this file:
   sample their moves (`Gs,Ss,Gs,Ss`). `--table` marks a constrictor line-up
   of greedy networks only as *deterministic*.
 
-## 2. Measured properly, it is level
+## 2. Without the repeats: level when sampled, slightly behind near greedy
 
 | measure | generalist's share | source |
 |---|---|---|
 | sampled play, G,S,G,S, 1,024 games (essentially all distinct) | 0.494 [0.463, 0.524] | [benchmark] |
-| sampled play, two more runs (1,024 and 2,048 games) | 0.495 [0.466, 0.524] and 0.488 [0.468, 0.508] | [side analysis] |
+| sampled play, 1,024 games on independent keys | 0.495 [0.466, 0.524] | [side analysis] |
+| sampled play, 2,048 games (the first 1,024 are the benchmark's) | 0.488 [0.468, 0.508] | [side analysis] |
 | 3 sampled opening moves, then greedy (631 distinct of 1,024) | 0.490 [0.461, 0.518] | [side analysis] |
 | greedy with a random legal move 2% / 5% / 10% of the time (2,048 games each) | 0.417 [0.396, 0.437] / 0.438 [0.418, 0.458] / 0.461 [0.440, 0.481] | [side analysis] |
 | against 3 heuristics, G − S per seat (paired, 1,024 games) | −0.012 ± 0.032 | [benchmark] |
@@ -62,11 +63,24 @@ How to read this file:
 | against 1 heuristic and 2 `random_legal`, G − S per seat (paired, 1,024 games) | −0.046 ± 0.038 | [benchmark] |
 
 - **No overall gain.** The generalist is level with its specialist under
-  sampled play and against three heuristics. It is slightly ahead against
-  `ppo` and slightly behind with one heuristic and two `random_legal`.
-- **Small near-greedy deficit.** With occasional random moves it is 0.04–0.08
-  behind. The three runs reuse the same random draws, so they are not
-  independent confirmations.
+  sampled play, with sampled openings and against three heuristics. It is
+  slightly ahead against `ppo` and slightly behind with one heuristic and two
+  `random_legal`.
+- **A small deficit when greedy play is perturbed.** With uniform random moves
+  it is 0.04–0.08 behind. The three eps runs reuse the same random draws, so
+  they are not independent confirmations.
+- **Where that deficit sits** (2% random moves, 0.083 behind per game).
+  - Its snakes are alive at the end of the contest less often: 23.2% of
+    seats against 32.7%.
+  - Its two snakes collide head-on with each other more often: 6.2% of
+    seats against 4.5% for the specialist's pair, and those games are almost
+    always lost.
+  - Grouped by the game's first head-on: games whose first head-on is
+    generalist-vs-specialist account for −0.064 per game, and games whose
+    first is between the generalist's own snakes −0.030. Games whose first
+    is between the specialist's snakes give +0.022 back.
+  - A generalist-vs-specialist head-on kills one of each, so the loss in
+    those games builds up in the play that follows. [side analysis]
 - **Royale does not depend on the protocol.** The generalist's lead holds
   greedy (0.705), sampled (0.698) and at every matched training snapshot:
   0.545, 0.646, 0.678, 0.706 and 0.701 against the specialist at the same
@@ -84,7 +98,7 @@ its evidence is.
 causally).**
 
 - **The constrictor specialist's curve is flat.**
-  - Constrictor games last about 32 turns, against 150–270 in the other
+  - Constrictor games last about 31 turns, against 150–270 in the other
     modes at the end of training. Per env step, its specialist completes 3–7
     times as many games as the others over the run (4–8 times at the end).
   - Its score against the heuristic is flat from 3M env steps (0.230, 0.230,
@@ -96,50 +110,70 @@ causally).**
   The generalist's royale snapshot at 2M is already level with the final
   royale specialist: 0.480 [0.437, 0.524].
   - The standard specialist's score against the heuristic stays at the floor
-    (0.016 to 0.025), which cannot show whether it still learns. It scores
+    (0.008 to 0.025), which cannot show whether it still learns. It scores
     0.316 against three `ppo`, above parity. [benchmark; side analysis]
 - **The account (untested).** If pooled experience helps where a specialist is
   short of data, this is the pattern it would produce.
 
-**Shared skills (supported for what the critic learns; untested for the
-policy).**
+**Shared skills (partly supported for what the critic learns; untested for
+the policy).**
 
-- **Royale shares its levers with standard and the duel; constrictor has
-  none of them.** Royale is standard plus a visible hazard zone.
-  - In sampled royale play the generalist's snakes are about 0.25–0.3 cells
-    longer 25–75 moves in; in greedy play only at move 25.
+- **Royale shares the length levers of standard and the duel; constrictor
+  lacks them.** Royale is standard plus a visible hazard zone. Food makes a
+  snake longer there, and the longer snake survives a head-on collision.
   - It is the longer snake in 75% of its head-on collisions with the
-    specialist, and the longer snake survives a head-on collision.
+    specialist (sampled play).
+  - Among living snakes, the generalist's are about 0.25–0.3 cells longer
+    25–75 moves in (sampled play; in greedy play only at move 25). The lead
+    is gone by move 100 and reverses at 150–200, and pooled over the game it
+    is not significant (+0.12 [−0.03, 0.26]).
   - In constrictor every snake has the same length, food does nothing, and
-    head-on collisions always kill both snakes. [side analysis]
-- **The value-loss gradients agree.** Those of standard, the duel and royale
-  point the same way: de-noised cosine 0.66–0.87 at 1–3M env steps. That
-  holds at the constrictor specialist's parameters too, so it is a property
-  of the tasks.
-  - Constrictor's is much less aligned with theirs over all parameters
-    (0.04–0.46 at 1–4M).
-  - At 5.24M it points against standard's (−0.83 [−2.03, −0.46]). Its mean
-    against the three food modes there is −0.33 [−1.10, 0.06]. [side analysis]
-- **Caveat on the gradients.** 83–99% of the value gradient's squared norm
-  sits in the 257-parameter value head (at the generalist's snapshots). On the shared convolutional and dense layers,
-  constrictor's value gradient lines up with the food modes' (0.69 at 2M,
-  0.63 at 3M). The policy-gradient term, which dominates those layers' gradient,
-  was pure noise at the sample sizes used. So there is no direct evidence
-  that the shared layers learn less for constrictor. [side analysis]
+    head-on collisions always kill both snakes. Other skills, such as
+    avoiding traps, matter in both modes. [side analysis]
+- **The value-loss gradients agree early on.** The value-loss gradients of
+  standard, the duel and royale point the same way at 1–3M env steps (mean
+  de-noised cosine 0.66–0.87 over the three pairs). [side analysis]
+  - Constrictor's is clearly less aligned with theirs at 1M and 3M (0.04 and
+    0.10). At 2M the difference is borderline (0.46 against 0.80).
+  - By 4M and 5.24M the food modes no longer agree with each other either
+    (0.06 and 0.19, with wide intervals).
+  - At 5.24M constrictor's points against standard's: raw cosine −0.31
+    [−0.43, −0.19]. The de-noised figure is unstable there (−0.83, interval
+    [−2.03, −0.46]).
+  - The food modes also agree at the constrictor specialist's parameters.
+    That does not show a property of the tasks, though: there the food-mode
+    rollouts are off the specialist's distribution, and a shared value
+    miscalibration alone would align them.
+- **Caveat on the gradients.** 83–98% of the value gradient's squared norm
+  sits in the 257-parameter value head, at the generalist's snapshots.
+  - On the shared convolutional and dense layers alone, constrictor's value
+    gradient lines up with the food modes' at 2M and 3M (0.69, 0.63). It does
+    not at 1M (−0.04) or 4M (0.16), and at 5.24M it opposes them (−0.43
+    [−0.74, −0.14]).
+  - The value term is only 1/20–1/50 of those layers' gradient. The
+    policy-gradient term dominates them and was pure noise at the sample
+    sizes used.
+  - So there is no direct evidence either way about what the shared layers
+    learn for constrictor. [side analysis]
 - **Zero-shot transfer is no better into royale than into constrictor.** The
   standard specialist scores 0.098 in royale and 0.108 in constrictor
   against three heuristics (256 games). "Royale is close to standard" holds
-  for the value function, not for the policy as a whole. [benchmark]
+  at most for the value function, not for the policy as a whole.
+  [benchmark]
 
-**Small interference costs (real, small).**
+**Candidate interference effects (differences seen; cost not shown).**
 
 - **Moving-tail habit.** The countdown channels give tail-moves until a body
   cell is free, which is true in the food modes but not in constrictor,
   where tails never move. Changing only those channels flips the
-  generalist's greedy move about 5 times as often as the specialist's: 0.101
-  against 0.019 when every body is made to look far from clearing (decisions
-  from sampled G,S,G,S games). Matching the two policies' confidence leaves
-  about 4 times (0.110 against 0.026). [side analysis]
+  generalist's greedy move about 5 times as often as the specialist's.
+  - When every body is made to look far from clearing, the flip rate is
+    0.110 against 0.022 (decisions with at least two legal moves, from
+    sampled G,S,G,S games).
+  - Reweighting the specialist's decisions to the generalist's confidence
+    gives 0.026, about 4 times.
+  - Whether the generalist reads the channels as tails that will move is not
+    settled. The same probe leaves its trap rate unchanged. [side analysis]
 - **Moves that only have room if tails move.** Some decisions have a move
   that is roomy only if tails move. Where that room margin is 5 cells, the
   generalist picks it 13% of the time, against 7% for the specialist (2,048
@@ -149,16 +183,8 @@ policy).**
   - In fully sampled play its snakes die in such traps 0.013 more often per
     seat per game (0.028 against 0.016), while total deaths are equal
     (0.782 against 0.780).
-  - It was not measured in the near-greedy play where the deficit lies.
-    [side analysis]
-- **Where the near-greedy deficit comes from.** With 2% random moves the
-  generalist is 0.083 behind per game.
-  - Its seats run out of safe moves more often: 49.4% of them against 41.7%.
-  - It collides head-on with its own teammate more often: 6.2% of seats
-    against 4.5%, and those games are almost always lost.
-  - Split by the game's first head-on, generalist-vs-specialist head-ons cost
-    0.064 per game and the generalist's own two snakes colliding 0.030.
-    Specialist-vs-specialist head-ons win 0.022 back. [side analysis]
+  - It was not measured in the perturbed greedy play where the deficit
+    lies. [side analysis]
 - **A small value-loss weight.** The value loss is scaled per mode by
   1/variance of the GAE returns, which gives constrictor a weight of about
   0.3 (0.28–0.34 after the first tenth of training) against 0.9–1.6 for the
@@ -171,8 +197,9 @@ policy).**
     low weight partly offset each other rather than reinforce.
   - The generalist's constrictor value error (MSE) is 6–9% above the
     specialist's in the training logs, and 1.5–3% on fresh rollouts.
-  - Its explained variance is lower (0.22 against 0.35), mostly because its
-    returns vary less. [benchmark; side analysis]
+  - Its explained variance is lower (0.22 against 0.35). With a similar MSE,
+    its flatter critic removes less of the return variance: 0.041 against
+    0.058 on fresh rollouts. [benchmark; side analysis]
 - **A mid-training dip.** The generalist's constrictor score against three
   heuristics fell from 1M to 3M env steps by −0.074 ± 0.043, then recovered.
   The specialist was ahead only at 2–3M (−0.109 ± 0.045 at 3M, 512 games).
@@ -180,16 +207,22 @@ policy).**
 
 **Ruled out.**
 
-- **Mode confusion.** Told a wrong mode, the generalist changes 2–6% of its
-  greedy moves. Its strength drops by 0.02–0.04 in constrictor (told duel:
-  −0.040 [−0.080, −0.001], 256 paired games). The benchmark always tells it
-  the right mode, so this cannot cause a gap. [benchmark; side analysis]
+- **A wrong mode input.** Told a wrong mode, the generalist changes 2–6% of
+  its greedy moves. Its strength drops by 0.02–0.04 in constrictor (told
+  duel: −0.040 [−0.080, −0.001], 256 paired games). The benchmark always tells
+  it the right mode, so this cannot cause a gap. This tests only the mode
+  input; habits carried over through the board, like the moving-tail one
+  above, are a separate question. [benchmark; side analysis]
 - **A broken constrictor critic.** Its value error is close to the
   specialist's (above).
+
+**Not established.**
+
 - **Rock-paper-scissors between snapshots.** Constrictor snapshot
   head-to-heads swing from 0.13 to 0.72, and a round robin looked cyclic.
-  With 12 distinct games per pair, the transitivity test gives p ≈ 0.075, so
-  intransitivity is not established. [side analysis]
+  With 12 distinct games per pair, the transitivity test gives p ≈ 0.075.
+  At that power, intransitivity is neither established nor ruled out.
+  [side analysis]
 
 **Not tested.**
 
@@ -202,15 +235,14 @@ policy).**
 
 ## 4. Not finished
 
-Two experiments were started and stopped before the end, because no more
-training was wanted:
+Two experiments were cut short. A container restart interrupted them. They
+were restarted, then stopped for good when no more training was wanted:
 
 - **Fine-tuning test.** The generalist and the constrictor specialist each
   get 1M more constrictor-only env steps, then play each other. This would
   show whether the generalist's features are as good as the specialist's.
-  The runs reached about 0.45M env steps before a container restart stopped
-  them (seen in their live logs, since overwritten). The last saved
-  checkpoint is at 0.26M.
+  The last saved checkpoint is at 0.26M. The live logs, since overwritten,
+  showed about 0.45M before the restart, which can no longer be checked.
 - **Constrictor control.** A 16-minibatch constrictor specialist, stopped at
   2.9M of 5.24M env steps.
 

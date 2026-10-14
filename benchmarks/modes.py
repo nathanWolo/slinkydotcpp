@@ -640,6 +640,13 @@ def seed_tag(record: dict[str, Any], several: bool) -> str:
     return f" [seed {record['seed']}]" if several else ""
 
 
+def det_tag(*records: dict[str, Any], alone: bool = False) -> str:
+    """``", deterministic"`` (``" (deterministic)"`` with ``alone``) if any record is."""
+    if not any(deterministic(r) for r in records):
+        return ""
+    return " (deterministic)" if alone else ", deterministic"
+
+
 def pair_records(
     records: list[dict[str, Any]], a: str = "G", b: str = "S"
 ) -> list[tuple[str, Paired]]:
@@ -650,7 +657,8 @@ def pair_records(
     They are paired game by game only if both lines come from the same code (same
     ``code_fingerprint``, same ``heuristic_fingerprint``); lines of different code give a
     row with a ``note`` and the unpaired intervals. Within a cell: both symbols have seats.
-    The seed is in the title when the records have several.
+    The seed is in the title when the records have several, and *deterministic* when a
+    record is (:func:`deterministic`: its games repeat, so the interval says little).
     """
     out = []
     several = len({r["seed"] for r in records}) > 1
@@ -660,7 +668,7 @@ def pair_records(
             held = r["results"]
             out.append(
                 (
-                    f"{r['lineup']} (within){seed_tag(r, several)}",
+                    f"{r['lineup']} (within{det_tag(r)}){seed_tag(r, several)}",
                     paired_stats(
                         d[a]["share"] / held[a]["seats"],
                         d[b]["share"] / held[b]["seats"],
@@ -689,7 +697,8 @@ def pair_records(
         sa, sb = ra["results"][a]["seats"], rb["results"][b]["seats"]
         out.append(
             (
-                f"{ra['lineup']} vs {rb['lineup']}{seed_tag(ra, several)}",
+                f"{ra['lineup']} vs {rb['lineup']}{det_tag(ra, rb, alone=True)}"
+                f"{seed_tag(ra, several)}",
                 paired_stats(
                     da[a]["share"][:n] / sa,
                     db[b]["share"][:n] / sb,
@@ -800,7 +809,8 @@ def table_main(path: Path, mode: str | None, seed: int | None) -> int:
                 " inert and hidden from them, so each game is fixed by its start; the standard"
                 " map has 2 start layouts, so there are at most 2 x the seatings distinct games"
                 " (12 in G,S,G,S), and the interval only covers which of them came up, not play"
-                " from any other start. Read the sampled row instead."
+                " from any other start. Read the sampled row instead; paired rows built from"
+                " such a line-up are marked too."
             )
         names: dict[str, set[str]] = {}
         for r in recs:
