@@ -58,7 +58,8 @@ def test_agent_names_come_from_the_registry():
     assert agents[0].config["rollout_steps"] == 10 and agents[0].config["type"] == "mcts"
     assert agents[1].config["weights"]["territory"] > 0
     # Table filters only parse names: no checkpoint is read.
-    assert S.names_of("dqn:/nonexistent/run,mcts-8-rm") == {"dqn:/nonexistent/run", "mcts-8-rm"}
+    nowhere = Path("/nonexistent/run").resolve()  # on Windows, on the working directory's drive
+    assert S.names_of("dqn:/nonexistent/run,mcts-8-rm") == {f"dqn:{nowhere}", "mcts-8-rm"}
     assert S.names_of(None) is None
     with pytest.raises(S.SpecError, match="has no effect"):
         S.parse_agents("mcts-64-gamma0.3")
