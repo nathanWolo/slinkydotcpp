@@ -321,6 +321,22 @@ def test_paired_differences(tmp_path, capsys):
     assert f"{p.mean:+.3f} +- {p.half:.3f}" in text and f"+- {p.unpaired_half:.3f}" in text
 
 
+def test_further_specialists_are_compared(tmp_path, capsys):
+    """A specialist of another seed or setting (S16) is compared with G and with S."""
+    out = tmp_path / "modes.jsonl"
+    agent_flags = [*CHEAP, "--agent", "S16=random", "--agent", "S_duel=random"]
+    for seats in ("G,S16", "S16,S", "G,R", "S16,R", "S,R", "S_duel,R"):
+        assert run(out, "--game-mode", "duel", "--seats", seats, *agent_flags, "--games", "8") == 0
+    capsys.readouterr()
+    assert M.main(["--table", "--out", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "G - S16, paired game by game" in text and "S16 - S, paired game by game" in text
+    assert "| G,S16 (within) | 8 |" in text and "| G,R vs S16,R | 8 |" in text
+    assert "| S16,S (within) | 8 |" in text and "| S16,R vs S,R | 8 |" in text
+    assert "| G,R vs S,R | 8 |" in text  # the G-versus-S table as before
+    assert "S_duel - S" not in text and "G - S_duel" not in text  # the matrix's symbols are not
+
+
 def test_pairing_needs_the_same_other_agents_and_the_same_games(tmp_path):
     out = tmp_path / "modes.jsonl"
     g, spec_s = ["--agent", "G=random_legal"], ["--agent", "S=random"]
