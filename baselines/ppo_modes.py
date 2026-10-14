@@ -107,7 +107,12 @@ agent registry uses; the policy computes its inputs with the training code
   ``num_minibatches=8``, ``update_epochs=4`` and the rest of the PPO and
   network settings: ``ppo.py``'s, whose duel run they produced (0.296 against
   the heuristic). Nothing was tuned for several modes; generalist and
-  specialists share them so the comparison is fair.
+  specialists share them so the comparison is fair. The exception is the
+  reported generalist (``baselines/checkpoints/ppo-modes-seed0``), trained with
+  ``--num-minibatches 16``. With 8, one step serves all four modes, and its
+  updates were too small in each (duel KL 0.47x the duel specialist's; see
+  ``baselines/README.md``). That gives it twice its specialists' gradient steps,
+  and specialists trained with 16 are the control.
 * ``reward=placement``, ``features=all``, ``value_norm=True``,
   ``hide_constrictor_food=True``: as argued above.
 * ``snapshot_at=1_310_720``: a quarter of the run, where the four-mode
@@ -129,7 +134,7 @@ agent registry uses; the policy computes its inputs with the training code
 
 Commands::
 
-    python baselines/ppo_modes.py                                   # the generalist
+    python baselines/ppo_modes.py --num-minibatches 16              # the generalist as reported
     python baselines/ppo_modes.py --game-modes duel                 # a specialist
     python baselines/ppo_modes.py --game-modes royale --run-dir runs/ppo-modes-royale-seed0
     # ppo.py, bit for bit (in the duel the placement reward is win/loss):

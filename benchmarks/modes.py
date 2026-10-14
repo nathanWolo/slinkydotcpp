@@ -1,4 +1,4 @@
-"""Mode benchmark: a generalist and its specialists at 4-player tables, per game mode.
+"""Mode benchmark: a generalist and its specialists at each game mode's own tables.
 
 Plays *cells* with :func:`slinky.evaluate.play_table` and appends one JSON line per
 finished cell to ``benchmarks/results/modes.jsonl``. A cell is one game mode
@@ -93,8 +93,9 @@ generalist, ``S`` the mode's specialist (cells with ``S`` are skipped without on
   networks sampling their moves (``ppo_modes-sample``). In constrictor read this one, not
   ``G,S,G,S``: food is inert there and hidden from ``ppo_modes`` networks, so two greedy
   networks play a game fixed by its start, and the standard map has 2 start layouts, so
-  ``G,S,G,S`` is 12 distinct games (6 seatings of G's two seats, 2 layouts), repeated, and
-  its interval is not a sampling interval. ``--table`` marks such rows *deterministic*.
+  ``G,S,G,S`` is 12 distinct games (6 seatings of G's two seats, 2 layouts), repeated: its
+  interval only covers which of those 12 came up, not play from any other start.
+  ``--table`` marks such rows *deterministic*.
   Every other cell is varied games: the heuristic breaks ties at random, ``random_legal``
   is random, ``P`` sees the randomly spawned food, and in the other modes food matters.
 * every mode: ``G@m,H,H,H`` (``G,H`` in a duel) for each other mode ``m`` (256 games each):
@@ -798,8 +799,8 @@ def table_main(path: Path, mode: str | None, seed: int | None) -> int:
                 "\nDeterministic: only greedy ppo_modes networks in constrictor, where food is"
                 " inert and hidden from them, so each game is fixed by its start; the standard"
                 " map has 2 start layouts, so there are at most 2 x the seatings distinct games"
-                " (12 in G,S,G,S) and the interval is not a sampling interval. Read the sampled"
-                " row instead."
+                " (12 in G,S,G,S), and the interval only covers which of them came up, not play"
+                " from any other start. Read the sampled row instead."
             )
         names: dict[str, set[str]] = {}
         for r in recs:

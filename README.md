@@ -180,7 +180,8 @@ own core, which is the fast path on a 4-core machine.
 
 Reference opponents for the 1v1 duel, roughly from weakest to strongest, then
 one policy for all four leaderboard modes. Full results and the MCTS sweep are
-in [`benchmarks/README.md`](benchmarks/README.md).
+in [`benchmarks/README.md`](benchmarks/README.md); the multi-mode tables are in
+[`baselines/README.md`](baselines/README.md#multi-mode-ppo-ppo_modespy).
 
 - **`random_legal`** (`slinky.evaluate`): uniformly random among the moves
   that don't certainly die next turn.
@@ -243,12 +244,14 @@ in [`benchmarks/README.md`](benchmarks/README.md).
   trained for 9.75 hours on 2 CPU cores, with each mode's share being one
   specialist's budget (5.24M env steps per mode).
   - It beats the specialist trained on each mode alone head to head: 0.81 in
-    standard, 0.62–0.71 in the duel (three specialist seeds) and 0.70 in
+    standard, 0.62–0.71 in the duel (three specialist seeds) and 0.71 in
     royale.
-  - In constrictor it is level (0.494 with sampled play).
+  - In constrictor it has no overall gain. It is level with sampled play
+    (0.494) and slightly behind with greedy or near-greedy play.
   - In the duel it scores 0.388 against the heuristic and 0.644 against PPO.
-  - Specialists retrained with its 16 minibatches are no stronger, so its lead
-    is not its extra gradient steps.
+  - Specialists retrained with its 16 minibatches (standard, duel, royale) are
+    no stronger head to head, so its lead there is not its extra gradient
+    steps.
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 
@@ -395,7 +398,8 @@ should scale much better with batch size.
 src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   engine_json, policies, evaluate (matches between policies),
                   heuristic (hand-written snake), mcts (simultaneous-move MCTS),
-                  agents (named-agent registry), replay (+ viewer.html)
+                  agents (named-agent registry), replay (+ viewer.html), modes (the
+                  four leaderboard modes and the multi-mode policy's side inputs)
 baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN, AlphaZero and multi-mode
                   PPO), their checkpoints and a live training dashboard (dashboard.py)
 tests/            unit, edge-case and engine-parity tests

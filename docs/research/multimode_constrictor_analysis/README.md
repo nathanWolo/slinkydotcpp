@@ -5,14 +5,23 @@ results of [`../multimode_constrictor.md`](../multimode_constrictor.md). They ar
 kept as a record, not as maintained code:
 
 - **Not linted or tested**, and excluded from ruff.
-- **Paths are the original session's.** `scratch/multimode/...` was a scratch
-  directory, and `runs/...` the training runs.
-- **Many need the training snapshots** (`runs/<run>/params-<steps>.npz`), which are
-  not committed. Only the final networks are, in `baselines/checkpoints/`.
+- **Paths.** Paths into the original scratch directory were rewritten to this
+  directory. Others are absolute (`/home/user/slinkydotcpp/...`) or relative
+  to the repository root, and `runs/...` are the training runs.
+- **Many cannot be re-run from the repository.** They read the training
+  snapshots (`runs/<run>/params-<steps>.npz`) or intermediate files (`.npz`,
+  `cells.jsonl`), which are not committed. Only the final networks are, in
+  `baselines/checkpoints/`.
 - **Large outputs were left out**: arrays (`.npz`, `.npy`), logs and any text
   file over 200 kB.
-- **The note is the reference.** Where a script's output and the note differ,
-  the note holds the checked number.
+- **Printed outputs.** Where a script printed its results, they are next to it
+  (`*.txt`, `*.json`; `*_out.txt` for the outputs re-run for this archive).
+- **`investigation_log.json`** is the raw output of the investigation: five
+  investigations, a synthesis, and two reviews that re-ran key scripts.
+  Several claims in the investigations and the synthesis were corrected or
+  weakened by the reviews and by a later fact-check.
+- **The note is the reference.** Where a script's output, the log and the note
+  differ, the note holds the checked number.
 
 | directory | what it measures |
 |---|---|
