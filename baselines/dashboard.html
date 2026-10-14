@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Training Runs</title>
+<title>Training Dashboard</title>
 <style>
 /* Served by baselines/dashboard.py. Colour roles follow the dataviz reference palette:
    chrome is neutral ink on a quiet surface; colour is reserved for runs (and, in the
@@ -57,6 +57,7 @@
   --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* over display rules such as the viewer iframe's */
 html, body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); }
 main { max-width: 1400px; margin: 0 auto; padding: 20px 16px 48px; }
 header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
@@ -133,24 +134,86 @@ th:first-child, td:first-child { text-align: left; }
 .tooltip .tt-row b { font-variant-numeric: tabular-nums; }
 .tooltip .tt-row span:last-child { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tooltip .key { width: 12px; }
+
+/* Tabs: Training (the charts) and Games (recorded games in the replay viewer). */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 0 0 16px; }
+.tab {
+  background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  padding: 6px 12px; cursor: pointer; color: var(--ink-2); font-weight: 500;
+}
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.tab:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; border-radius: 4px; }
+.bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 12px; }
+
+/* Games: the replay files, and the selected one in the viewer. */
+.games { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 900px) { .games { grid-template-columns: minmax(0, 1fr); } }
+.replays { display: grid; gap: 8px; max-height: calc(100vh - 150px); overflow: auto; padding: 2px; }
+@media (max-width: 900px) { .replays { max-height: 260px; } }
+.replay {
+  text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 10px; cursor: pointer; display: grid; gap: 3px; min-width: 0;
+}
+.replay:hover { background: color-mix(in srgb, var(--surface) 92%, var(--ink)); }
+.replay[aria-current="true"] { border-color: var(--ink-2); box-shadow: inset 3px 0 0 var(--ink); }
+.replay:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.replay-name { font-weight: 600; overflow-wrap: anywhere; }
+.replay-score { font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.replay-meta { font-size: 11px; color: var(--muted); }
+.viewer-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; min-width: 0; }
+.viewer-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.viewer-head h3 { font-size: 14px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.viewer-head a { color: var(--ink-2); font-size: 12px; }
+.viewer-box iframe { display: block; width: 100%; height: max(560px, calc(100vh - 190px)); border: 0; background: var(--page); }
+code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>Training runs</h1>
+    <h1>Training dashboard</h1>
+  </header>
+  <div class="tabs" role="tablist" aria-label="Views">
+    <button class="tab" role="tab" type="button" id="tab-training" aria-controls="panel-training" aria-selected="true">Training</button>
+    <button class="tab" role="tab" type="button" id="tab-games" aria-controls="panel-games" aria-selected="false" tabindex="-1">Games</button>
+  </div>
+  <div id="panel-training" role="tabpanel" aria-labelledby="tab-training">
+  <div class="bar">
     <span class="status" id="status" role="status" aria-live="polite">Loading…</span>
     <span class="spacer"></span>
     <button class="ghost" id="refresh" type="button" aria-pressed="true" title="Re-read the runs every 5 seconds">Auto-refresh on</button>
-  </header>
+  </div>
   <p class="error" id="error" hidden></p>
   <section class="runs" id="runs" aria-label="Runs (select to plot)"></section>
-  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence, AlphaZero policy cross-entropy plus value MSE; PPO's and AlphaZero's value loss and policy entropy have their own charts.</p>
+  <p class="hint">Click a run to add it to the charts or remove it (up to 8). Loss values are not comparable across algorithms: DQN logs a Huber TD loss, Rainbow a KL divergence, AlphaZero policy cross-entropy plus value MSE; PPO's, REINFORCE's and AlphaZero's value loss and policy entropy have their own charts.</p>
   <h2>Training curves</h2>
   <section class="charts" id="charts"></section>
   <h2>How snakes die in self-play</h2>
   <p class="sub" style="margin-top:-6px">Share of eliminations by cause in each logged chunk, per selected run.</p>
   <section class="charts" id="deaths"></section>
+  </div>
+  <div id="panel-games" role="tabpanel" aria-labelledby="tab-games" hidden>
+    <div class="bar">
+      <span class="status" id="games-status" role="status" aria-live="polite"></span>
+      <span class="spacer"></span>
+      <button class="ghost" id="games-reload" type="button" title="Look for new or changed replay files">Reload list</button>
+    </div>
+    <p class="error" id="games-error" hidden></p>
+    <div class="games">
+      <nav class="replays" id="replays" aria-label="Replay files"></nav>
+      <section class="viewer-box" aria-labelledby="viewer-title">
+        <div class="viewer-head">
+          <h3 id="viewer-title">No replay selected</h3>
+          <span class="spacer"></span>
+          <a id="viewer-open" target="_blank" rel="noopener" hidden>Open in a new tab</a>
+        </div>
+        <iframe id="viewer" title="Replay viewer" hidden></iframe>
+        <p class="empty" id="viewer-empty">Pick a replay file on the left.</p>
+      </section>
+    </div>
+    <p class="hint">Replays are the <code>slinky-replay/1</code> JSON files under <code>replays/</code> (or the <code>--replays</code> directories). Record more with <code>python -m slinky.replay --a rainbow --b ppo --games 8 --max-turns 1000 --out replays/rainbow/rainbow-vs-ppo.json</code>, then reload the list.</p>
+  </div>
 </main>
 <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
 <div class="sr-only" id="live" aria-live="polite"></div>
@@ -204,7 +267,7 @@ th:first-child, td:first-child { text-align: left; }
   // Evals are plotted by opponent, for the main agent only: the greedy policy, or for
   // AlphaZero the network with search (mode "search"; it also logs the raw network, mode
   // "raw"). DQN and Rainbow evaluate only against random_legal and log no opponent or mode;
-  // PPO also plays the heuristic and the DQN, greedy and sampled.
+  // PPO and REINFORCE also play the heuristic and the DQN, greedy and sampled.
   //
   // ppo_modes runs (algorithm "ppo_modes") play every game mode and tag their evals with
   // game_mode; their score is the share of the win (1 for a sole survivor, 1/k when k snakes
@@ -214,6 +277,7 @@ th:first-child, td:first-child { text-align: left; }
   // duel charts as a reference; the charts themselves are shown only if a selected run logs
   // game_mode.
   const isPPO = (d) => String(d.algorithm).startsWith("ppo");  // ppo and ppo_modes
+  const isPG = (d) => isPPO(d) || d.algorithm === "reinforce";  // policy gradient: no "loss"
   const isAZ = (d) => d.algorithm === "az";
   const MAIN_MODES = ["greedy", "search"];
   const GAME_MODES = ["standard", "duel", "royale", "constrictor"];  // slinky.modes.MODE_NAMES
@@ -249,20 +313,20 @@ th:first-child, td:first-child { text-align: left; }
   };
   const CHARTS = [
     evalChart("random_legal", "Greedy policy (AlphaZero: with search); duel games: win = 1, draw = ½. Band: 95% confidence interval."),
-    evalChart("heuristic", "PPO and AlphaZero runs; greedy policy or search. Band: 95% confidence interval."),
-    evalChart("dqn", "PPO and AlphaZero runs, against the committed DQN; greedy policy or search. Band: 95% confidence interval."),
+    evalChart("heuristic", "PPO, REINFORCE and AlphaZero runs; greedy policy or search. Band: 95% confidence interval."),
+    evalChart("dqn", "PPO, REINFORCE and AlphaZero runs, against the committed DQN; greedy policy or search. Band: 95% confidence interval."),
     evalChart("rainbow", "AlphaZero runs, against the committed Rainbow; with search. Band: 95% confidence interval."),
     evalChart("ppo", "AlphaZero runs, against the committed PPO; with search. Band: 95% confidence interval."),
     evalChart("mcts-64", "AlphaZero runs, against 64-iteration MCTS; with search. Band: 95% confidence interval."),
     ...GAME_MODES.flatMap((m) => MODE_OPPONENTS.map((o) => modeEvalChart(m, o))),
     { id: "loss", title: "Training loss", sub: "DQN, Rainbow and AlphaZero: mean over the updates in each chunk (log scale).",
-      source: "train", y: (r) => r.loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => !isPPO(d) },
-    { id: "vloss", title: "Value loss", sub: "PPO and AlphaZero runs: the value head's squared error, mean over each chunk (log scale).",
-      source: "train", y: (r) => r.v_loss ?? r.value_loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => isPPO(d) || isAZ(d) },
-    { id: "q", title: "Value estimate", sub: "Mean Q of the moves taken (DQN, Rainbow) or mean value-head output (PPO, AlphaZero; ppo_modes: the first game mode's). An unbiased value in this symmetric zero-sum game is near 0.",
+      source: "train", y: (r) => r.loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => !isPG(d) },
+    { id: "vloss", title: "Value loss", sub: "PPO, REINFORCE and AlphaZero runs: the value head's squared error, mean over each chunk (log scale).",
+      source: "train", y: (r) => r.v_loss ?? r.value_loss, log: true, fmt: (v) => v.toPrecision(3), applies: (d) => isPG(d) || isAZ(d) },
+    { id: "q", title: "Value estimate", sub: "Mean Q of the moves taken (DQN, Rainbow) or mean value-head output (PPO, REINFORCE, AlphaZero; ppo_modes: the first game mode's). An unbiased value in this symmetric zero-sum game is near 0.",
       source: "train", y: (r) => r.mean_q ?? r.value_mean, fmt: (v) => (v >= 0 ? "+" : "") + v.toFixed(3), zero: true },
-    { id: "entropy", title: "Policy entropy", sub: "PPO and AlphaZero runs: mean entropy of the network's move distribution, in nats (ln 4 ≈ 1.386 is uniform).",
-      source: "train", y: (r) => r.entropy ?? r.net_entropy, fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => isPPO(d) || isAZ(d) },
+    { id: "entropy", title: "Policy entropy", sub: "PPO, REINFORCE and AlphaZero runs: mean entropy of the network's move distribution, in nats (ln 4 ≈ 1.386 is uniform).",
+      source: "train", y: (r) => r.entropy ?? r.net_entropy, fmt: (v) => v.toFixed(3), zeroBase: true, applies: (d) => isPG(d) || isAZ(d) },
     { id: "len", title: "Self-play game length", sub: "Mean turns of the games that finished in each chunk (ppo_modes: the first game mode's).",
       source: "train", y: (r) => r.mean_game_len, fmt: (v) => v.toFixed(0), zeroBase: true },
     { id: "draws", title: "Self-play draw rate", sub: "Share of finished games that were draws (all snakes out on the same turn; ppo_modes: the first game mode's).",
@@ -838,6 +902,7 @@ th:first-child, td:first-child { text-align: left; }
 
   function render() {
     renderRuns();
+    if ($("panel-training").hidden) { drawn = ""; return; }  // drawn when the tab is shown
     const version = JSON.stringify(state.runs.filter((r) => state.colors.has(r.id))
       .map((r) => [r.id, state.colors.get(r.id), (state.data.get(r.id) || {}).version]));
     // Redraw only when something changed, so an open tooltip isn't reset by every poll,
@@ -871,7 +936,9 @@ th:first-child, td:first-child { text-align: left; }
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => document.querySelectorAll(".card").forEach((c) => c._redraw && c._redraw()), 150);
+    resizeTimer = setTimeout(() => {
+      if (!$("panel-training").hidden) document.querySelectorAll(".card").forEach((c) => c._redraw && c._redraw());
+    }, 150);
   });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawn = ""; render(); });
 
@@ -884,6 +951,159 @@ th:first-child, td:first-child { text-align: left; }
     schedule();
   });
 
+  // --- Tabs and the Games view ------------------------------------------------------------
+  // The URL hash keeps the view: #games, or #games=<replay id> for one replay file.
+  const games = { list: null, current: null, loading: null };
+  const TABS = ["training", "games"];
+
+  function showTab(name, focus) {
+    for (const t of TABS) {
+      const on = t === name;
+      const tab = $(`tab-${t}`);
+      tab.setAttribute("aria-selected", String(on));
+      tab.tabIndex = on ? 0 : -1;
+      $(`panel-${t}`).hidden = !on;
+    }
+    if (focus) $(`tab-${name}`).focus();
+    if (name === "training") { drawn = ""; render(); }
+    else loadReplays(false).then(() => {
+      if (!games.current && games.list && games.list.length) openReplay(games.list[0].id, false);
+    });
+    writeHash();
+  }
+
+  function writeHash() {
+    const hash = !$("panel-games").hidden
+      ? (games.current ? `#games=${encodeURIComponent(games.current)}` : "#games")
+      : "";
+    if (location.hash !== hash) history.replaceState(null, "", hash || location.pathname + location.search);
+  }
+
+  function readHash() {
+    const m = /^#games(?:=(.*))?$/.exec(location.hash);
+    if (!m) return null;
+    try { return { replay: m[1] ? decodeURIComponent(m[1]) : null }; } catch (e) { return { replay: null }; }
+  }
+
+  for (const t of TABS) {
+    $(`tab-${t}`).addEventListener("click", () => showTab(t));
+    $(`tab-${t}`).addEventListener("keydown", (e) => {
+      const i = TABS.indexOf(t);
+      const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: TABS.length - 1 }[e.key];
+      if (next == null) return;
+      e.preventDefault();
+      showTab(TABS[(next + TABS.length) % TABS.length], true);
+    });
+  }
+
+  function loadReplays(force) {
+    if (games.list && !force) return Promise.resolve();
+    if (games.loading) return games.loading;
+    $("games-status").textContent = "Looking for replays…";
+    games.loading = getJSON("/api/replays").then((list) => {
+      games.list = list;
+      $("games-error").hidden = true;
+      renderReplays();
+    }).catch((e) => {
+      $("games-error").textContent = `Couldn't list the replays (${e.message}). Is baselines/dashboard.py still running?`;
+      $("games-error").hidden = false;
+    }).finally(() => { games.loading = null; updateGamesStatus(); });
+    return games.loading;
+  }
+
+  function updateGamesStatus() {
+    const n = games.list ? games.list.length : 0;
+    const total = games.list ? games.list.reduce((a, r) => a + r.games, 0) : 0;
+    $("games-status").textContent = !games.list ? ""
+      : n ? `${n} replay file${n === 1 ? "" : "s"} · ${total} game${total === 1 ? "" : "s"}`
+        : "No replays found (looking for slinky-replay JSON under replays/)";
+  }
+
+  // "rainbow 2 – 6 ppo · 0 draws" for two agents, else every agent's wins.
+  function scoreLine(r) {
+    const entries = Object.entries(r.wins);
+    const extra = [`${r.draws} draw${r.draws === 1 ? "" : "s"}`];
+    if (r.truncated) extra.push(`${r.truncated} cut off`);
+    const head = entries.length === 2
+      ? `${entries[0][0]} ${entries[0][1]} – ${entries[1][1]} ${entries[1][0]}`
+      : entries.map(([a, w]) => `${a} ${w}`).join(", ");
+    return `${head} · ${extra.join(", ")}`;
+  }
+
+  function renderReplays() {
+    const box = $("replays");
+    box.replaceChildren();
+    if (!games.list.length) {
+      box.append(el("p", "hint", "No replay files yet."));
+      return;
+    }
+    for (const r of games.list) {
+      const b = el("button", "replay");
+      b.type = "button";
+      b.dataset.id = r.id;
+      if (r.id === games.current) b.setAttribute("aria-current", "true");
+      b.append(el("span", "replay-name", r.name));
+      b.append(el("span", "replay-score", scoreLine(r)));
+      const turns = r.mean_turns != null ? ` · mean ${Math.round(r.mean_turns)} turns` : "";
+      b.append(el("span", "replay-meta", `${r.games} game${r.games === 1 ? "" : "s"}${turns} · ${r.board} ${r.ruleset || ""} · ${r.id}`));
+      b.addEventListener("click", () => openReplay(r.id, true));
+      box.append(b);
+    }
+  }
+
+  function openReplay(id, announceIt) {
+    const r = (games.list || []).find((x) => x.id === id);
+    if (!r) return;
+    games.current = id;
+    for (const b of $("replays").querySelectorAll(".replay")) {
+      if (b.dataset.id === id) b.setAttribute("aria-current", "true");
+      else b.removeAttribute("aria-current");
+    }
+    // The file's mtime in the URL: a re-recorded replay reloads the viewer.
+    const src = `/viewer?replay=${encodeURIComponent(id)}&v=${r.updated}`;
+    const frame = $("viewer");
+    if (frame.getAttribute("src") !== src) frame.setAttribute("src", src);
+    frame.hidden = false;
+    frame.title = `Replay viewer: ${r.name}`;
+    $("viewer-empty").hidden = true;
+    $("viewer-title").textContent = `${r.name} — ${scoreLine(r)}`;
+    $("viewer-open").href = src;
+    $("viewer-open").hidden = false;
+    if (announceIt) $("live").textContent = `Showing ${r.name}`;
+    writeHash();
+  }
+
+  $("games-reload").addEventListener("click", () => loadReplays(true).then(() => {
+    if (games.current && (games.list || []).some((r) => r.id === games.current)) {
+      openReplay(games.current, false);  // new score in the header; reloads if the file changed
+    } else if (games.current) {
+      games.current = null;
+      $("viewer").hidden = true;
+      $("viewer").removeAttribute("src");
+      $("viewer-open").hidden = true;
+      $("viewer-empty").hidden = false;
+      $("viewer-title").textContent = "No replay selected";
+      writeHash();
+    }
+  }));
+
+  // Follow the hash: at load, and when it changes (a link, an edit, back/forward).
+  // writeHash uses replaceState, which fires no hashchange.
+  function route() {
+    const h = readHash();
+    if (!h) {
+      if ($("panel-training").hidden) showTab("training");
+      return;
+    }
+    if (h.replay && h.replay !== games.current) {
+      loadReplays(false).then(() => {
+        if ((games.list || []).some((r) => r.id === h.replay)) openReplay(h.replay, false);
+      });
+    }
+    if ($("panel-games").hidden) showTab("games");
+  }
+  window.addEventListener("hashchange", route);
+  route();
   refresh().then(schedule);
 })();
 </script>

@@ -125,6 +125,7 @@ class RainbowConfig:
     per_alpha: float = 0.5  # priority exponent; 0 is uniform replay
     per_beta_start: float = 0.4  # importance-sampling exponent, annealed linearly
     per_beta_end: float = 1.0  # ... reached at the end of training
+    per_beta_steps: int = 0  # env steps to reach per_beta_end; 0: total_env_steps
     per_eps: float = 1e-6  # added to every priority, so every transition can be replayed
     # Epsilon-greedy, used only with --noisy false: linear decay over the first
     # eps_decay_fraction of training.
@@ -174,6 +175,8 @@ class RainbowConfig:
             raise ValueError("per_beta_start and per_beta_end must be in [0, 1]")
         if self.per_eps <= 0.0:
             raise ValueError("per_eps must be > 0")
+        if self.per_beta_steps < 0:
+            raise ValueError("per_beta_steps must be >= 0")
 
     @property
     def game(self) -> GameConfig:
@@ -367,7 +370,8 @@ def epsilon(cfg: RainbowConfig, env_steps: jax.Array) -> jax.Array:
 
 def per_beta(cfg: RainbowConfig, env_steps: jax.Array) -> jax.Array:
     """Importance-sampling exponent, linear from ``per_beta_start`` to ``per_beta_end``."""
-    return _linear_schedule(cfg.per_beta_start, cfg.per_beta_end, cfg.total_env_steps, env_steps)
+    steps = cfg.per_beta_steps or cfg.total_env_steps
+    return _linear_schedule(cfg.per_beta_start, cfg.per_beta_end, steps, env_steps)
 
 
 # --- Multi-step transitions ----------------------------------------------------------
@@ -1080,6 +1084,20 @@ def train(cfg: RainbowConfig, resume: bool = False) -> tuple[str, Params]:
     return run_dir, runner.params
 
 
+def extend(cfg: RainbowConfig, total_env_steps: int) -> RainbowConfig:
+    """``cfg`` trained on to ``total_env_steps``, its PER beta schedule unchanged.
+
+    Every other schedule is constant (Adam's learning rate) or off (epsilon with
+    noisy nets). With epsilon-greedy, the decay is stretched, as for any longer run.
+    """
+    if total_env_steps < cfg.total_env_steps:
+        raise ValueError(
+            f"--extend-to {total_env_steps:,} is below the run's {cfg.total_env_steps:,} env steps"
+        )
+    beta_steps = cfg.per_beta_steps or cfg.total_env_steps
+    return dataclasses.replace(cfg, total_env_steps=total_env_steps, per_beta_steps=beta_steps)
+
+
 def _parse_bool(text: str) -> bool:
     if text.lower() in ("1", "true", "yes", "on"):
         return True
@@ -1105,6 +1123,14 @@ def parse_args(argv: list[str] | None = None) -> tuple[RainbowConfig, argparse.N
         metavar="RUN_DIR",
         help="continue an interrupted run from its last full checkpoint, with its saved "
         "config (other flags are ignored)",
+    )
+    p.add_argument(
+        "--extend-to",
+        metavar="ENV_STEPS",
+        type=int,
+        help="with --resume: train a finished (or unfinished) run on to this many env steps; "
+        "the PER beta schedule keeps its original length (an epsilon-greedy run's decay is "
+        "stretched, as for any longer run)",
     )
     for f in dataclasses.fields(RainbowConfig):
         default = f.default
@@ -1136,8 +1162,13 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{args.eval_only} vs random_legal: {format_eval(r)} ({seconds:.0f}s)")
         print(json.dumps(r._asdict()))
         return
+    if args.extend_to is not None and not args.resume:
+        raise SystemExit("--extend-to needs --resume RUN_DIR")
     if args.resume:
-        train(dataclasses.replace(load_config(args.resume), run_dir=args.resume), resume=True)
+        cfg = dataclasses.replace(load_config(args.resume), run_dir=args.resume)
+        if args.extend_to is not None:
+            cfg = extend(cfg, args.extend_to)
+        train(cfg, resume=True)
         return
     train(cfg)
 

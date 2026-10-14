@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "jax>=0.4.30",
+    # jaxlib 0.11 on Windows crashes the process (fatal exception 0x80000001) in the
+    # networks' convolutions after a few calls; 0.10.2 is stable.
+    "jaxlib<0.11; sys_platform == 'win32'",
     "numpy>=1.26",
 ]
 

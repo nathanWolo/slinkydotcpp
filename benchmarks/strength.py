@@ -13,14 +13,16 @@ Agents (``--a`` and ``--b`` take comma-separated lists) are names from the regis
 :mod:`slinky.agents`: ``random_legal``, ``random``, ``heuristic``, ``dqn`` (the checkpoint
 in ``baselines/checkpoints/dqn-duel-seed0``) or ``dqn:<run dir>``, ``ppo`` (greedy; the
 checkpoint in ``baselines/checkpoints/ppo-duel-seed0``), ``ppo-sample`` or ``ppo:<run dir>``,
-``az-<sims>`` or ``az-<sims>:<run dir>`` (the AlphaZero network with that many simulations
-of network-guided search; ``az-0`` is the raw network; default checkpoint
-``baselines/checkpoints/az-duel-seed0``), and ``mcts-<sims>[-shorthand...][:field=value...]``,
-e.g. ``mcts-64-rollout``, ``mcts-256-rm-c0.5`` or ``mcts-128:exploration=0.5`` (the
-shorthands are listed by ``--help``). Names are printed and stored in their canonical form,
-which lists only the non-default settings (``mcts-64-rollout`` becomes
-``mcts-64-rollout10``). The default MCTS values a draw at -0.5 *inside the search*
-(``contempt``); the benchmark score still counts a draw as 1/2.
+``rainbow`` or ``rainbow:<run dir>``, ``reinforce`` (greedy), ``reinforce-sample`` or
+``reinforce:<run dir>``, ``az-<sims>`` or ``az-<sims>:<run dir>`` (the AlphaZero network
+with that many simulations of network-guided search; ``az-0`` is the raw network; default
+checkpoint ``baselines/checkpoints/az-duel-seed0``), and
+``mcts-<sims>[-shorthand...][:field=value...]``, e.g. ``mcts-64-rollout``,
+``mcts-256-rm-c0.5`` or ``mcts-128:exploration=0.5`` (the shorthands are listed by
+``--help``). Names are printed and stored in their canonical form, which lists only the
+non-default settings (``mcts-64-rollout`` becomes ``mcts-64-rollout10``). The default MCTS
+values a draw at -0.5 *inside the search* (``contempt``); the benchmark score still counts a
+draw as 1/2.
 
 Usage::
 
@@ -42,7 +44,7 @@ crashed sweep resumes by running the same command. The identity covers *configs*
 search, the heuristic or the rules does not. Each line records the code that produced
 it (``git_commit``, ``git_dirty`` and ``code_fingerprint``, a hash of the ``slinky``
 modules the process loaded, the baseline scripts (``baselines/dqn.py``, ``ppo.py``,
-``rainbow.py``, ``az.py``) and this script, all captured when the
+``rainbow.py``, ``reinforce.py``, ``az.py``) and this script, all captured when the
 process started); the sweep warns when it skips lines made by other code, and
 ``--rerun`` plays the selected matchups again (the new line is preferred by ``--table``;
 the old one stays in the file). A line is
@@ -315,7 +317,7 @@ def code_fingerprint() -> tuple[str, int]:
     name, so checkouts in different directories with the same code agree.
     """
     files = {"benchmarks/strength.py": Path(__file__)}
-    for script, name, _ in registry.BASELINES.values():  # dqn.py, ppo.py, rainbow.py, az.py
+    for script, name, _ in registry.BASELINES.values():  # dqn.py, ppo.py, rainbow.py, ...
         if script.is_file():
             files[name] = script
     for name, module in list(sys.modules.items()):
@@ -369,8 +371,9 @@ class Matchup:
         ms = ROUGH_MS["fixed"] + ROUGH_MS["per_sim"] * sims * (1 + sims / ROUGH_MS["sim_scale"])
         # Rainbow's network is the DQN's with a wider head: about the same cost per move.
         ms += ROUGH_MS["dqn"] * (kinds.count("dqn") + kinds.count("rainbow"))
-        # The multi-mode network is PPO's with a small extra input: the same cost per move.
-        ms += ROUGH_MS["ppo"] * (kinds.count("ppo") + kinds.count("ppo_modes"))
+        # The multi-mode network is PPO's with a small extra input, and REINFORCE plays with
+        # PPO's network: the same cost per move.
+        ms += ROUGH_MS["ppo"] * sum(kinds.count(k) for k in ("ppo", "ppo_modes", "reinforce"))
         ms += ROUGH_MS["az"] * kinds.count("az")
         ms += ROUGH_MS["az_per_sim"] * sum(x.sims for x in (self.a, self.b) if x.spec.kind == "az")
         random = {"random", "random_legal"} & set(kinds)
@@ -1081,7 +1084,7 @@ def agent_sort_key(name: str) -> tuple[int, int, str]:
         return registry.SIMPLE_AGENTS.index(name), 0, name
     if match := re.match(r"az-(\d+)", name):  # the trained baselines, AlphaZero by simulations
         return 3, int(match[1]), name
-    if name.startswith(("dqn", "ppo", "rainbow")):
+    if name.startswith(("dqn", "ppo", "rainbow", "reinforce")):
         return 3, 0, name
     if match := re.match(r"mcts-(\d+)(.*)", name):
         return 4, int(match[1]), match[2]
