@@ -25,6 +25,9 @@ from slinky.replay import record_games
 from slinky.types import GameConfig
 
 CONFIG = GameConfig()
+# A run dir that does not exist, as canonical names spell it: /nonexistent/run on POSIX,
+# with the working directory's drive on Windows.
+NOWHERE = str(Path("/nonexistent/run").resolve())
 
 # Spellings and their canonical names.
 CANONICAL = {
@@ -55,19 +58,19 @@ CANONICAL = {
     "mcts-128:spawn_food=yes:final=sample": "mcts-128-spawn-sample",
     "dqn": "dqn",
     "dqn:baselines/checkpoints/dqn-duel-seed0": "dqn",
-    "dqn:/nonexistent/run": "dqn:/nonexistent/run",
+    "dqn:/nonexistent/run": f"dqn:{NOWHERE}",
     "rainbow": "rainbow",
     # Absolute: a relative path is looked up in the repository only if it exists.
     f"rainbow:{agents_mod.DEFAULT_RAINBOW_CHECKPOINT}": "rainbow",
-    "rainbow:/nonexistent/run": "rainbow:/nonexistent/run",
+    "rainbow:/nonexistent/run": f"rainbow:{NOWHERE}",
     "az-64": "az-64",
     "az-0": "az-0",
     f"az-64:{agents_mod.DEFAULT_AZ_CHECKPOINT}": "az-64",
-    "az-0:/nonexistent/run": "az-0:/nonexistent/run",
+    "az-0:/nonexistent/run": f"az-0:{NOWHERE}",
     # Settings after the run dir, in MCTSConfig field order, numbers in their shortest form.
-    "az-64:c_puct=1.0:/nonexistent/run": "az-64:/nonexistent/run:c_puct=1",
+    "az-64:c_puct=1.0:/nonexistent/run": f"az-64:{NOWHERE}:c_puct=1",
     "az-8:final=sample:/nonexistent/run:leaf=heuristic:c_puct=0.25": (
-        "az-8:/nonexistent/run:c_puct=0.25:leaf=heuristic:final=sample"
+        f"az-8:{NOWHERE}:c_puct=0.25:leaf=heuristic:final=sample"
     ),
     "az-16:spawn_food=yes:max_depth=16": "az-16:max_depth=16:spawn_food=true",
     "random_legal": "random_legal",
@@ -169,6 +172,7 @@ def test_format_number():
         ("az-64:", "empty item"),
         ("az-64::c_puct=1", "empty item"),
         ("az-64:/a:/b", "two run dirs"),
+        (r"az-64:C:\a:d:/b", "two run dirs"),  # Windows drives
         ("az-0:c_puct=1", "az-0 plays the raw network"),
         ("az-64:bogus=1", "unknown az option 'bogus'"),
         ("az-64:selection=duct", "az option 'selection' in 'az-64:selection=duct' can't be set"),
@@ -258,9 +262,9 @@ def test_ppo_names():
     assert explicit.name == f"ppo-{other}" and explicit.greedy == (other == "greedy")
     assert parse_agent(f"ppo-{other}:{checkpoint}") == explicit
     run = parse_agent(f"ppo-{other}:/nonexistent/run")
-    assert run.name == f"ppo-{other}:/nonexistent/run"
-    assert run.checkpoint == Path("/nonexistent/run")
-    assert parse_agent("ppo:/nonexistent/run").name == "ppo:/nonexistent/run"
+    assert run.name == f"ppo-{other}:{NOWHERE}"
+    assert run.checkpoint == Path(NOWHERE)
+    assert parse_agent("ppo:/nonexistent/run").name == f"ppo:{NOWHERE}"
     for s in (spec, explicit, run):
         assert parse_agent(s.name) == s  # canonical names read back as the same agent
 
@@ -403,6 +407,15 @@ def test_az_without_its_default_checkpoint(tmp_path, monkeypatch):
     assert spec.name == "az-8" and spec.checkpoint == (tmp_path / "missing").resolve()
     with pytest.raises(FileNotFoundError, match="no AlphaZero checkpoint in .*missing"):
         make_agent("az-8", GameConfig(max_turns=7))
+
+
+def test_az_run_dirs_with_a_windows_drive():
+    # A drive's colon (C:\ or C:/) is part of the run dir, not a separator, on every OS.
+    for run in (r"C:\runs\az", "d:/runs/az"):
+        for name in (f"az-8:{run}:c_puct=0.5", f"az-8:c_puct=0.5:{run}"):
+            spec = parse_agent(name)
+            assert spec.checkpoint == Path(run).resolve(), name
+            assert spec.overrides == (("c_puct", 0.5),), name
 
 
 def test_mcts_agents():

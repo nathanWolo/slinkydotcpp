@@ -39,10 +39,11 @@ Names:
   ``config.json``; ``:field=value`` items set any of
   ``baselines/az.py``'s ``AGENT_SEARCH_FIELDS`` instead (``az-64:c_puct=1:leaf=heuristic``).
   An item with ``=`` is a setting, any other item the run dir (so a run dir can contain
-  neither ``:`` nor ``=``). The agent builds both snakes' observations from the state
-  itself, so it does not need ``needs_obs``, but like ``dqn`` it only plays the board
-  size it was trained on and needs a checkout of the repository. Parsing reads no
-  files, so a setting equal to the run's own value still shows in the name.
+  neither ``=`` nor ``:``, except in a Windows drive such as ``C:``). The agent builds
+  both snakes' observations from the state itself, so it does not need ``needs_obs``,
+  but like ``dqn`` it only plays the board size it was trained on and needs a checkout
+  of the repository. Parsing reads no files, so a setting equal to the run's own value
+  still shows in the name.
 * ``mcts-<n>``: simultaneous-move MCTS (:func:`slinky.mcts.mcts`) with ``n``
   simulations per move and the default :class:`slinky.mcts.MCTSConfig`. Other
   fields are set with dash-separated shorthands (``mcts-256-rm-c0.5``; the list
@@ -504,8 +505,19 @@ def _ppo_agent(spec: AgentSpec) -> Agent:
     return Agent(spec.name, ppo.make_policy(params, cfg, bool(spec.greedy)), True, desc)
 
 
+def _split_items(name: str) -> list[str]:
+    """``name`` split at each ``:`` but a Windows drive's (``C:`` before ``\\`` or ``/``)."""
+    items: list[str] = []
+    for part in name.split(":"):
+        if items and re.fullmatch(r"\s*[A-Za-z]", items[-1]) and part.startswith(("\\", "/")):
+            items[-1] += f":{part}"
+        else:
+            items.append(part)
+    return items
+
+
 def _parse_az(name: str) -> AgentSpec:
-    head, *items = name.split(":")
+    head, *items = _split_items(name)
     syntax = "write az-<n>[:<run dir>][:field=value...], with n >= 0"
     match = re.fullmatch(r"az-(\d+)", head)
     if match is None:

@@ -160,7 +160,6 @@ import multiprocessing.connection
 import os
 import platform
 import re
-import resource
 import signal
 import subprocess
 import sys
@@ -182,6 +181,10 @@ try:
     import fcntl
 except ImportError:  # not on POSIX: no file locking
     fcntl = None
+try:
+    import resource
+except ImportError:  # not on POSIX: no peak RSS
+    resource = None
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / "benchmarks" / "results" / "strength.jsonl"
@@ -503,7 +506,9 @@ def interval_text(wins: int, draws: int, losses: int) -> str:
     return f"{score:.3f} [{low:.3f}, {high:.3f}]"
 
 
-def peak_rss_mb() -> float:
+def peak_rss_mb() -> float | None:
+    if resource is None:
+        return None
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak / (2**20 if sys.platform == "darwin" else 2**10)
 
@@ -748,12 +753,13 @@ def run_matchup(m: Matchup, s: Settings, plan: Plan, tag: str) -> dict[str, Any]
 
 
 def describe_record(r: dict[str, Any]) -> str:
+    rss = "unknown" if r["peak_rss_mb"] is None else f"{r['peak_rss_mb']:.0f} MB"
     return (
         f"score {interval_text(r['wins'], r['draws'], r['losses'])} over {r['games']} games "
         f"(W/D/L {r['wins']}/{r['draws']}/{r['losses']}) in {fmt_duration(r['wall_seconds'])} "
         f"(compile {fmt_duration(r['compile_seconds'])}), "
         f"{1e3 * r['seconds_per_game_turn']:.3f} ms per game-turn, slots "
-        f"{100 * r['slot_utilization']:.0f}% busy, peak RSS {r['peak_rss_mb']:.0f} MB"
+        f"{100 * r['slot_utilization']:.0f}% busy, peak RSS {rss}"
     )
 
 
