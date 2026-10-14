@@ -235,7 +235,9 @@ def test_bad_names(name, message):
 
 def test_agent_configs_are_complete_json():
     cfg = agent_config(parse_agent("mcts-64-rm"))
+    # Fields added later are left out at their old defaults (value="win_loss").
     fields = {f.name for f in dataclasses.fields(mcts.MCTSConfig)}
+    fields -= set(agents_mod._LATER_MCTS_FIELDS)
     puct_only = set(agents_mod._PUCT_ONLY_FIELDS)
     assert set(cfg) == fields - puct_only | {"type"} and cfg["selection"] == "rm"
     assert isinstance(cfg["weights"], dict) and json.loads(json.dumps(cfg)) == cfg
