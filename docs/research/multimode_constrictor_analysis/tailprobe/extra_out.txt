@@ -1,4 +1,4 @@
-# /home/user/slinkydotcpp/.venv/bin/python extra.py
+# cd scratch/multimode/analysis/tailprobe && /home/user/slinkydotcpp/.venv/bin/python extra.py
 pooled sampled constrictor: 158897 decisions 2048 games
  k= 1 n= 861 G picks std-best 0.237 [0.209,0.266]  S 0.174 [0.150,0.199]  G-S +0.063 [+0.035,+0.093]
  k= 3 n= 595 G picks std-best 0.145 [0.116,0.175]  S 0.108 [0.082,0.134]  G-S +0.037 [+0.008,+0.066]

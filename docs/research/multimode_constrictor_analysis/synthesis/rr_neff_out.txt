@@ -1,0 +1,6 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/synthesis/rr_neff.py
+observed residual SS 1.6509
+n_eff= 512: transitive-null residual mean 0.029, 95% range [0.017, 0.044], P(null >= observed) = 0.000
+n_eff=  96: transitive-null residual mean 0.152, 95% range [0.088, 0.234], P(null >= observed) = 0.000
+n_eff=  24: transitive-null residual mean 0.606, 95% range [0.361, 0.926], P(null >= observed) = 0.000
+n_eff=  12: transitive-null residual mean 1.214, 95% range [0.715, 1.839], P(null >= observed) = 0.075

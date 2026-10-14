@@ -1,4 +1,4 @@
-# /home/user/slinkydotcpp/.venv/bin/python cf_analyze.py con_gsgs_s_dec.npz con_gsgs_s_cf.npz
+# cd scratch/multimode/analysis/tailprobe && /home/user/slinkydotcpp/.venv/bin/python cf_analyze.py con_gsgs_s_dec.npz con_gsgs_s_cf.npz
 con_gsgs_s_dec.npz: 79019 decisions, 1024 games
 G flip             n= 79019 far=0.101 [0.098,0.103] near=0.111 [0.108,0.114] shift10=0.132 [0.129,0.134] shift30=0.268 [0.266,0.272] shift5=0.071 [0.069,0.073]
 G trapT8           n=  4928 real=0.065 [0.059,0.072] far:+0.001 [-0.005,+0.007] near:+0.042 [+0.035,+0.050] shift10:-0.005 [-0.011,+0.001] shift30:+0.029 [+0.020,+0.037] shift5:-0.009 [-0.014,-0.005]

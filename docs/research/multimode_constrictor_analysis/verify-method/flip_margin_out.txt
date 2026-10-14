@@ -1,4 +1,4 @@
-# /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/verify-method/flip_margin.py
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/verify-method/flip_margin.py
 decisions with >=2 legal moves: 81240
 overall flip far G 0.110 S 0.022 | near G 0.120 S 0.023
 median margin (logit units) G 4.10 S 4.58

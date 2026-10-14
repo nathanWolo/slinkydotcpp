@@ -121,7 +121,7 @@ policy).**
   - At 5.24M it points against standard's (−0.83 [−2.03, −0.46]). Its mean
     against the three food modes there is −0.33 [−1.10, 0.06]. [side analysis]
 - **Caveat on the gradients.** 83–99% of the value gradient's squared norm
-  sits in the 257-parameter value head. On the shared convolutional and dense layers,
+  sits in the 257-parameter value head (at the generalist's snapshots). On the shared convolutional and dense layers,
   constrictor's value gradient lines up with the food modes' (0.69 at 2M,
   0.63 at 3M). The policy-gradient term, which dominates those layers' gradient,
   was pure noise at the sample sizes used. So there is no direct evidence
@@ -137,14 +137,20 @@ policy).**
   cell is free, which is true in the food modes but not in constrictor,
   where tails never move. Changing only those channels flips the
   generalist's greedy move about 5 times as often as the specialist's: 0.101
-  against 0.019 when every body is made to look far from clearing. This
-  holds after matching the two policies' confidence. [side analysis]
-- **Moves that only have room if tails move.** In decisions where the room
-  available differs depending on whether tails move, the generalist picks
-  the move that is only roomy if they do 13% of the time, against 7% for the
-  specialist. The gap is 2× at margins of 5 and 10 cells and about 1.35× at
-  1 and 3. The cost is about 0.013 extra trap deaths per generalist seat per
-  game, under 0.01 of share. [side analysis]
+  against 0.019 when every body is made to look far from clearing (decisions
+  from sampled G,S,G,S games). Matching the two policies' confidence leaves
+  about 4 times (0.110 against 0.026). [side analysis]
+- **Moves that only have room if tails move.** Some decisions have a move
+  that is roomy only if tails move. Where that room margin is 5 cells, the
+  generalist picks it 13% of the time, against 7% for the specialist (2,048
+  sampled games).
+  - The ratio is about 1.9× at margins of 5 and 10 cells and about 1.35× at
+    1 and 3.
+  - In fully sampled play its snakes die in such traps 0.013 more often per
+    seat per game (0.028 against 0.016), while total deaths are equal
+    (0.782 against 0.780).
+  - It was not measured in the near-greedy play where the deficit lies.
+    [side analysis]
 - **Where the near-greedy deficit comes from.** With 2% random moves the
   generalist is 0.083 behind per game.
   - Its seats run out of safe moves more often: 49.4% of them against 41.7%.

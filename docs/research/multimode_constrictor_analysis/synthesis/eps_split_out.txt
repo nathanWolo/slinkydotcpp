@@ -1,0 +1,28 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/synthesis/eps_split.py
+
+== constrictor2048_eps0.02: 2048 games, overall G share 0.417 [0.396, 0.437]
+  no effective random move in the contest    n=  834 (40.7%)  G share 0.404 [0.373, 0.436]
+  first random move at move 0-2              n=  314 (15.3%)  G share 0.444 [0.391, 0.496] | G deviated first: 0.393 (n=154), S deviated first: 0.493 (n=158), balanced 0.443 [0.391, 0.495]
+  first random move at move 3-9              n=  471 (23.0%)  G share 0.476 [0.432, 0.518] | G deviated first: 0.444 (n=228), S deviated first: 0.511 (n=240), balanced 0.478 [0.435, 0.520]
+  first random move at move 10-19            n=  303 (14.8%)  G share 0.370 [0.317, 0.424] | G deviated first: 0.346 (n=148), S deviated first: 0.400 (n=152), balanced 0.373 [0.321, 0.427]
+  first random move at move >=20             n=  126 (6.2%)  G share 0.323 [0.245, 0.405] | G deviated first: 0.176 (n=52), S deviated first: 0.425 (n=73), balanced 0.300 [0.226, 0.377]
+  first random move at move <=9              n=  785 (38.3%)  G share 0.463 [0.430, 0.495] | G deviated first: 0.424 (n=382), S deviated first: 0.504 (n=398), balanced 0.464 [0.430, 0.497]
+
+== constrictor2048_eps0.05: 2048 games, overall G share 0.438 [0.418, 0.458]
+  no effective random move in the contest    n=  213 (10.4%)  G share 0.378 [0.319, 0.439]
+  first random move at move 0-2              n=  698 (34.1%)  G share 0.438 [0.402, 0.473] | G deviated first: 0.406 (n=334), S deviated first: 0.468 (n=342), balanced 0.437 [0.401, 0.474]
+  first random move at move 3-9              n=  764 (37.3%)  G share 0.474 [0.440, 0.507] | G deviated first: 0.477 (n=359), S deviated first: 0.473 (n=382), balanced 0.475 [0.440, 0.509]
+  first random move at move 10-19            n=  290 (14.2%)  G share 0.410 [0.359, 0.465] | G deviated first: 0.350 (n=149), S deviated first: 0.473 (n=136), balanced 0.412 [0.359, 0.465]
+  first random move at move >=20             n=   83 (4.1%)  G share 0.355 [0.262, 0.451] | G deviated first: 0.319 (n=36), S deviated first: 0.383 (n=47), balanced 0.351 [0.258, 0.449]
+  first random move at move <=9              n= 1462 (71.4%)  G share 0.457 [0.432, 0.480] | G deviated first: 0.443 (n=693), S deviated first: 0.471 (n=724), balanced 0.457 [0.432, 0.481]
+
+== constrictor2048_eps0.1: 2048 games, overall G share 0.461 [0.440, 0.481]
+  no effective random move in the contest    n=   21 (1.0%)  G share 0.452 [0.250, 0.667]
+  first random move at move 0-2              n= 1181 (57.7%)  G share 0.459 [0.431, 0.487] | G deviated first: 0.439 (n=528), S deviated first: 0.479 (n=566), balanced 0.459 [0.430, 0.488]
+  first random move at move 3-9              n=  703 (34.3%)  G share 0.479 [0.445, 0.513] | G deviated first: 0.464 (n=330), S deviated first: 0.485 (n=332), balanced 0.475 [0.441, 0.511]
+  first random move at move 10-19            n=  120 (5.9%)  G share 0.383 [0.299, 0.468] | G deviated first: 0.363 (n=61), S deviated first: 0.412 (n=53), balanced 0.388 [0.302, 0.474]
+  first random move at move >=20             n=   23 (1.1%)  G share 0.413 [0.205, 0.618] | G deviated first: 0.429 (n=7), S deviated first: 0.367 (n=15), balanced 0.398 [nan, nan]
+  first random move at move <=9              n= 1884 (92.0%)  G share 0.467 [0.445, 0.488] | G deviated first: 0.449 (n=858), S deviated first: 0.481 (n=898), balanced 0.465 [0.442, 0.487]
+# stderr:
+# scratch/multimode/analysis/synthesis/eps_split.py:44: RuntimeWarning: invalid value encountered in divide
+#   boots = 0.5 * ((b.W @ (sh * mg)) / (b.W @ mg) + (b.W @ (sh * ms)) / (b.W @ ms))
