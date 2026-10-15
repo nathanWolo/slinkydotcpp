@@ -1,0 +1,26 @@
+# Native AlphaZero engine for slinky's multi-mode agents (no JAX at run time).
+# One crate per part, so each can be built and tested on its own:
+#   rules   game state, the request-free rules step for the four ladder modes
+#   net     weights from params.npz + config.json, the network forward pass
+#   obs     observations and mode features from a game state (the network's inputs)
+#   api     Battlesnake API JSON <-> game state
+#   search  the PUCT search (faithful port of slinky.mcts as az_modes plays)
+#   referee plays games between Battlesnake servers (strength tests)
+#   lambda  the AWS Lambda handler
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
