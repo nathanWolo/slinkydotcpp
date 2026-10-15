@@ -274,3 +274,57 @@ def test_az_selfplay_matches_reference(masked):
     new = jax.jit(azm.make_selfplay(cfg, groups))(*args)
     ref = jax.jit(RA.make_selfplay(cfg, groups))(*args)
     assert _equal(new, ref)
+
+
+@pytest.mark.parametrize("mode", list(MODES))
+def test_root_draws_match_the_search_draws(masked, mode):
+    config, evaluator = _cfg(M, "az")
+    game = MODES[mode]
+    env = env_for(game)
+    n = game.num_snakes
+    states, keys = _states(mode, 0), _keys(0)
+
+    own = jax.jit(jax.vmap(lambda k, s: M.search(k, s, env, config, evaluator)))
+    pre = jax.jit(
+        jax.vmap(
+            lambda k, s: M.search(
+                k, s, env, config, evaluator, root_draws=M.root_noise_draws(k, n, config)
+            )
+        )
+    )
+    assert _equal(own(keys, states), pre(keys, states))
+    ref_config, _ = _cfg(R, "az")
+    ref = jax.jit(jax.vmap(lambda k, s: R.search(k, s, env, ref_config, evaluator)))
+    assert _equal(pre(keys, states), ref(keys, states))
+    single = jax.tree.map(lambda x: x[0], states)
+    draws = M.root_noise_draws(keys[0], n, config)
+    assert _equal(
+        jax.jit(lambda k, s, d: M.search(k, s, env, config, evaluator, root_draws=d))(
+            keys[0], single, draws
+        ),
+        jax.tree.map(lambda x: x[0], ref(keys, states)),
+    )
+
+
+def test_root_draws_are_the_same_under_any_batching():
+    config = M.MCTSConfig(selection="puct", root_noise_frac=0.25, root_dirichlet_alpha=0.5)
+    keys = jax.random.split(jax.random.key(3), 21).reshape(3, 7)
+    nested = jax.jit(jax.vmap(jax.vmap(lambda k: M.root_noise_draws(k, 4, config))))(keys)
+    flat = jax.jit(jax.vmap(lambda k: M.root_noise_draws(k, 4, config)))(keys.reshape(-1))
+    each = jnp.stack([jax.jit(lambda k: M.root_noise_draws(k, 4, config))(k) for k in keys.reshape(-1)])
+    assert nested.shape == (3, 7, 4, NUM_ACTIONS)
+    assert np.array_equal(np.asarray(nested).reshape(21, 4, 4), np.asarray(flat))
+    assert np.array_equal(np.asarray(flat), np.asarray(each))
+
+
+def test_root_draws_are_checked():
+    game = MODES["duel"]
+    env = env_for(game)
+    state = jax.tree.map(lambda x: x[0], _states("duel", 0))
+    key = jax.random.key(0)
+    noisy, evaluator = _cfg(M, "az")
+    with pytest.raises(ValueError, match="root_draws"):
+        M.search(key, state, env, noisy, evaluator, root_draws=jnp.zeros((3, 4)))
+    quiet = dataclasses.replace(noisy, root_noise_frac=0.0)
+    with pytest.raises(ValueError, match="root_draws"):
+        M.search(key, state, env, quiet, evaluator, root_draws=jnp.zeros((2, 4)))

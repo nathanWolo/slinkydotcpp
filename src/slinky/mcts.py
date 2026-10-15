@@ -616,8 +616,21 @@ def _node_prior(logits: jax.Array | None, legal: jax.Array, config: MCTSConfig) 
     return jax.nn.softmax(jnp.where(legal, logits, -jnp.inf), axis=-1)
 
 
+def root_noise_draws(key: jax.Array, num_snakes: int, config: MCTSConfig) -> jax.Array:
+    """float32[N, 4]: the log-Gamma draws of ``search(key, ...)``'s root noise, to precompute.
+
+    They depend on the key alone, so a trainer can draw them for all its searches at once
+    (the rejection loops of ``loggamma`` are data-dependent) and pass them as ``root_draws``.
+    """
+    return jax.random.loggamma(
+        jax.random.fold_in(key, _ROOT_NOISE_STREAM),
+        config.root_dirichlet_alpha,
+        (num_snakes, NUM_ACTIONS),
+    )
+
+
 def _noisy_root_prior(
-    key: jax.Array, prior: jax.Array, legal: jax.Array, config: MCTSConfig
+    log_g: jax.Array, prior: jax.Array, legal: jax.Array, config: MCTSConfig
 ) -> jax.Array:
     """``(1 - frac) * prior + frac * Dirichlet(alpha)`` over each player's legal moves.
 
@@ -628,7 +641,6 @@ def _noisy_root_prior(
     draws of a row can underflow float32, and dividing by their sum then left
     rows that did not sum to 1 (5% at alpha 0.01).
     """
-    log_g = jax.random.loggamma(key, config.root_dirichlet_alpha, prior.shape)
     noise = jax.nn.softmax(jnp.where(legal, log_g, -jnp.inf), axis=-1)
     return (1.0 - config.root_noise_frac) * prior + config.root_noise_frac * noise
 
@@ -801,9 +813,9 @@ def _init_tree(
     config: MCTSConfig,
     num_nodes: int,
     evaluator: Evaluator | None = None,
-    noise_key: jax.Array | None = None,
+    root_draws: jax.Array | None = None,
 ) -> Tree:
-    """The tree with only the root; ``noise_key`` draws the root noise (if it is on)."""
+    """The tree with only the root; ``root_draws`` are the root noise's draws (if it is on)."""
     n = env.config.num_snakes
     j = NUM_ACTIONS**n
     mask = env.action_mask(state)
@@ -823,7 +835,7 @@ def _init_tree(
         legal = _legal(state, mask, env.config)
         prior = _node_prior(logits, legal, config)
         if config.root_noise_frac > 0:
-            prior = _noisy_root_prior(noise_key, prior, legal, config)
+            prior = _noisy_root_prior(root_draws, prior, legal, config)
         prior = stack(prior.astype(jnp.float32))
 
     rm = config.selection == "rm"
@@ -992,6 +1004,7 @@ def search(
     env: BattlesnakeEnv,
     config: MCTSConfig = DEFAULT_CONFIG,
     evaluator: Evaluator | None = None,
+    root_draws: jax.Array | None = None,
 ) -> SearchOutput:
     """Run SM-MCTS from ``state`` (one unbatched game) for every player at once.
 
@@ -1011,8 +1024,12 @@ def search(
     over traced arrays, such as network parameters passed into the jitted
     function, so new parameters need no recompilation. Its value is clipped to
     ``[-1, 1]``; finished states keep their exact values and dead snakes -1.
+
+    ``root_draws`` (``root_noise_draws(key, num_snakes, config)``, float32[N, 4]) are the
+    root noise's random draws when the caller has made them ahead of the search (it is
+    refused when ``root_noise_frac`` is 0): the output is the same as without.
     """
-    tree, deepest, expanded, k_final = _run(key, state, env, config, evaluator)
+    tree, deepest, expanded, k_final = _run(key, state, env, config, evaluator, root_draws)
     return _output(k_final, tree, config, deepest, expanded)
 
 
@@ -1022,12 +1039,19 @@ def _run(
     env: BattlesnakeEnv,
     config: MCTSConfig,
     evaluator: Evaluator | None,
+    root_draws: jax.Array | None = None,
 ) -> tuple[Tree, jax.Array, jax.Array, jax.Array]:
     """The simulations of :func:`search`: the final tree, deepest, expanded and the final key."""
     game = env.config
     n = game.num_snakes
     _check_game(game)
     _check_evaluator(config, evaluator)
+    bad_draws = root_draws is not None and root_draws.shape != (n, NUM_ACTIONS)
+    if root_draws is not None and (config.root_noise_frac == 0 or bad_draws):
+        raise ValueError(
+            f"root_draws must be float[{n}, {NUM_ACTIONS}] and need root_noise_frac > 0, got "
+            f"shape {root_draws.shape} with root_noise_frac {config.root_noise_frac}"
+        )
     env = env if env.obs_fn is None else _search_env(game)
     num_sims = config.num_simulations
     max_depth = min(config.max_depth, num_sims)
@@ -1068,8 +1092,9 @@ def _run(
         return tree, deepest, expanded + path.expand.astype(jnp.int32)
 
     zero = jnp.zeros((), jnp.int32)
-    k_root = jax.random.fold_in(key, _ROOT_NOISE_STREAM) if config.root_noise_frac > 0 else None
-    tree = _init_tree(state, env, config, num_sims + 1, evaluator, k_root)
+    if config.root_noise_frac > 0 and root_draws is None:
+        root_draws = root_noise_draws(key, n, config)
+    tree = _init_tree(state, env, config, num_sims + 1, evaluator, root_draws)
     tree, deepest, expanded = jax.lax.fori_loop(0, num_sims, simulate, (tree, zero, zero))
     return tree, deepest, expanded, k_final
 

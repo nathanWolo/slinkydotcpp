@@ -58,7 +58,14 @@ import optax
 from slinky import rules, unified
 from slinky.env import BattlesnakeEnv
 from slinky.evaluate import Policy
-from slinky.mcts import Evaluator, MCTSConfig, SearchOutput, placement_values, search
+from slinky.mcts import (
+    Evaluator,
+    MCTSConfig,
+    SearchOutput,
+    placement_values,
+    root_noise_draws,
+    search,
+)
 from slinky.types import ACTION_DELTAS, NUM_ACTIONS, GameConfig, State, TimeStep
 from slinky.unified import Group, Params
 
@@ -550,13 +557,17 @@ def make_selfplay(cfg: Config, groups: tuple[Group, ...]) -> Callable[..., Any]:
     mcfg = selfplay_search(cfg)
     num_envs = cfg.num_envs
 
-    def turn_group(params, group, states, uids, key):
-        k_search, k_move, k_step, k_reset = jax.random.split(key, 4)
+    def turn_keys(key, group):
+        """(search keys [E], move, step, reset keys) of a turn of one mode."""
+        k_search, k_move, k_step, k_reset = jax.random.split(unified.group_key(key, group), 4)
+        return jax.random.split(k_search, num_envs), k_move, k_step, k_reset
+
+    def turn_group(params, group, states, uids, key, draws):
+        keys, k_move, k_step, k_reset = turn_keys(key, group)
         evaluator = make_evaluator(params, cfg, group)
-        keys = jax.random.split(k_search, num_envs)
-        out: SearchOutput = jax.vmap(lambda k, s: search(k, s, group.sim, mcfg, evaluator))(
-            keys, states
-        )
+        out: SearchOutput = jax.vmap(
+            lambda k, s, d: search(k, s, group.sim, mcfg, evaluator, root_draws=d)
+        )(keys, states, draws)
         log_policy = jnp.where(out.policy > 0, jnp.log(jnp.maximum(out.policy, 1e-30)), -jnp.inf)
         sampled = jax.random.categorical(k_move, log_policy).astype(jnp.int32)
         explore = (states.turn < cfg.temperature_turns)[:, None]
@@ -575,11 +586,12 @@ def make_selfplay(cfg: Config, groups: tuple[Group, ...]) -> Callable[..., Any]:
         record = Positions(states, out.policy, uids, ts.done, outcome)
         return (next_states, next_uids), record, metrics
 
-    def turn(params, carry, key):
+    def turn(params, carry, xs):
         states, uids = carry
+        key, draws = xs
         out = [
-            turn_group(params, g, s, u, unified.group_key(key, g))
-            for g, s, u in zip(groups, states, uids, strict=True)
+            turn_group(params, g, s, u, key, d)
+            for g, s, u, d in zip(groups, states, uids, draws, strict=True)
         ]
         next_states = tuple(o[0][0] for o in out)
         next_uids = tuple(o[0][1] for o in out)
@@ -589,7 +601,22 @@ def make_selfplay(cfg: Config, groups: tuple[Group, ...]) -> Callable[..., Any]:
 
     def selfplay(params, states, uids, key):
         keys = jax.random.split(key, cfg.num_steps)
-        carry, (traj, metrics) = jax.lax.scan(lambda c, k: turn(params, c, k), (states, uids), keys)
+        # The root noise's draws only depend on the keys: one batched call per mode for the
+        # whole chunk (the rejection loops of ``loggamma`` cost a host sync per iteration on
+        # a GPU, and under the scan they would run once per turn and game batch).
+
+        def chunk_draws(g):  # [T, E, N, 4]
+            def turn_draws(k):
+                return jax.vmap(lambda kk: root_noise_draws(kk, g.num_snakes, mcfg))(
+                    turn_keys(k, g)[0]
+                )
+
+            return jax.vmap(turn_draws)(keys) if mcfg.root_noise_frac > 0 else None
+
+        draws = tuple(chunk_draws(g) for g in groups)
+        carry, (traj, metrics) = jax.lax.scan(
+            lambda c, x: turn(params, c, x), (states, uids), (keys, draws)
+        )
         return carry, traj, jax.tree.map(lambda x: jnp.sum(x, axis=0), metrics)
 
     return selfplay
