@@ -93,16 +93,39 @@ static const char* const RULESET_NAMES[] = {"standard",    "solo",
 static const char* const MAP_NAMES[] = {"standard", "empty", "royale", NULL};
 static const char* const REWARD_NAMES[] = {"win_loss", "placement", NULL};
 
+static const char* const INIT_KEYS[] = {"width", "height", "num_snakes", "ruleset", "map",
+                                        "food_spawn_chance", "minimum_food",
+                                        "hazard_damage_per_turn", "shrink_every_n_turns",
+                                        "max_turns", "reward", "compute_obs", "seed", NULL};
+
+// TypeError for a keyword my_init does not read. A misspelt one (widht=7) would otherwise fall
+// back to its default, and the game would not be the one the caller sized its buffers for.
+static int check_init_keys(PyObject* kwargs) {
+    Py_ssize_t pos = 0;
+    PyObject *key, *value;
+    while (kwargs && PyDict_Next(kwargs, &pos, &key, &value)) {
+        const char* name = PyUnicode_AsUTF8(key);
+        if (name == NULL) return -1;
+        int known = 0;
+        for (int k = 0; !known && INIT_KEYS[k]; k++) known = strcmp(name, INIT_KEYS[k]) == 0;
+        if (!known) {
+            PyErr_Format(PyExc_TypeError, "unknown keyword %R", key);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 // Keywords (defaults as slinky.types.GameConfig): width, height, num_snakes, ruleset, map,
 // food_spawn_chance, minimum_food, hazard_damage_per_turn, shrink_every_n_turns, max_turns
 // (0: no limit), reward ("win_loss" or "placement"), compute_obs, and the seed env_binding.h
-// adds.
+// adds. Any other keyword is a TypeError.
 static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     (void)args;
     int width, height, num_snakes, ruleset, map, chance, min_food, damage, shrink, max_turns;
     int reward, compute_obs, seed;
-    if (kw_int(kwargs, "width", 11, &width) || kw_int(kwargs, "height", 11, &height) ||
-        kw_int(kwargs, "num_snakes", 2, &num_snakes) ||
+    if (check_init_keys(kwargs) || kw_int(kwargs, "width", 11, &width) ||
+        kw_int(kwargs, "height", 11, &height) || kw_int(kwargs, "num_snakes", 2, &num_snakes) ||
         kw_choice(kwargs, "ruleset", RULESET_NAMES, &ruleset) ||
         kw_choice(kwargs, "map", MAP_NAMES, &map) ||
         kw_int(kwargs, "food_spawn_chance", 15, &chance) ||

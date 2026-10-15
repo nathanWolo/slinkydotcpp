@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import gc
 import math
 import subprocess
 import sys
@@ -501,6 +502,75 @@ def test_rules_cases_cover_the_interesting_events():
         ate += int(np.sum(post.alive & (post.length > pre.length)))
     assert causes == {int(c) for c in Cause if c != Cause.NONE}
     assert frozen > 50 and ate > 100
+
+
+# --- 1b. Integer extremes ------------------------------------------------------------------
+
+INT32_MAX, INT32_MIN, INT16_MAX, INT16_MIN = 2**31 - 1, -(2**31), 2**15 - 1, -(2**15)
+# slinky computes in int32 and int16, which wrap; env_put can set states that play never
+# reaches (a turn of 2^31 - 1, a countdown of -2^15, a head at 2^31 - 1), and the C port keeps
+# the wrap instead of widening. Each kind of extreme is one place where the two once differed.
+EXTREMES = [
+    ("turn", GameConfig(num_snakes=3, ruleset="royale", shrink_every_n_turns=3)),
+    ("turn", GameConfig(num_snakes=3, map="royale", shrink_every_n_turns=4)),
+    ("countdown", GameConfig(width=5, height=5, num_snakes=3)),
+    ("health", GameConfig(width=7, height=7, num_snakes=3, hazard_damage_per_turn=100)),
+    ("health", GameConfig(width=7, height=7, num_snakes=3, hazard_damage_per_turn=-100)),
+    ("head", GameConfig(width=5, height=7, num_snakes=3, ruleset="wrapped")),
+]
+
+
+def extreme_fields(config: GameConfig, kind: str, count: int, rng) -> tuple[list[dict], list]:
+    """Scrambled states with the integers of one kind pushed to the ends of their types."""
+    fields, actions = scrambled_fields(config, count, rng)
+    n = config.num_snakes
+    for d in fields:
+        if kind == "turn":
+            d["turn"] = np.int32(rng.choice([INT32_MAX, INT32_MAX, INT32_MAX - 1, INT32_MIN, -1]))
+        elif kind == "countdown":
+            odd = rng.choice(
+                [INT16_MIN, INT16_MIN + 1, -1, INT16_MAX, INT16_MAX - 1], d["body"].shape
+            )
+            d["body"] = np.where(rng.random(d["body"].shape) < 0.2, odd, d["body"]).astype(np.int16)
+            d["length"] = rng.choice([INT16_MAX, INT16_MAX - 1, 3], n).astype(np.int32)
+        elif kind == "health":
+            d["health"] = rng.choice(
+                [INT32_MIN, INT32_MIN + 5, INT32_MAX, INT32_MAX - 50, 1, 50], n
+            ).astype(np.int32)
+        else:  # head: the action mask looks at the neighbours of a head
+            for i in range(n):
+                if rng.random() < 0.5:
+                    d["head"][i, rng.integers(2)] = rng.choice([INT32_MAX, INT32_MIN])
+            d["health"] = rng.choice([1, 1, 50], n).astype(np.int32)
+    return fields, actions
+
+
+@pytest.mark.parametrize(
+    ("kind", "config"), EXTREMES, ids=[f"{k}-{i}" for i, (k, _) in enumerate(EXTREMES)]
+)
+def test_integer_extremes_wrap_as_in_slinky(kind, config):
+    rng = np.random.default_rng(zlib.crc32(f"{kind}{config}".encode()))
+    pre, actions = extreme_fields(config, kind, 200, rng)
+    actions = np.array(actions, np.int32)
+    keys = jax.random.split(jax.random.key(0), len(pre))
+    ref = jax.device_get(slinky_reference(config)(keys, to_state(pre, config), actions))
+    game = CGame(config)
+    rules, step, masks = [], [], []
+    for fields, acts in zip(pre, actions, strict=True):
+        game.put(fields)
+        binding.rules_step(game.h, acts)
+        rules.append(game.get())
+        game.put(fields)
+        binding.game_step(game.h, acts)
+        step.append(game.get())
+        game.put(fields)
+        binding.observe(game.h)
+        masks.append(game.obs[:, game.board_size :].copy())
+    b = dict(pre=pre, actions=actions)
+    assert_same(rules, ref["rules"], STATE_FIELDS, b, config, "rules_step")
+    exact = [f for f in STATE_FIELDS if f != "food"]  # spawned food is the C game's own
+    assert_same(step, ref["step"], exact, b, config, "game_step")
+    np.testing.assert_array_equal(np.stack(masks).astype(bool), np.asarray(ref["mask"]))
 
 
 # --- 2. Full step parity -------------------------------------------------------------------
@@ -986,6 +1056,40 @@ def test_seed_reproducibility():
     assert any(not np.array_equal(x["head"], z["head"]) for x, z in zip(a, c, strict=True))
 
 
+def game_key(env, g: int) -> tuple:
+    """Everything a new game is made of that its seed decides."""
+    d = binding.env_get(env.handles[g])
+    return d["head"].tobytes(), d["food"].tobytes(), d["sides"].tobytes()
+
+
+def test_games_reset_with_one_seed_are_independent():
+    """glibc's srand(0) is srand(1): games 0 and 1 of reset(0) once drew one stream."""
+    # The royale shrink sides (21 of them) make a chance repeat among 16 games impossible.
+    env = battlesnake.Battlesnake(num_envs=16, mode="royale")
+    for seed in (None, 0, 1, 7):
+        env.reset(seed)
+        keys = [game_key(env, g) for g in range(env.num_envs)]
+        assert len(set(keys)) == env.num_envs, f"reset({seed}): games share a stream"
+    env.reset(3)
+    first = [game_key(env, g) for g in range(env.num_envs)]
+    env.reset(3)
+    assert first == [game_key(env, g) for g in range(env.num_envs)]  # still reproducible
+    env.close()
+
+
+def test_environments_with_different_seeds_do_not_repeat_games():
+    """PufferLib resets worker w's object j with seed s + w + j, so two objects meet at one
+    reset seed; their games must still differ (the init seeds are what tells them apart)."""
+    a, b, a2 = (battlesnake.Battlesnake(num_envs=4, mode="royale", seed=s) for s in (0, 1, 0))
+    for env in (a, b, a2):
+        env.reset(1)
+    keys = [{game_key(env, g) for g in range(4)} for env in (a, b)]
+    assert len(keys[0]) == len(keys[1]) == 4 and not keys[0] & keys[1]
+    assert keys[0] == {game_key(a2, g) for g in range(4)}  # the same seeds, the same games
+    for env in (a, b, a2):
+        env.close()
+
+
 # --- 5. Agent slots through Battlesnake.step -----------------------------------------------
 
 
@@ -1152,6 +1256,99 @@ def test_env_attributes():
     )
 
 
+def test_integer_arguments_may_be_numpy_integers():
+    env = battlesnake.Battlesnake(
+        num_envs=np.int64(2), width=np.int64(7), height=np.int32(7), num_snakes=np.int64(2),
+        max_turns=np.int64(30), report_interval=np.int64(5), seed=np.int64(3),
+    )  # fmt: skip
+    assert env.num_agents == 4 and env.board_shape == (13, 13, 13)
+    assert all(type(v) is int for k, v in env.game_config.items() if k not in ("ruleset", "map"))
+    env.close()
+    for bad in (dict(width=7.0), dict(num_envs=2.0), dict(max_turns=30.5), dict(seed=1.5)):
+        with pytest.raises(TypeError):
+            battlesnake.Battlesnake(**{"num_envs": 1, "mode": "duel", **bad})
+
+
+def test_report_interval_must_be_positive():
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="report_interval"):
+            battlesnake.Battlesnake(num_envs=1, mode="duel", report_interval=bad)
+
+
+def test_any_seed_is_reduced_not_overflowed():
+    """Game g is seeded with g + seed * num_envs in C's 32-bit int; vec_reset takes a long and
+    ignores the conversion error of a bigger seed, which then surfaced as a SystemError."""
+    env = battlesnake.Battlesnake(num_envs=2, mode="duel")
+    bound = 2**31 // env.num_envs
+    for seed in (2**70, -(2**70), 2**63, 2**31, bound + 5, -5):
+        obs = env.reset(seed)[0].copy()
+        assert np.array_equal(obs, env.reset(seed % bound)[0])
+    assert np.array_equal(env.reset(0)[0], env.reset(bound)[0])  # documented aliasing
+    assert not np.array_equal(env.reset(0)[0].copy(), env.reset(1)[0])
+    env.close()
+    battlesnake.Battlesnake(num_envs=2, mode="duel", seed=2**70).close()
+
+
+CLOSE_SCRIPT = """
+import sys
+sys.path.insert(0, {root!r})
+import numpy as np
+from puffer import battlesnake
+
+env = battlesnake.Battlesnake(num_envs=4, mode="duel")
+env.reset(0)
+env.close()
+env.close()  # once a double free
+for call in (lambda: env.step(np.zeros(8, np.int32)), lambda: env.reset(0), env.render):
+    try:
+        call()
+    except RuntimeError as e:
+        assert "closed" in str(e), e
+    else:
+        raise SystemExit("a closed environment ran")
+print("ok")
+"""
+
+
+def test_close_is_idempotent_and_a_closed_environment_refuses(tmp_path):
+    """In a fresh interpreter: before it was raised, the failure here was a segfault."""
+    proc = subprocess.run(
+        [sys.executable, "-c", CLOSE_SCRIPT.format(root=str(ROOT))],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0 and proc.stdout.strip().endswith("ok"), (
+        proc.returncode,
+        proc.stderr[-2000:],
+    )
+
+
+def test_a_dropped_environment_frees_its_games_once(monkeypatch):
+    """PufferLib's Serial builds a driver environment and drops it without closing it."""
+    freed = []
+    real = binding.vec_close
+
+    def spy(handle):
+        freed.append(handle)
+        real(handle)
+
+    monkeypatch.setattr(binding, "vec_close", spy)
+    env = battlesnake.Battlesnake(num_envs=2, mode="duel")
+    handle = env.c_envs
+    del env
+    gc.collect()
+    assert freed == [handle]
+    env = battlesnake.Battlesnake(num_envs=2, mode="duel")
+    handle = env.c_envs
+    env.close()
+    env.close()
+    del env
+    gc.collect()
+    assert freed == [freed[0], handle]
+
+
 VECTOR_SCRIPT = """
 import sys
 sys.path.insert(0, {root!r})
@@ -1244,6 +1441,20 @@ def test_invalid_configs_raise(kwargs):
     bufs += [np.zeros(n, bool), np.zeros(n, bool)]
     with pytest.raises(ValueError):
         binding.env_init(*bufs, 0, **full)
+
+
+def test_unknown_init_keywords_raise():
+    """A misspelt keyword used to fall back to its default: a game of another size than the
+    caller's buffers, which the first reset then wrote past."""
+    full = c_kwargs(GameConfig())
+    n = full["num_snakes"]
+    bufs = [np.zeros((n, 8), np.uint8), np.zeros(n, np.int32), np.zeros(n, np.float32)]
+    bufs += [np.zeros(n, bool), np.zeros(n, bool)]
+    for key in ("widht", "hazard_damage", "rulset"):
+        with pytest.raises(TypeError, match=key):
+            binding.env_init(*bufs, 0, **dict(full, **{key: 7}))
+    binding.env_close(binding.env_init(*bufs, 0, **full))  # every known keyword is accepted
+    binding.env_close(binding.env_init(*bufs, 0, compute_obs=0, **full))
 
 
 def test_env_put_validates():

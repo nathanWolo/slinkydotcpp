@@ -18,13 +18,18 @@ other agent in the repository.
 
 Exported checkpoints keep ppo.py's file names and keys (``params.npz``: ``conv0/w`` as
 ``[3, 3, cin, cout]`` ... ``value/b``; ``config.json``). slinky's ppo agent builds its
-network from ``PPOConfig``, whose game is an 11x11 board that is not wrapped, so it loads
-only policies with that board shape (``21 x 21 x 13``; any ruleset and snake count on such
-a board). Other board shapes still export in the same format and load back here.
+network from ``PPOConfig``, whose game is an 11x11 board that is not wrapped, and checks
+only the parameter shapes, which many other boards share (12x12, wrapped 21x21 ...) with
+different channel scales: it would play such a network on the wrong board. So only a policy
+for that board (any ruleset and snake count on it) is written as ``params.npz``; another
+board's arrays go to ``puffer-params.npz``, which ``ppo:<run dir>`` does not read, and
+:func:`load_ppo_checkpoint` reads it after checking the board recorded in ``config.json``
+(``puffer_board``) against the environment's.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -36,7 +41,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from puffer.obs_format import MASK_SIZE, NUM_CHANNELS
+from puffer.obs_format import CHANNEL_NAMES, MASK_SIZE, NUM_CHANNELS, board_shape, channel_scale
 
 # Logit of an illegal move, as ppo.py's MASKED_LOGIT: exp() underflows to exactly 0, but
 # unlike -inf it keeps p * log p and every gradient finite.
@@ -48,6 +53,9 @@ DEFAULT_CONV_STRIDES = (2, 2, 1)
 DEFAULT_HIDDEN = 256
 DEFAULT_MAX_TURNS = 1000
 KERNEL = 3
+# The arrays of a policy for the board slinky's ppo agent plays, and of any other board.
+PPO_PARAMS = "params.npz"
+PUFFER_PARAMS = "puffer-params.npz"
 
 
 def same_padding(size: int, stride: int) -> tuple[int, int]:
@@ -279,6 +287,29 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
 
+def board_record(shape: Sequence[int], scale: Sequence[float]) -> dict[str, Any]:
+    """A board as ``config.json`` records it: the observation shape and the channel scale.
+
+    Together they tell boards apart that the network's parameter shapes do not (the scale
+    holds the cell count, which wrapped 21x21 and 11x11 boards do not share).
+    """
+    return {"shape": [int(n) for n in shape], "channel_scale": [float(x) for x in scale]}
+
+
+def ppo_board() -> dict[str, Any]:
+    """The board of slinky's ppo agent (``PPOConfig``'s game): 11x11, not wrapped."""
+    return board_record(board_shape(11, 11), channel_scale(11, 11))
+
+
+def policy_board(policy: BattlesnakePolicy) -> dict[str, Any]:
+    return board_record(policy.board_shape, policy.channel_scale.cpu().numpy())
+
+
+def _describe_board(board: Mapping[str, Any]) -> str:
+    cells = round(1 / board["channel_scale"][CHANNEL_NAMES.index("own_countdown")])
+    return f"{tuple(board['shape'])} observations on {cells} cells"
+
+
 def _write_atomically(path: str, write: Any) -> None:
     """``write(tmp_path)``, then rename over ``path``: readers never see half a file."""
     root, ext = os.path.splitext(path)
@@ -292,20 +323,26 @@ def export_ppo_checkpoint(
 ) -> str:
     """Write ``run_dir/params.npz`` and ``run_dir/config.json`` in baselines/ppo.py's format.
 
-    The result is a run directory for slinky's ``ppo:<run dir>`` agent. ``config.json``
-    holds the network (``conv_channels``, ``conv_strides``, ``hidden``), ``max_turns``
-    (default 1000, ppo.py's: the turn cap slinky's evaluation applies to the agent) and
-    every keyword in ``config`` as given. ``baselines/ppo.py: load_config`` reads the keys
-    it knows (any other, such as PufferLib trainer settings, it ignores), so a keyword
-    named like a ``PPOConfig`` field (``seed``, ``gamma``, ``num_envs`` ...) is read as
-    that field. The files are written atomically.
+    The result is a run directory for slinky's ``ppo:<run dir>`` agent, if the policy is for
+    the 11x11 board that agent plays. For any other board the arrays are written to
+    ``puffer-params.npz`` instead (see the module docstring) and ``ppo:<run dir>`` finds no
+    checkpoint. ``config.json`` holds the network (``conv_channels``, ``conv_strides``,
+    ``hidden``), ``max_turns`` (default 1000, ppo.py's: the turn cap slinky's evaluation
+    applies to the agent; ``None``, which ``Battlesnake.game_config`` spells "no limit", is
+    the default too), the policy's board (``puffer_board``) and every keyword in ``config``
+    as given. ``baselines/ppo.py: load_config`` reads the keys it knows (any other, such as
+    PufferLib trainer settings, it ignores), so a keyword named like a ``PPOConfig`` field
+    (``seed``, ``gamma``, ``num_envs`` ...) is read as that field. Each file is written
+    atomically, and the config is serialized first: a value JSON cannot hold raises before
+    any file is touched.
 
     Returns:
-      The path of ``params.npz``.
+      The path of the parameter file.
 
     Raises:
       ValueError: ``config`` contradicts the policy's network, or ``max_turns`` < 1
         (``PPOConfig`` refuses it; a game without a cap is evaluated with a cap anyway).
+      TypeError: a ``config`` value is not JSON serializable.
     """
     network = {
         "conv_channels": list(policy.conv_channels),
@@ -315,19 +352,27 @@ def export_ppo_checkpoint(
     for key, value in network.items():
         if key in config and json.loads(json.dumps(config[key], default=_json_default)) != value:
             raise ValueError(f"config {key}={config[key]!r} contradicts the policy ({value!r})")
-    record = {**network, "max_turns": DEFAULT_MAX_TURNS, **config}
+    board = policy_board(policy)
+    record = {**network, "max_turns": DEFAULT_MAX_TURNS, **config, "puffer_board": board}
+    if record["max_turns"] is None:
+        record["max_turns"] = DEFAULT_MAX_TURNS
     if int(record["max_turns"]) < 1:
         raise ValueError(f"max_turns must be >= 1 for ppo.py's config, got {record['max_turns']!r}")
+    text = json.dumps(record, indent=2, default=_json_default)
 
+    playable = board == ppo_board()
     os.makedirs(run_dir, exist_ok=True)
-    params_path = os.path.join(run_dir, "params.npz")
+    params_path = os.path.join(run_dir, PPO_PARAMS if playable else PUFFER_PARAMS)
     _write_atomically(params_path, lambda tmp: np.savez(tmp, **ppo_params(policy)))
 
     def write_config(tmp: str) -> None:
         with open(tmp, "w") as f:
-            json.dump(record, f, indent=2, default=_json_default)
+            f.write(text)
 
     _write_atomically(os.path.join(run_dir, "config.json"), write_config)
+    # An earlier export of the other kind would be read by ppo:<run dir> with this config.
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(os.path.join(run_dir, PUFFER_PARAMS if playable else PPO_PARAMS))
     return params_path
 
 
@@ -335,10 +380,13 @@ def load_ppo_checkpoint(run_dir: str | os.PathLike, env: Any) -> BattlesnakePoli
     """The policy saved in ``run_dir`` (by :func:`export_ppo_checkpoint` or ppo.py) for ``env``.
 
     The network comes from ``config.json`` (ppo.py's defaults for missing keys) and the
-    board from ``env``.
+    board from ``env``. The board the checkpoint was exported for (``puffer_board``; a ppo.py
+    run, which has none, is the 11x11 board) must be ``env``'s: parameter shapes alone do not
+    tell boards apart.
 
     Raises:
-      ValueError: the checkpoint does not fit ``env``'s board (see :func:`set_ppo_params`).
+      ValueError: the checkpoint was exported for another board than ``env``'s, or its
+        parameters do not fit the network (see :func:`set_ppo_params`).
     """
     with open(os.path.join(run_dir, "config.json")) as f:
         config = json.load(f)
@@ -348,6 +396,13 @@ def load_ppo_checkpoint(run_dir: str | os.PathLike, env: Any) -> BattlesnakePoli
         conv_strides=config.get("conv_strides", DEFAULT_CONV_STRIDES),
         hidden=config.get("hidden", DEFAULT_HIDDEN),
     )
-    with np.load(os.path.join(run_dir, "params.npz")) as f:
+    board, saved = policy_board(policy), config.get("puffer_board", ppo_board())
+    if saved != board:
+        raise ValueError(
+            f"{run_dir} was exported for a board of {_describe_board(saved)}, "
+            f"but the environment's has {_describe_board(board)}"
+        )
+    params = PPO_PARAMS if board == ppo_board() else PUFFER_PARAMS
+    with np.load(os.path.join(run_dir, params)) as f:
         set_ppo_params(policy, {key: f[key] for key in f.files})
     return policy

@@ -7,22 +7,30 @@
     .venv-puffer/bin/python puffer/train.py --vec-backend Multiprocessing --vec-num-envs 4
     .venv-puffer/bin/python puffer/train.py --resume runs/puffer-duel-20261015-120000
 
-A *step* here is an *agent step* (one snake acting once), PufferLib's unit; a duel game
-turn is two. ``--device cuda`` runs on NVIDIA and, with a ROCm build of PyTorch (which
-exposes AMD GPUs as ``cuda``), on AMD. The environment is pure C on the CPU either way.
+A *step* here is an *agent step* (one agent slot advancing one turn), PufferLib's unit; a
+duel game turn is two. In games of 3 or more snakes the slots of snakes that have died and
+wait for the game to end count too (and are averaged into the losses, entropy and KL: PuffeRL
+cannot drop rows): under random legal play that is a fifth to a third of the rows.
+``--device cuda`` runs on NVIDIA and, with a ROCm build of PyTorch (which exposes AMD GPUs
+as ``cuda``), on AMD. The environment is pure C on the CPU either way.
 
 What lands in the run directory (``runs/puffer-<mode>-<timestamp>`` by default):
 
 * ``params.npz`` + ``config.json``: the network in ``baselines/ppo.py``'s checkpoint format,
   rewritten at every checkpoint and at the end, so ``slinky.agents.make_agent("ppo:<run
   dir>")`` plays the latest policy against every other agent (``puffer.policy``). The
-  extra ``puffer_*`` keys in ``config.json`` are ignored by ppo.py.
+  extra ``puffer_*`` keys in ``config.json`` are ignored by ppo.py. Boards other than the
+  non-wrapped 11x11 one that agent plays get ``puffer-params.npz`` instead, which ``ppo:``
+  does not read (it would play the network on the wrong board).
 * ``metrics.jsonl``: one JSON line per PuffeRL log (``"type": "train"``: agent steps, SPS,
   wall time, learning rate, ``env`` = the C environment's per-game statistics, ``losses``,
   ``perf``), one per evaluation (``"type": "eval"``) and a final ``"type": "summary"``.
 * ``checkpoint.pt``: model, optimizer, schedule position and step counters. ``--resume
-  <run dir>`` continues from it with the saved options (explicit flags override them), in
-  the same directory. Games in flight are not saved: a resumed run starts new games.
+  <run dir>`` continues from it with the saved options (explicit flags override them, the
+  optimizer's settings included), in the same directory. Games in flight are not saved: a
+  resumed run starts new games. Without ``--resume``, a run in a directory that already
+  holds one replaces its ``checkpoint.pt`` and ``metrics.jsonl``, as ``baselines/ppo.py``
+  does.
 * ``snapshots/step-<N>/``: the exported network at each evaluation, which is also how each
   evaluation gets a fresh ``ppo:<dir>`` name (slinky's agent registry caches by name).
 
@@ -402,6 +410,8 @@ def validate(args: argparse.Namespace) -> None:
         raise ValueError(f"unknown vec backend {args.vec_backend!r}; expected one of {BACKENDS}")
     if args.vec_num_envs is not None and args.vec_num_envs < 1:
         raise ValueError("vec_num_envs must be >= 1")
+    if args.report_interval < 1:
+        raise ValueError("report_interval must be >= 1")
     if bad := set(args.eval_plays) - set(EVAL_PLAYS):
         raise ValueError(f"unknown eval play {sorted(bad)}; expected {EVAL_PLAYS}")
     if args.train["optimizer"] not in ("adam", "muon"):
@@ -541,18 +551,33 @@ def trainer_class() -> type:
             return str(path)
 
         def restore(self, state: dict[str, Any]) -> None:
-            """Continue from :meth:`save_checkpoint`'s state (the model is already loaded)."""
+            """Continue from :meth:`save_checkpoint`'s state (the model is already loaded).
+
+            The optimizer keeps the saved moments but takes its settings from this session's
+            options (the saved ones unless a flag overrides them): ``load_state_dict`` would
+            otherwise bring back the saved learning rate, betas and eps, and ignore the flags.
+            """
             self.optimizer.load_state_dict(state["optimizer"])
             self.global_step = self.last_log_step = self.saved_step = int(state["global_step"])
             self.epoch = int(state["epoch"])
-            if self.config["anneal_lr"]:
-                # The cosine schedule at this epoch, from the base lr; its recursive update
-                # then continues from here (the total may have changed since the save).
-                self.scheduler.last_epoch = self.epoch
+            config = self.config
+            for group in self.optimizer.param_groups:
+                group["lr"] = group["initial_lr"] = config["learning_rate"]
+                if "betas" in group:
+                    group["betas"] = (config["adam_beta1"], config["adam_beta2"])
+                if "eps" in group:
+                    group["eps"] = config["adam_eps"]
+            if config["anneal_lr"]:
+                # The cosine schedule where this session's loop will leave `remaining` epochs
+                # to run, which is the epoch count only if the batch and the total are as they
+                # were; its recursive update then continues from here.
+                batch = config["batch_size"]
+                remaining = -(-max(config["total_timesteps"] - self.global_step, 0) // batch)
+                done = min(max(self.total_epochs - remaining, 0), self.total_epochs)
+                self.scheduler.last_epoch = done
                 for group in self.optimizer.param_groups:
-                    base = group.get("initial_lr", group["lr"])
-                    t = min(self.epoch / max(self.total_epochs, 1), 1.0)
-                    group["lr"] = base * (1 + math.cos(math.pi * t)) / 2
+                    t = done / max(self.total_epochs, 1)
+                    group["lr"] = group["initial_lr"] * (1 + math.cos(math.pi * t)) / 2
 
         def close(self) -> None:
             self.utilization.stop()
@@ -691,23 +716,41 @@ def make_vecenv(args: argparse.Namespace) -> Any:
         return pufferlib.vector.make(Battlesnake, env_kwargs=env_kwargs, **vec)
 
 
-def check_batch(config: dict[str, Any], agents: int) -> None:
-    """The batch must be whole segments, one block of ``agents`` segments at a time.
+def check_batch(config: dict[str, Any], agents: int) -> int | None:
+    """The batch size PuffeRL will use, checked to be whole segments (``None``: both ``auto``).
 
     PuffeRL stores the rollout as ``agents`` rows per ``bptt_horizon`` steps; an explicit
-    ``batch_size`` that is not a multiple of that would index past the buffers.
+    ``batch_size`` that is not a multiple of that would index past the buffers. With
+    ``bptt_horizon`` ``auto`` it takes ``batch_size // agents`` as the horizon, so the same
+    holds for that.
     """
     horizon, batch = config["bptt_horizon"], config["batch_size"]
-    if horizon == "auto" or batch == "auto":
-        return
+    if batch == "auto":
+        return None if horizon == "auto" else agents * horizon
+    if horizon == "auto":
+        horizon = batch // agents
+        if horizon < 1:
+            raise ValueError(f"batch_size {batch} is below the {agents} agents (one step each)")
     if batch % (agents * horizon):
         raise ValueError(
             f"batch_size {batch} must be a multiple of agents * bptt_horizon = "
             f"{agents} * {horizon} (or 'auto')"
         )
+    return batch
 
 
 # --- Evaluation --------------------------------------------------------------------------
+
+
+def forget_agent(name: str, config: Any) -> None:
+    """Drop an agent from slinky's registry cache, which never evicts.
+
+    Every evaluation plays a snapshot under a new name, so keeping them all would hold each
+    one's parameters and compiled policy (megabytes) for the life of the process.
+    """
+    from slinky import agents
+
+    agents._CACHE.pop((agents.parse_agent(name).name, config), None)
 
 
 def evaluate_snapshot(
@@ -740,7 +783,9 @@ def evaluate_snapshot(
     key = jax.random.key(seed)
     records = []
     for play in plays:
-        agent = make_agent(f"ppo{'' if play == 'greedy' else '-sample'}:{snapshot}", config)
+        name = f"ppo{'' if play == 'greedy' else '-sample'}:{snapshot}"
+        agent = make_agent(name, config)
+        forget_agent(name, config)
         for opponent in opponents:
             other = make_agent(opponent, config)
             start = time.perf_counter()
@@ -804,6 +849,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = Path(args.run_dir)
     resume = None
     if args.resume is not None:
+        if not (run_dir / "checkpoint.pt").is_file():
+            raise ValueError(f"{run_dir} has no checkpoint.pt to resume from")
         resume = torch.load(run_dir / "checkpoint.pt", map_location="cpu", weights_only=True)
     train_cfg = dict(args.train)
     device = train_cfg["device"]
@@ -818,6 +865,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     vecenv = make_vecenv(args)
+    start_step = 0
     try:
         env = vecenv.driver_env
         policy = policy_lib.BattlesnakePolicy(
@@ -828,27 +876,34 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         total = int(train_cfg["total_timesteps"])
         env_name = "battlesnake_" + (game_kwargs(args)["mode"] or "custom")
         config = dict(train_cfg, env=env_name, use_rnn=False, data_dir=str(run_dir))
-        check_batch(config, vecenv.num_agents)
+        batch = check_batch(config, vecenv.num_agents)
+        if batch is not None:
+            if batch > total:
+                raise ValueError(f"total_timesteps {total:,} is below one batch of {batch:,} steps")
+            # PuffeRL's schedule has total // batch epochs, but the loop below runs until the
+            # total is reached: a partial last batch would be an extra epoch at learning rate
+            # 0 (the schedule's end), then a rising one.
+            total = -(-total // batch) * batch
+            config["total_timesteps"] = total
         logger = RunLogger(run_dir, args.print_every, total, quiet=bool(args.dashboard))
         with warnings.catch_warnings():
             # PuffeRL builds a CUDA autocast context whatever the device.
             warnings.filterwarnings("ignore", message="User provided device_type of 'cuda'")
             trainer = trainer_class()(config, vecenv, policy, logger, args, run_dir)
-        if config["batch_size"] > total:
-            raise ValueError(
-                f"total_timesteps {total:,} is below one batch of {config['batch_size']:,} steps"
-            )
+        if resume is not None:
+            trainer.restore(resume)
+            start_step = trainer.global_step
+            logger.write({"type": "resume", "agent_steps": start_step, "epoch": trainer.epoch})
+        else:
+            # A new run in an old run directory replaces it, as baselines/ppo.py does; its
+            # checkpoint would otherwise survive until the first save and a --resume would
+            # continue the old weights under the new run's options.
+            for stale in ("metrics.jsonl", "checkpoint.pt"):
+                (run_dir / stale).unlink(missing_ok=True)
+            trainer.export(run_dir)  # a valid run directory from the start
     except BaseException:
         vecenv.close()
         raise
-
-    start_step = 0
-    if resume is not None:
-        trainer.restore(resume)
-        start_step = trainer.global_step
-        logger.write({"type": "resume", "agent_steps": start_step, "epoch": trainer.epoch})
-    else:
-        trainer.export(run_dir)  # a valid run directory from the start
     header = (
         f"{env_name}: {vecenv.num_agents} agents ({env.num_snakes} per game), "
         f"batch {config['batch_size']:,} steps, device {device}"
@@ -864,6 +919,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     evals: list[dict[str, Any]] = []
 
     def run_eval() -> None:
+        began = time.time()
         step = trainer.global_step
         snapshot = run_dir / "snapshots" / f"step-{step:012d}"
         trainer.export(snapshot)
@@ -881,6 +937,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             logger.write(record)
             print(format_eval(record), flush=True)
         evals.extend(records)
+        # PuffeRL's sps divides the steps since its last log by the time since then, and its
+        # uptime counts from its start: neither should include the evaluation.
+        trainer.last_log_time = time.time()
+        trainer.last_log_step = trainer.global_step
+        trainer.start_time += trainer.last_log_time - began
 
     collect = update = evaluating = 0.0
     last_checkpoint = last_eval = trainer.global_step
@@ -910,8 +971,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         interrupted = True
         print("\ninterrupted: saving a checkpoint", flush=True)
     finally:
-        trainer.save_checkpoint()
-        trainer.close()
+        try:
+            trainer.save_checkpoint()
+        finally:
+            trainer.close()  # also when the save fails: workers would outlive the process
     if can_eval and not interrupted and (trainer.global_step != last_eval or not evals):
         tick = time.perf_counter()
         run_eval()

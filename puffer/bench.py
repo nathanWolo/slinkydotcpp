@@ -10,9 +10,14 @@
 *Environment.* One process and one thread step the C games with uniformly random actions
 (``puffer.battlesnake.benchmark``: 1024 pre-generated rows of actions, 16 warm-up steps),
 so this is the raw cost of the rules, the autoreset and the statistics, with and without
-the observations. An *agent step* is one snake acting; a *game step* is a whole game
-advancing one turn (``num_snakes`` agent steps). Each cell is the best of ``--repeats``
-timed runs, which keeps scheduler noise from lowering it.
+the observations. An *agent step* is one agent slot advancing one turn (PufferLib's unit,
+as in the trainer's steps per second): the slots of snakes that have died and wait for the
+game to end count too. A *game step* is a whole game advancing one turn (``num_snakes``
+agent steps). Uniformly random moves, which include reversing into the neck, end a duel
+after about 3 turns and a 4-snake game after about 4, so the autoreset (a new game) is a
+large share of the work: the figures are for that workload, most of all those without
+observations. Each cell is the best of ``--repeats`` timed runs, which keeps scheduler
+noise from lowering it.
 
 Observations dominate: each agent's is 5737 bytes on an 11x11 board, so at about a million
 agent steps a second the environment writes several GB/s. PuffeRL's ``Multiprocessing``
@@ -133,7 +138,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         modes = [m.strip() for m in args.modes.split(",") if m.strip()]
         sizes = [int(n) for n in args.num_envs.split(",") if n.strip()]
         observations = {"both": (True, False), "yes": (True,), "no": (False,)}[args.observations]
-        print(f"CPU: {cpu_description()}; single process, one thread; random actions\n")
+        print(
+            f"CPU: {cpu_description()}; single process, one thread; uniformly random actions "
+            "(short games), dead snakes' waiting slots counted\n"
+        )
         print(environment_table(modes, sizes, observations, args.seconds, args.repeats))
     if args.train_sps:
         print(f"\nPuffeRL training for {args.train_seconds:.0f} s on {cpu_description()}\n")

@@ -105,6 +105,7 @@ typedef struct Battlesnake {
     uint8_t* hazard8;  // [H][W] saturated hazard count
 
     uint64_t rng_state, rng_inc;
+    uint64_t init_seed;  // the seed given at init: distinct per game, mixed into every reset
 } Battlesnake;
 
 // --- Random numbers ------------------------------------------------------------------------
@@ -181,7 +182,8 @@ static int bs_is_game_over(const Battlesnake* e) {
 // slinky.rules.royale_hazards: the zone shown at `turn`, after turn // shrink_every_n_turns
 // shrinks; shrink k moves edge sides[k] (0 left, 1 right, 2 bottom, 3 top) inward.
 static void bs_royale_hazards(Battlesnake* e, int64_t turn) {
-    // C division truncates where Python floors, but both leave no shrink for turn < 0.
+    // C division truncates where Python floors, but both leave no shrink for turn < 0. Callers
+    // pass slinky's int32 `turn + 1`, which wraps to negative at INT32_MAX (no zone there).
     int64_t shrinks = turn / e->shrink_every_n_turns;
     int c[4] = {0, 0, 0, 0};
     for (int k = 0; k < e->num_sides && k < shrinks; k++) {
@@ -238,11 +240,13 @@ static void bs_rules_step(Battlesnake* e, const int* actions) {
     }
 
     // Collisions are judged on the bodies after the tail pop (body_dec in slinky): head i
-    // hits snake j if j still occupies the cell, i.e. its countdown there was above 1.
-    // Feeding does not change this, so it is read before the body changes.
+    // hits snake j if j still occupies the cell, i.e. its countdown there was above 1 (in
+    // int16 arithmetic, so INT16_MIN counts as occupied, as in slinky). Feeding does not
+    // change this, so it is read before the body changes.
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
-            hits[i][j] = cell[i] >= 0 && alive0[j] && e->body[j * C + cell[i]] > 1;
+            hits[i][j] = cell[i] >= 0 && alive0[j] &&
+                         (int16_t)(e->body[j * C + cell[i]] - 1) > 0;
         }
     }
 
@@ -257,7 +261,10 @@ static void bs_rules_step(Battlesnake* e, const int* actions) {
     for (int i = 0; i < N; i++) {
         if (!alive0[i]) continue;
         int16_t* b = e->body + i * C;
-        for (int k = 0; k < C; k++) b[k] = b[k] > 0 ? (int16_t)(b[k] - 1) : 0;
+        for (int k = 0; k < C; k++) {
+            int16_t d = (int16_t)(b[k] - 1);  // int16 wraps, as jnp.maximum(body - 1, 0) does
+            b[k] = d > 0 ? d : 0;
+        }
         if (cell[i] >= 0) b[cell[i]] = (int16_t)e->length[i];
     }
 
@@ -269,7 +276,8 @@ static void bs_rules_step(Battlesnake* e, const int* actions) {
     // Hazard damage: skipped if the head's cell also has food. The engine clamps health to
     // [0, 100] after each layer; with one damage value per game every layer moves health the
     // same way, so slinky applies all layers at once and clamps once, saturating the damage
-    // to +-100 and the layers to 101 (more change nothing) to stay far from overflow.
+    // to +-100 and the layers to 101 (more change nothing) to stay far from overflow. The
+    // subtraction is int32 there and wraps for a health far outside [0, 100] (env_put only).
     int damage = e->hazard_damage;
     if (damage < -BS_MAX_HEALTH) damage = -BS_MAX_HEALTH;
     if (damage > BS_MAX_HEALTH) damage = BS_MAX_HEALTH;
@@ -279,8 +287,8 @@ static void bs_rules_step(Battlesnake* e, const int* actions) {
         alive1[i] = alive0[i];
         if (!hit_hazard[i]) continue;
         int64_t l = layers[i] < BS_MAX_HEALTH + 1 ? layers[i] : BS_MAX_HEALTH + 1;
-        int64_t h = (int64_t)e->health[i] - l * damage;
-        e->health[i] = (int32_t)(h < 0 ? 0 : (h > BS_MAX_HEALTH ? BS_MAX_HEALTH : h));
+        int32_t h = (int32_t)((int64_t)e->health[i] - l * damage);
+        e->health[i] = h < 0 ? 0 : (h > BS_MAX_HEALTH ? BS_MAX_HEALTH : h);
         if (e->health[i] <= 0) {  // eliminated at once: food later in the turn can't save it
             cause[i] = CAUSE_HAZARD;
             alive1[i] = 0;
@@ -360,7 +368,7 @@ static void bs_rules_step(Battlesnake* e, const int* actions) {
 
     // Royale: the zone for the next turn, from scratch, after elimination (as the engine's
     // last stage; skipped on the game-over call by the freeze above).
-    if (e->royale_rules) bs_royale_hazards(e, (int64_t)e->turn + 1);
+    if (e->royale_rules) bs_royale_hazards(e, (int32_t)((int64_t)e->turn + 1));
 
     // Eliminated snakes' bodies are not tracked.
     for (int i = 0; i < N; i++) {
@@ -598,7 +606,7 @@ static void bs_map_post_update(Battlesnake* e) {
     if (e->map == MAP_EMPTY) return;
     bs_spawn_food_standard(e);
     // RoyaleMap regenerates the zone for the turn about to be shown.
-    if (e->map == MAP_ROYALE) bs_royale_hazards(e, (int64_t)e->turn + 1);
+    if (e->map == MAP_ROYALE) bs_royale_hazards(e, (int32_t)((int64_t)e->turn + 1));
 }
 
 // --- Environment step (slinky.env.BattlesnakeEnv.step) -------------------------------------
@@ -652,7 +660,9 @@ static void bs_game_step(Battlesnake* e, const int* actions, float* reward, int*
 
 // --- Observations (slinky.observations.egocentric_obs, slinky.rules.action_mask) ----------
 
-// certainly_starving: on 1 health with no food (or healing hazard) next to the head.
+// certainly_starving: on 1 health with no food (or healing hazard) next to the head. Here and
+// in action_mask the neighbour is the int32 sum, as slinky's _neighbours computes it: a head
+// coordinate at INT32_MAX or INT32_MIN (env_put only) wraps before the wrapped-board modulo.
 static void bs_certainly_starving(const Battlesnake* e, uint8_t* starving) {
     const int W = e->width;
     for (int i = 0; i < e->num_snakes; i++) {
@@ -660,8 +670,8 @@ static void bs_certainly_starving(const Battlesnake* e, uint8_t* starving) {
         if (!e->alive[i] || e->health[i] > 1) continue;
         int rescue = 0;
         for (int a = 0; a < BS_NUM_ACTIONS; a++) {
-            int64_t x = (int64_t)e->head[2 * i] + BS_DX[a];
-            int64_t y = (int64_t)e->head[2 * i + 1] + BS_DY[a];
+            int64_t x = (int32_t)((int64_t)e->head[2 * i] + BS_DX[a]);
+            int64_t y = (int32_t)((int64_t)e->head[2 * i + 1] + BS_DY[a]);
             if (e->wrapped) {
                 x = bs_pmod(x, e->width);
                 y = bs_pmod(y, e->height);
@@ -685,8 +695,8 @@ static void bs_action_mask(const Battlesnake* e, uint8_t mask[][BS_MASK_SIZE]) {
     for (int i = 0; i < N; i++) {
         int any_ok = 0;
         for (int a = 0; a < BS_NUM_ACTIONS; a++) {
-            int64_t x = (int64_t)e->head[2 * i] + BS_DX[a];
-            int64_t y = (int64_t)e->head[2 * i + 1] + BS_DY[a];
+            int64_t x = (int32_t)((int64_t)e->head[2 * i] + BS_DX[a]);
+            int64_t y = (int32_t)((int64_t)e->head[2 * i + 1] + BS_DY[a]);
             if (e->wrapped) {
                 x = bs_pmod(x, e->width);
                 y = bs_pmod(y, e->height);
@@ -850,8 +860,10 @@ static void bs_add_log(Battlesnake* e, int truncated) {
 // with reward_t and terminal_t returned together with obs_t, and bootstraps step t from
 // r_{t+1} and (1 - d_{t+1}): a slot is terminal when its snake died on this transition, when
 // the game ended (rules or max_turns; PufferLib 3.0 drops truncations), or when the snake was
-// already dead (one-step episodes with reward 0 that carry no signal). A finished game is
-// logged and replaced at once, and the observations written are the new game's.
+// already dead (one-step episodes with reward 0: no return to learn from, but PuffeRL cannot
+// drop rows, so they are stored, counted as agent steps and averaged into its losses). A
+// finished game is logged and replaced at once, and the observations written are the new
+// game's.
 static void c_step(Battlesnake* e) {
     const int N = e->num_snakes;
     uint8_t prev_alive[BS_MAX_SNAKES];
@@ -867,11 +879,14 @@ static void c_step(Battlesnake* e) {
 }
 
 // A new game. vec_reset seeds rand() per env before calling this, so reseeding from it makes
-// reset(seed) reproducible.
+// reset(seed) reproducible. rand() alone would not tell games apart: glibc's srand(0) is
+// srand(1), so with reset seed 0 games 0 and 1 would get one stream. The init seed (unique per
+// game, across env objects and workers) is mixed in, by an odd multiplier so that distinct init
+// seeds stay distinct.
 static void c_reset(Battlesnake* e) {
     uint64_t s = (uint64_t)(unsigned)rand();
     s = (s << 31) ^ (uint64_t)(unsigned)rand();
-    bs_seed(e, s);
+    bs_seed(e, s ^ (e->init_seed * 0x9E3779B97F4A7C15ULL));
     bs_new_game(e);
     memset(e->rewards, 0, (size_t)e->num_snakes * sizeof(float));
     memset(e->terminals, 0, (size_t)e->num_snakes);
@@ -1002,6 +1017,7 @@ static const char* bs_init(Battlesnake* e, int width, int height, int num_snakes
         c_close(e);
         return "out of memory";
     }
+    e->init_seed = seed;
     bs_seed(e, seed);
     bs_new_game(e);
     return NULL;

@@ -12,6 +12,13 @@ game counts as terminal), or when the snake was already dead (its slot then hold
 episodes with reward 0 until the game ends). A finished game is replaced at once and the
 observations are the new game's.
 
+A dead snake's *waiting* slot has no return to learn from (value target 0, advantage about
+0 once the trainer has learned the value of the dead observation), but PuffeRL 3.0 cannot
+drop rows: the slot is stored, counted as an agent step, and averaged into the losses
+(entropy, KL), the advantage normalization and the steps per second. With 3 or more
+snakes a fifth to a third of the rows are waiting slots under random legal play; in a duel
+the game ends with the first death, so there are none.
+
 Build the extension first: ``.venv-puffer/bin/python puffer/setup.py build_ext --inplace``.
 This module does not import JAX.
 """
@@ -19,7 +26,9 @@ This module does not import JAX.
 from __future__ import annotations
 
 import functools
+import operator
 import sys
+import weakref
 from pathlib import Path
 
 if __package__ in (None, ""):  # run as a script: make `puffer` importable
@@ -97,8 +106,12 @@ class Battlesnake(pufferlib.PufferEnv):
       max_turns: truncate games at this turn (0: no limit, as the engine).
       reward: ``"win_loss"`` or ``"placement"`` (``slinky.env``).
       compute_obs: False skips observations in ``step`` (raw simulation speed only).
-      report_interval: return the ``vec_log`` statistics every this many steps.
+      report_interval: return the ``vec_log`` statistics every this many steps (>= 1).
       buf, seed: PufferLib's shared buffers and seed.
+
+    Integer arguments may be numpy integers. ``reset(seed)`` and ``seed`` are taken modulo
+    ``2**31 // num_envs`` (game ``g`` is seeded with ``g + seed * num_envs`` in 32 bits in C).
+    ``close()`` may be called twice; stepping a closed environment raises ``RuntimeError``.
     """
 
     def __init__(
@@ -121,8 +134,15 @@ class Battlesnake(pufferlib.PufferEnv):
         buf=None,
         seed: int = 0,
     ) -> None:
+        # operator.index: numpy integers pass, floats are a TypeError here and not in C.
+        width, height = operator.index(width), operator.index(height)
+        food_spawn_chance = operator.index(food_spawn_chance)
+        minimum_food = operator.index(minimum_food)
+        hazard_damage_per_turn = operator.index(hazard_damage_per_turn)
+        shrink_every_n_turns = operator.index(shrink_every_n_turns)
+        num_envs, report_interval = operator.index(num_envs), operator.index(report_interval)
         ruleset, map, num_snakes = resolve_game(mode, num_snakes, ruleset, map)
-        max_turns = max_turns or 0
+        num_snakes, max_turns = operator.index(num_snakes), operator.index(max_turns or 0)
         if ruleset not in RULESETS:
             raise ValueError(f"unknown ruleset {ruleset!r}; expected one of {RULESETS}")
         if map not in MAPS:
@@ -139,6 +159,8 @@ class Battlesnake(pufferlib.PufferEnv):
             raise ValueError("max_turns must be >= 0 (0: no limit)")
         if num_envs < 1:
             raise ValueError("num_envs must be at least 1")
+        if report_interval < 1:
+            raise ValueError("report_interval must be >= 1")
         check_placement(width, height, num_snakes)
 
         self.mode = mode
@@ -174,6 +196,7 @@ class Battlesnake(pufferlib.PufferEnv):
         kwargs = dict(self.game_config, max_turns=max_turns, reward=reward)
         kwargs["compute_obs"] = int(bool(compute_obs))
         handles = []
+        first_seed = self._reduced_seed(seed) * num_envs
         for g in range(num_envs):
             s = slice(g * num_snakes, (g + 1) * num_snakes)
             handles.append(
@@ -183,19 +206,32 @@ class Battlesnake(pufferlib.PufferEnv):
                     self.rewards[s],
                     self.terminals[s],
                     self.truncations[s],
-                    g + seed * num_envs,  # as PufferLib's ocean envs
+                    g + first_seed,  # as PufferLib's ocean envs
                     **kwargs,
                 )
             )
         self.c_envs = binding.vectorize(*handles)
         self.handles = handles
+        # Frees the C games once, at close() or when this object is collected (PufferLib's
+        # Serial builds a driver environment and drops it); it holds the pointer, not self.
+        self._finalizer = weakref.finalize(self, binding.vec_close, self.c_envs)
+
+    def _reduced_seed(self, seed: int) -> int:
+        """``seed`` reduced so that ``g + seed * num_envs`` fits the 32-bit int C computes it in."""
+        return operator.index(seed) % (2**31 // self.num_envs)
+
+    def _check_open(self) -> None:
+        if self.c_envs is None:
+            raise RuntimeError("this Battlesnake environment is closed")
 
     def reset(self, seed: int | None = None):
+        self._check_open()
         self.tick = 0
-        binding.vec_reset(self.c_envs, 0 if seed is None else seed)
+        binding.vec_reset(self.c_envs, 0 if seed is None else self._reduced_seed(seed))
         return self.observations, []
 
     def step(self, actions):
+        self._check_open()
         self.actions[:] = actions
         binding.vec_step(self.c_envs)
         self.tick += 1
@@ -205,10 +241,12 @@ class Battlesnake(pufferlib.PufferEnv):
         return self.observations, self.rewards, self.terminals, self.truncations, info
 
     def render(self):
+        self._check_open()
         binding.vec_render(self.c_envs, 0)
 
     def close(self):
-        binding.vec_close(self.c_envs)
+        self._finalizer()  # frees the C games the first time only
+        self.c_envs, self.handles = None, []
 
 
 def env_creator(name: str = "battlesnake"):

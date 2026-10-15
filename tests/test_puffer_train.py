@@ -20,6 +20,7 @@ run with ``.venv-puffer/bin/python -m pytest tests/test_puffer_train.py``.
 from __future__ import annotations
 
 import configparser
+import itertools
 import json
 import math
 import os
@@ -28,6 +29,7 @@ import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import jax
@@ -165,6 +167,7 @@ def test_game_options_follow_the_environment():
         ["--eval-plays", "argmax"],
         ["--eval-every", "10", "--width", "9", "--height", "9"],  # slinky's ppo plays 11x11 only
         ["--optimizer", "sgd"],
+        ["--report-interval", "0"],  # the environment divides by it
     ):
         with pytest.raises(ValueError):
             train.parse_args(bad)
@@ -178,6 +181,18 @@ def test_batch_and_device_checks(tmp_path):
     if not torch.cuda.is_available():
         with pytest.raises(ValueError, match="torch.cuda is not available"):
             train.train(run_args(tmp_path / "c", "--device", "cuda"))
+    # With an automatic horizon PuffeRL takes batch_size // agents (16 here) as the horizon,
+    # and then needs a whole number of 16-agent blocks of it: it died inside its rollout.
+    auto = ("--bptt-horizon", "auto", "--total-timesteps", "1e5")
+    with pytest.raises(ValueError, match="multiple of agents"):
+        train.train(run_args(tmp_path / "d", *auto, "--batch-size", "72"))
+    with pytest.raises(ValueError, match="below the 16 agents"):
+        train.train(run_args(tmp_path / "e", *auto, "--batch-size", "8"))
+    check = train.check_batch
+    assert check({"bptt_horizon": "auto", "batch_size": 64}, 16) == 64
+    assert check({"bptt_horizon": 16, "batch_size": "auto"}, 16) == 256
+    assert check({"bptt_horizon": 16, "batch_size": 512}, 16) == 512
+    assert check({"bptt_horizon": "auto", "batch_size": "auto"}, 16) is None  # PuffeRL refuses
 
 
 def test_metrics_are_strict_json():
@@ -191,13 +206,17 @@ def test_metrics_are_strict_json():
 # --- A run -------------------------------------------------------------------------------
 
 
-def test_training_run_exports_a_network_slinky_plays(tmp_path):
+def test_training_run_exports_a_network_slinky_plays(tmp_path, monkeypatch):
     run = tmp_path / "run"
-    # PuffeRL logs about every quarter second (and logs the losses of the epoch before),
-    # so a run of a second and a half has several logs with losses in them.
-    summary = train.train(run_args(run, "--total-timesteps", "1e9", "--max-seconds", "1.5"))
+    # PuffeRL logs when 0.25 s have passed since its last log: a clock that jumps 0.3 s at
+    # every reading makes it log after every epoch, however loaded the machine is, and the
+    # run is bounded by steps, not by time.
+    ticks = itertools.count()
+    clock = types.SimpleNamespace(time=lambda: 0.3 * next(ticks), sleep=time.sleep)
+    monkeypatch.setattr(train.load_pufferl(), "time", clock)
+    summary = train.train(run_args(run, "--total-timesteps", str(24 * DUEL_EPOCH)))
     steps_run, epochs_run = summary["agent_steps"], summary["epochs"]
-    assert steps_run == epochs_run * DUEL_EPOCH and epochs_run >= 5
+    assert steps_run == epochs_run * DUEL_EPOCH and epochs_run == 24
     assert not summary["interrupted"] and summary["sps"] > 0 and summary["parameters"] > 0
     assert {"params.npz", "config.json", "checkpoint.pt", "metrics.jsonl"} <= set(os.listdir(run))
 
@@ -232,7 +251,8 @@ def test_training_run_exports_a_network_slinky_plays(tmp_path):
     # A resumed run inherits the run's settings, but not the time limit of this session.
     resumed = train.parse_args(["--resume", str(run)])
     assert (resumed.max_seconds, resumed.run_dir) == (0.0, str(run))
-    assert resumed.conv_channels == (4, 4, 4) and resumed.train["total_timesteps"] == 1e9
+    assert resumed.conv_channels == (4, 4, 4)
+    assert resumed.train["total_timesteps"] == 24 * DUEL_EPOCH
 
     # slinky's registry loads the run directory and the agent plays complete games.
     game = GameConfig(max_turns=40)
@@ -279,6 +299,171 @@ def test_resume_continues_the_run(tmp_path):
         train.parse_args(["--resume", str(tmp_path / "nowhere")])
 
 
+def lr_log(monkeypatch) -> list[float]:
+    """The learning rate every epoch is trained with (PuffeRL's ``train`` reads it then)."""
+    lrs: list[float] = []
+    cls = train.trainer_class()
+    real = cls.train
+
+    def spy(self):
+        lrs.append(self.optimizer.param_groups[0]["lr"])
+        return real(self)
+
+    monkeypatch.setattr(cls, "train", spy)
+    return lrs
+
+
+def test_resume_applies_explicit_optimizer_flags(tmp_path):
+    run = tmp_path / "run"
+    train.train(run_args(run, "--total-timesteps", str(3 * DUEL_EPOCH)))
+    flags = ["--learning-rate", "5e-4", "--adam-eps", "1e-8", "--adam-beta1", "0.8"]
+    longer = ["--resume", str(run), "--total-timesteps", str(5 * DUEL_EPOCH), *flags]
+    # Optimizer.load_state_dict used to bring back the saved settings, and the schedule's base
+    # with them: the cosine of the new base rate, 3 epochs of 5 in, is what is wanted.
+    idle = train.train(train.parse_args([*longer, "--max-seconds", "1e-9"]))
+    assert idle["learning_rate"] == pytest.approx(5e-4 * (1 + math.cos(3 * math.pi / 5)) / 2)
+    train.train(train.parse_args(longer))
+    state = torch.load(run / "checkpoint.pt", map_location="cpu", weights_only=True)
+    group = state["optimizer"]["param_groups"][0]
+    assert (group["initial_lr"], group["eps"], tuple(group["betas"])) == (5e-4, 1e-8, (0.8, 0.999))
+    config = json.loads((run / "config.json").read_text())["puffer_args"]["train"]
+    assert (config["learning_rate"], config["adam_eps"], config["adam_beta1"]) == (5e-4, 1e-8, 0.8)
+
+
+def test_resume_places_the_schedule_by_steps_when_the_batch_changes(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    train.train(run_args(run, "--total-timesteps", str(4 * DUEL_EPOCH)))  # 1024 steps, lr 0
+    # Twice the games, so batches of 512: a total of 2048 steps has the 1024 done at its half
+    # (the position used to be the epoch count, 4 of 4: lr 0, then rising again).
+    resume = ["--resume", str(run), "--total-timesteps", str(8 * DUEL_EPOCH), "--num-envs", "16"]
+    idle = train.train(train.parse_args([*resume, "--max-seconds", "1e-9"]))
+    assert idle["batch_size"] == 2 * DUEL_EPOCH
+    assert idle["learning_rate"] == pytest.approx(1e-3 / 2)
+    lrs = lr_log(monkeypatch)
+    final = train.train(train.parse_args(resume))
+    assert final["agent_steps"] == 8 * DUEL_EPOCH and len(lrs) == 2
+    assert lrs[0] == pytest.approx(1e-3 / 2) and 0 < lrs[1] < lrs[0]
+    assert final["learning_rate"] == pytest.approx(0, abs=1e-9)
+
+
+def test_a_total_that_is_not_whole_batches_is_rounded_up(tmp_path, monkeypatch):
+    """PuffeRL's schedule has total // batch epochs but the run needs one more: that epoch
+    trained at learning rate 0 and the schedule then rose again."""
+    lrs = lr_log(monkeypatch)
+    summary = train.train(
+        run_args(tmp_path / "run", "--total-timesteps", str(3 * DUEL_EPOCH + 100))
+    )
+    assert summary["epochs"] == 4 and summary["agent_steps"] == 4 * DUEL_EPOCH
+    assert len(lrs) == 4 and all(lr > 0 for lr in lrs) and lrs == sorted(lrs, reverse=True)
+    assert summary["learning_rate"] == pytest.approx(0, abs=1e-9)
+
+
+def test_a_new_run_in_an_old_run_directory_replaces_it(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    train.train(run_args(run, "--total-timesteps", str(4 * DUEL_EPOCH)))
+    train.train(run_args(run, "--total-timesteps", str(2 * DUEL_EPOCH), "--seed", "5"))
+    log = records(run)
+    assert [r["type"] for r in log].count("summary") == 1
+    assert max(r["agent_steps"] for r in log) == 2 * DUEL_EPOCH  # nothing of the first run
+    state = torch.load(run / "checkpoint.pt", map_location="cpu", weights_only=True)
+    assert state["global_step"] == 2 * DUEL_EPOCH
+
+    # A run that dies before its first save leaves no checkpoint of the old run to resume.
+    cls = train.trainer_class()
+    monkeypatch.setattr(cls, "save_checkpoint", lambda self: str(self.run_dir / "checkpoint.pt"))
+    train.train(run_args(run, "--total-timesteps", str(2 * DUEL_EPOCH), "--seed", "6"))
+    assert not (run / "checkpoint.pt").exists()
+    with pytest.raises(ValueError, match="no checkpoint.pt"):
+        train.train(train.parse_args(["--resume", str(run)]))
+
+
+def test_environments_are_closed_when_the_run_fails(tmp_path, monkeypatch):
+    import pufferlib.vector
+
+    closed = []
+    real_close = pufferlib.vector.Serial.close
+
+    def close(self):
+        closed.append(self)
+        real_close(self)
+
+    monkeypatch.setattr(pufferlib.vector.Serial, "close", close)
+    cls = train.trainer_class()
+
+    # The final save fails (a full disk): the workers of a Multiprocessing run would outlive it.
+    def full_disk(self):
+        raise OSError(28, "No space left on device")
+
+    with monkeypatch.context() as m:
+        m.setattr(cls, "save_checkpoint", full_disk)
+        with pytest.raises(OSError, match="No space left"):
+            train.train(run_args(tmp_path / "a", "--total-timesteps", str(2 * DUEL_EPOCH)))
+    assert len(closed) == 1
+
+    # Restoring fails: the environments exist by then.
+    run = tmp_path / "b"
+    train.train(run_args(run, "--total-timesteps", str(DUEL_EPOCH)))
+    assert len(closed) == 2
+
+    def broken(self, state):
+        raise RuntimeError("broken checkpoint")
+
+    monkeypatch.setattr(cls, "restore", broken)
+    resume = ["--resume", str(run), "--total-timesteps", str(2 * DUEL_EPOCH)]
+    with pytest.raises(RuntimeError, match="broken checkpoint"):
+        train.train(train.parse_args(resume))
+    assert len(closed) == 3
+
+
+def test_evaluation_time_stays_out_of_the_logged_rates(tmp_path, monkeypatch):
+    """PuffeRL's sps is the steps since its last log over the seconds since then, and its
+    uptime counts from its start: an evaluation between two epochs made the next log's sps
+    tiny. The trainer is told when the evaluation ended."""
+    cls = train.trainer_class()
+    ends, seen = [], []
+
+    def slow_evaluation(*args, **kwargs):
+        time.sleep(0.3)
+        ends.append(time.time())
+        return []
+
+    real = cls.train
+
+    def spy(self):
+        seen.append((time.time(), self.last_log_time, self.uptime))
+        return real(self)
+
+    monkeypatch.setattr(train, "evaluate_snapshot", slow_evaluation)
+    monkeypatch.setattr(cls, "train", spy)
+    started = time.time()
+    args = run_args(
+        tmp_path / "run",
+        *("--total-timesteps", str(4 * DUEL_EPOCH)),
+        *("--eval-games", "1", "--eval-every", str(DUEL_EPOCH)),
+    )
+    train.train(args)
+    assert len(seen) == 4 and len(ends) >= 4
+    for k in range(1, 4):
+        entered, last_log, uptime = seen[k]
+        assert last_log >= ends[k - 1], f"epoch {k}: the last log predates the evaluation"
+        assert uptime < entered - started - 0.25 * k, f"epoch {k}: uptime counts evaluations"
+
+
+def test_evaluated_snapshots_do_not_pile_up_in_the_agent_registry(tmp_path):
+    from slinky import agents
+
+    env = Battlesnake(num_envs=1, mode="duel")
+    policy = policy_lib.BattlesnakePolicy(env, (4, 4, 4), (2, 2, 1), 16)
+    policy_lib.export_ppo_checkpoint(policy, tmp_path / "snap", max_turns=40)
+    (record,) = train.evaluate_snapshot(
+        tmp_path / "snap", env.game_config, 40, 2, ("random_legal",), ("greedy",), 0
+    )
+    assert record["games"] == 2 and record["opponent"] == "random_legal"
+    # The opponent stays cached (its name recurs); the snapshot's one-time name does not.
+    assert not [key for key in agents._CACHE if str(tmp_path / "snap") in key[0]]
+    env.close()
+
+
 def test_four_snake_run_is_evaluated_with_a_table(tmp_path):
     run = tmp_path / "run"
     args = run_args(
@@ -317,6 +502,10 @@ def test_other_boards_train_but_are_not_evaluated(tmp_path, capsys):
     assert summary["agents"] == 24 and summary["agent_steps"] == 768
     env = Battlesnake(num_envs=1, width=10, height=8, num_snakes=3, ruleset="wrapped")
     assert policy_lib.load_ppo_checkpoint(run, env).board_shape == (8, 10, 13)
+    # slinky's ppo agent plays 11x11 only, so it must not find this network.
+    assert (run / "puffer-params.npz").exists() and not (run / "params.npz").exists()
+    with pytest.raises(FileNotFoundError, match="no PPO checkpoint"):
+        make_agent(f"ppo:{run}", GameConfig())
 
 
 # --- The script, in a subprocess ----------------------------------------------------------

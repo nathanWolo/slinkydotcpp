@@ -153,6 +153,9 @@ def agent_data(game: GameConfig) -> AgentData:
 
 def reference(run_dir, game: GameConfig, net: dict, float_obs: np.ndarray):
     """ppo.py's ``(logits, value)`` for the checkpoint in ``run_dir``: the oracle."""
+    other_board = Path(run_dir) / P.PUFFER_PARAMS
+    if other_board.exists():  # ppo.py reads the arrays of any board, by its own file name
+        os.replace(other_board, Path(run_dir) / P.PPO_PARAMS)
     cfg = ppo_cfg(game, net)
     params = ppo.load_params(str(run_dir), cfg)  # also checks every shape against init_network
     logits, value = ppo.network(params, jnp.asarray(float_obs), cfg)
@@ -351,8 +354,10 @@ def test_export_load_round_trip(case, tmp_path):
     path = P.export_ppo_checkpoint(
         policy, run_dir, max_turns=77, trainer="pufferlib", total_timesteps=123_456
     )
-    assert path == str(run_dir / "params.npz")
-    assert sorted(os.listdir(run_dir)) == ["config.json", "params.npz"]  # no temp files left
+    # slinky's ppo agent reads params.npz, so only its own board gets that name.
+    name = "params.npz" if env_like(game).board_shape == (21, 21, 13) else "puffer-params.npz"
+    assert path == str(run_dir / name)
+    assert sorted(os.listdir(run_dir)) == ["config.json", name]  # no temp files left
 
     with np.load(path) as f:
         template = ppo.init_network(jax.random.key(0), ppo_cfg(game, net))
@@ -497,9 +502,14 @@ def test_construction_and_loading_errors(tmp_path):
         policy, tmp_path, conv_strides=(2,), hidden=np.int64(32), mask=np.ones(2)
     )
 
-    # A checkpoint of another board or network is refused, naming the parameter.
-    with pytest.raises(ValueError, match=r"hidden/w: checkpoint shape"):
+    # A checkpoint of another board is refused, and so is one whose config and arrays disagree.
+    with pytest.raises(ValueError, match="exported for a board"):
         P.load_ppo_checkpoint(tmp_path, env_like(WRAPPED))
+    config = json.loads((tmp_path / "config.json").read_text())
+    (tmp_path / "config.json").write_text(json.dumps(dict(config, hidden=64)))
+    with pytest.raises(ValueError, match=r"hidden/w: checkpoint shape"):
+        P.load_ppo_checkpoint(tmp_path, env_like(DUEL))
+    (tmp_path / "config.json").write_text(json.dumps(config))
     with np.load(tmp_path / "params.npz") as f:
         arrays = {k: f[k] for k in f.files}
     del arrays["value/b"]
@@ -509,3 +519,74 @@ def test_construction_and_loading_errors(tmp_path):
     arrays["value/extra"] = np.zeros(1, np.float32)
     with pytest.raises(ValueError, match="unexpected parameters"):
         P.set_ppo_params(policy, arrays)
+
+
+# --- (7) Boards and the files of an export ------------------------------------------------
+
+# Boards whose default-network parameters have exactly the 11x11 board's shapes (the dense
+# layer sees ceil(ceil(n / 2) / 2) cells per side), but other channel scales.
+SAME_SHAPES = {
+    "12x12": GameConfig(width=12, height=12),
+    "11x12": GameConfig(width=11, height=12),
+    "wrapped-21x21": GameConfig(width=21, height=21, ruleset="wrapped"),
+}
+
+
+@pytest.mark.parametrize("name", SAME_SHAPES)
+def test_a_network_of_another_board_is_not_played_as_an_11x11_one(name, tmp_path):
+    game = SAME_SHAPES[name]
+    policy = randomize(make_policy(game, DEFAULT_NET))
+    duel = randomize(make_policy(DUEL, DEFAULT_NET, seed=4), seed=5)
+    shapes = {k: v.shape for k, v in P.ppo_params(policy).items()}
+    assert shapes == {
+        k: v.shape for k, v in P.ppo_params(duel).items()
+    }  # ppo.load_params can't tell
+
+    path = P.export_ppo_checkpoint(policy, tmp_path)
+    assert Path(path).name == "puffer-params.npz" and not (tmp_path / "params.npz").exists()
+    with pytest.raises(FileNotFoundError, match="no PPO checkpoint"):
+        make_agent(f"ppo:{tmp_path}", DUEL)
+    with pytest.raises(ValueError, match="exported for a board"):
+        P.load_ppo_checkpoint(tmp_path, env_like(DUEL))
+    loaded = P.load_ppo_checkpoint(tmp_path, env_like(game))
+    assert torch.equal(loaded.dense.weight, policy.dense.weight)
+
+    # The 11x11 network of the same directory is the one slinky plays, not the other.
+    P.export_ppo_checkpoint(duel, tmp_path)
+    assert sorted(os.listdir(tmp_path)) == ["config.json", "params.npz"]
+    assert make_agent(f"ppo:{tmp_path}", DUEL).needs_obs
+    with pytest.raises(ValueError, match="exported for a board"):
+        P.load_ppo_checkpoint(tmp_path, env_like(game))
+    P.export_ppo_checkpoint(policy, tmp_path)
+    assert sorted(os.listdir(tmp_path)) == ["config.json", "puffer-params.npz"]
+
+
+def test_a_ppo_py_checkpoint_loads_only_for_its_own_board(tmp_path):
+    cfg = ppo.PPOConfig(**SMALL_NET)
+    ppo.save_config(str(tmp_path), cfg)
+    ppo.save_checkpoint(str(tmp_path), ppo.init_network(jax.random.key(4), cfg))
+    assert P.load_ppo_checkpoint(tmp_path, env_like(DUEL))
+    with pytest.raises(ValueError, match="exported for a board"):
+        P.load_ppo_checkpoint(tmp_path, env_like(SAME_SHAPES["12x12"]))
+
+
+def test_a_failed_export_leaves_the_directory_as_it_was(tmp_path):
+    first = randomize(make_policy(DUEL, SMALL_NET))
+    P.export_ppo_checkpoint(first, tmp_path, tag="first")
+    kept = {name: (tmp_path / name).read_bytes() for name in os.listdir(tmp_path)}
+    second = randomize(make_policy(DUEL, SMALL_NET, seed=5), seed=6)
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        P.export_ppo_checkpoint(second, tmp_path, source=Path("x"))
+    assert {name: (tmp_path / name).read_bytes() for name in os.listdir(tmp_path)} == kept
+    with pytest.raises(TypeError):
+        P.export_ppo_checkpoint(second, tmp_path / "new", source=Path("x"))
+    assert not (tmp_path / "new").exists()
+
+
+def test_no_turn_limit_exports_with_ppos_default(tmp_path):
+    """``Battlesnake.game_config`` spells "no limit" as ``max_turns=None``."""
+    game = dict(width=11, height=11, num_snakes=2, ruleset="standard", map="standard")
+    policy = make_policy(DUEL, SMALL_NET)
+    P.export_ppo_checkpoint(policy, tmp_path, **game, max_turns=None)
+    assert json.loads((tmp_path / "config.json").read_text())["max_turns"] == P.DEFAULT_MAX_TURNS
+    assert ppo.load_config(str(tmp_path)).max_turns == P.DEFAULT_MAX_TURNS
