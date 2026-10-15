@@ -812,3 +812,91 @@ def test_page_links_to_a_run_and_labels_a_cap():
     assert "#run=" in dash.__doc__ and "directory" in dash.__doc__
     # The run card says "cap" for a multi-mode run's main phase, and a cooldown for its end.
     assert 'r.phase === "main"' in page and 'r.phase === "cooldown"' in page
+
+
+# --- Strength vs search (simsweep.jsonl) -----------------------------------------------------
+
+
+def sweep_line(mode: str, sims: int, share: float, **extra) -> str:
+    row = {
+        "type": "simsweep", "schema": 1, "point": f"{mode}-{sims}", "label": "final", "env_steps": 65_536,
+        "game_mode": mode, "simulations": sims, "play": "greedy", "chart": True, "share": share,
+        "ci95": 0.01, "games": 4096, "games_target": 4096, "complete": True,
+    }  # fmt: skip
+    return json.dumps({**row, **extra})
+
+
+def serve(root: Path):
+    dash.Handler.roots = [root]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def get_json(url: str):
+    with urllib.request.urlopen(url, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def test_simsweep_http_api(tmp_path):
+    lines = [modes_train("az_modes", s) for s in (32_768, 65_536)]
+    run = write_run(tmp_path, "az-modes-M-s0", campaign_config("az_modes"), lines)
+    write_run(tmp_path, "az-modes-M-s1", campaign_config("az_modes"), lines)  # no sweep file
+    sweep = run / "simsweep.jsonl"
+    sweep.write_text(
+        sweep_line("duel", 64, 0.5) + "\n" + sweep_line("duel", 4, 0.3) + "\n"
+        + sweep_line("duel", 64, 0.8) + "\n" + '{"type": "other"}\n' + '{"type": "simsweep", "poi'
+    )  # fmt: skip
+    server, base = serve(tmp_path)
+    try:
+        before = {s["name"]: s for s in get_json(base + "/api/runs")}
+        data = get_json(f"{base}/api/metrics?run={urllib.request.quote(before['az-modes-M-s0']['id'])}")
+        assert [(r["simulations"], r["share"]) for r in data["simsweep"]] == [(64, 0.8), (4, 0.3)]
+        other = get_json(f"{base}/api/metrics?run={urllib.request.quote(before['az-modes-M-s1']['id'])}")
+        assert other["simsweep"] == []
+        with sweep.open("a") as f:
+            f.write(sweep_line("duel", 256, 0.9) + "\n")
+        after = {s["name"]: s for s in get_json(base + "/api/runs")}
+        a, b = before["az-modes-M-s0"], after["az-modes-M-s0"]
+        assert a["version"] != b["version"] and a["updated"] == b["updated"]
+        assert before["az-modes-M-s1"]["version"] == after["az-modes-M-s1"]["version"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def sweep_rows():
+    rows = []
+    for s, shares in ((0, [0.1, 0.2, 0.3, 0.4]), (4, [0.5, 0.6, 0.7, 0.8])):
+        for m, y in zip(["standard", "duel", "royale", "constrictor"], shares, strict=True):
+            rows.append(json.loads(sweep_line(m, s, y, ci95=0.03 if m == "duel" else 0.04)))
+    rows.append(json.loads(sweep_line("duel", 16, 0.9)))  # only one mode at 16: no mean there
+    rows.append(json.loads(sweep_line("duel", 4, 0.65, ci95=0.03)))  # the last row of a point wins
+    rows.append(json.loads(sweep_line("constrictor", 0, 0.99, chart=False)))
+    rows.append(json.loads(sweep_line("duel", 0, 0.5, label="latest", env_steps=70_000)))
+    rows.append(json.loads(sweep_line("duel", 0, 0.5, label="best", env_steps=1)))
+    rows.append(json.loads(sweep_line("duel", 0, 0.5, label="snapshot", env_steps=2)))
+    return rows
+
+
+def test_page_sweep_x():
+    got = page_js("(l) => l.map((s) => sweepX(s, l))", [0, 4, 16, 64, 256, 1024])
+    assert got == pytest.approx([0, 1, 2, 3, 4, 5], abs=1e-12) or got == [-0, 1, 2, 3, 4, 5]
+    assert page_js("(l) => l.map((s) => sweepX(s, [16, 64]))", [0, 16, 64]) == [1, 2, 3]
+    assert page_js("(l) => sweepX(0, [0])", None) == -1
+
+
+def test_page_sweep_cards():
+    cards = page_js("(rows) => sweepCards({ simsweep: rows })", sweep_rows())
+    assert [(c["label"], c["env_steps"]) for c in cards] == [
+        ("final", 65_536), ("best", 1), ("latest", 70_000), ("snapshot", 2),
+    ]  # fmt: skip
+    final = cards[0]
+    assert final["levels"] == [0, 4, 16]
+    assert [p["sims"] for p in final["mean"]] == [0, 4]  # all four modes only there
+    assert final["mean"][0]["y"] == pytest.approx(0.25)
+    assert final["mean"][0]["ci"] == pytest.approx((0.04**2 * 3 + 0.03**2) ** 0.5 / 4)
+    duel4 = [p for p in final["perMode"]["duel"] if p["sims"] == 4]
+    assert [p["y"] for p in duel4] == [0.65]  # last wins
+    assert [r["game_mode"] for r in final["reference"]] == ["constrictor"]
+    assert [p["y"] for p in final["perMode"]["constrictor"]] == [0.4, 0.8]  # chart:false excluded

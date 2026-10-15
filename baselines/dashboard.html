@@ -56,6 +56,8 @@
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
   --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
 }
+.themebtn { font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--ink-2); cursor: pointer; }
+.themebtn:hover { background: var(--wash); color: var(--ink); }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }  /* over display rules such as the viewer iframe's */
 html, body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); }
@@ -109,6 +111,7 @@ button { font: inherit; color: inherit; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 8px; min-width: 0; }
 .card-head { display: flex; gap: 8px; align-items: flex-start; }
 .card h3 { font-size: 14px; font-weight: 600; margin: 0; }
+.card.wide { grid-column: 1 / -1; }
 .sub { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
 .legend { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--ink-2); margin: 0 0 4px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -168,11 +171,16 @@ th:first-child, td:first-child { text-align: left; }
 .viewer-box iframe { display: block; width: 100%; height: max(560px, calc(100vh - 190px)); border: 0; background: var(--page); }
 code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
 </style>
+<script>/* theme before first paint: "light"/"dark" from the toggle, else the system setting */
+try { const t = localStorage.getItem("slinky-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) { /* storage unavailable */ }
+</script>
 </head>
 <body>
 <main>
   <header>
     <h1>Training dashboard</h1>
+    <span style="flex: 1"></span>
+    <button id="theme" class="themebtn" type="button">Theme: auto</button>
   </header>
   <div class="tabs" role="tablist" aria-label="Views">
     <button class="tab" role="tab" type="button" id="tab-training" aria-controls="panel-training" aria-selected="true">Training</button>
@@ -195,6 +203,7 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     <p class="sub" style="margin-top:-6px">Multi-mode runs: each game mode's own training metrics, from the game_modes block of every record.</p>
     <section class="charts" id="mode-charts"></section>
   </div>
+  <div id="simsweep-section" hidden><h2>Strength vs search</h2><p class="sub" style="margin-top:-6px">AlphaZero runs: share of the win against the heuristic at each search budget (duel: win rate, draw = &frac12;), mean over the 4 game modes and per mode; bars: 95% confidence interval; 0 = the raw network (constrictor: sampled, as in the plateau checks). From &lt;run&gt;/simsweep.jsonl (campaign job simsweep).</p><section class="charts" id="simsweep-charts"></section></div>
   <h2>How snakes die in self-play</h2>
   <p class="sub" style="margin-top:-6px">Share of eliminations by cause in each logged chunk, per selected run (multi-mode runs: per game mode).</p>
   <section class="charts" id="deaths"></section>
@@ -412,6 +421,57 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     }
     return pts;
   }
+
+  // Strength vs search (AlphaZero runs): x is MCTS simulations on a log-4 axis, with 0 (the raw
+  // network) one step left of the first positive level.
+  function sweepX(sims, levels) {
+    if (sims > 0) return Math.log2(sims) / 2;  // log(s)/log(4), exact for powers of 4
+    const pos = (levels || []).filter((s) => s > 0).map((s) => Math.log2(s) / 2);
+    return (pos.length ? Math.min(...pos) : 0) - 1;
+  }
+
+  // One card per snapshot (label, env_steps) of a run's simsweep rows.
+  function sweepCards(d) {
+    const rows = Array.isArray(d.simsweep) ? d.simsweep : [];
+    const groups = new Map();
+    for (const r of rows) {
+      const key = JSON.stringify([r.label, r.env_steps]);
+      if (!groups.has(key)) groups.set(key, { label: r.label, env_steps: r.env_steps, rows: [] });
+      groups.get(key).rows.push(r);
+    }
+    const cards = [];
+    for (const g of groups.values()) {
+      const perMode = {};
+      for (const m of GAME_MODES) perMode[m] = [];
+      for (const r of g.rows) {
+        if (r.chart === false || !perMode[r.game_mode]) continue;
+        const pts = perMode[r.game_mode];
+        const p = { sims: r.simulations, y: r.share, ci: r.ci95 ?? 0, games: r.games, target: r.games_target,
+          complete: r.complete !== false, play: r.play };
+        const i = pts.findIndex((q) => q.sims === p.sims);
+        if (i >= 0) pts[i] = p; else pts.push(p);  // the last row of a point wins
+      }
+      for (const m of GAME_MODES) perMode[m].sort((a, b) => a.sims - b.sims);
+      const levels = [...new Set(GAME_MODES.flatMap((m) => perMode[m].map((p) => p.sims)))].sort((a, b) => a - b);
+      const mean = [];
+      for (const s of levels) {
+        const ps = GAME_MODES.map((m) => perMode[m].find((p) => p.sims === s));
+        if (ps.some((p) => !p)) continue;
+        mean.push({
+          sims: s,
+          y: ps.reduce((a, p) => a + p.y, 0) / ps.length,
+          ci: Math.sqrt(ps.reduce((a, p) => a + p.ci * p.ci, 0)) / ps.length,  // independent modes
+          games: Math.min(...ps.map((p) => p.games)),
+          complete: ps.every((p) => p.complete),
+        });
+      }
+      if (!levels.length) continue;
+      cards.push({ label: g.label, env_steps: g.env_steps, levels, perMode, mean,
+        reference: g.rows.filter((r) => r.chart === false) });
+    }
+    const rank = (c) => { const i = ["final", "best", "latest"].indexOf(c.label); return i < 0 ? 3 : i; };
+    return cards.sort((a, b) => rank(a) - rank(b) || b.env_steps - a.env_steps);
+  }
   // @pure-end
 
   const el = (tag, cls, text) => {
@@ -520,6 +580,7 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
   function prepare(d) {
     d.train = d.records.filter((r) => r.type === "train");
     d.evals = d.records.filter((r) => r.type === "eval");
+    d.simsweep = Array.isArray(d.simsweep) ? d.simsweep : [];
     return d;
   }
 
@@ -1003,6 +1064,156 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     return card;
   }
 
+  // --- Strength vs search: share of the win against the heuristic by MCTS simulations ----
+  function simsweepChart(run, d, sc) {
+    const train = (d.config || {}).num_simulations ?? 64;
+    const target = Math.max(0, ...GAME_MODES.flatMap((m) => sc.perMode[m].map((p) => p.target || 0)));
+    // Points played with fewer games (e.g. --games-at 1024=1024) are named, so their wider bars make sense.
+    const fewer = new Map();
+    for (const m of GAME_MODES) for (const p of sc.perMode[m]) {
+      if (p.target && p.target < target) fewer.set(p.sims, Math.max(fewer.get(p.sims) || 0, p.target));
+    }
+    const except = [...fewer].sort((a, b) => a[0] - b[0])
+      .map(([s, n]) => `${n.toLocaleString()} at ${s} sims`).join(", ");
+    const id = `simsweep:${run.id}:${sc.label}:${sc.env_steps}`;
+    const sub = `${target ? `${target.toLocaleString()} games per point${except ? ` (${except})` : ""}, ` : ""}training plays ${train} sims. Only 48 distinct constrictor start layouts (duel 96) in 4096 games: the bars cover the start-position distribution, not every layout.`;
+    const { card, toggle } = chartCard(`${run.name} · ${sc.label} (${compact(sc.env_steps)} steps)`, sub);
+    card.classList.add("wide");  // one budget axis, many series: give it the row
+    const names = [...GAME_MODES, "mean of 4 modes"];
+    card.append(legend(names.map((name, i) => ({ name, color: i < 4 ? css(`--s${i + 1}`) : css("--ink") })), "line"));
+    const plot = el("div", "plot");
+    card.append(plot);
+    const fmtCell = (p) => (p ? `${p.y.toFixed(3)} ± ${p.ci.toFixed(3)} (${p.games.toLocaleString()})` : "–");
+    const showTable = () => {
+      plot.replaceChildren();
+      const wrap = el("div", "table-wrap"), t = el("table");
+      const head = el("tr");
+      for (const h of ["Sims", ...GAME_MODES, "mean"]) head.append(el("th", null, h));
+      t.append(el("thead"));
+      t.tHead.append(head);
+      const body = el("tbody");
+      for (const s of sc.levels) {
+        const row = el("tr");
+        row.append(el("td", null, s === 0 ? "0 (raw)" : String(s)));
+        for (const m of GAME_MODES) row.append(el("td", null, fmtCell(sc.perMode[m].find((p) => p.sims === s))));
+        row.append(el("td", null, fmtCell(sc.mean.find((p) => p.sims === s))));
+        body.append(row);
+      }
+      const ref = sc.reference.filter((r) => r.simulations === 0);
+      if (ref.length) {
+        const row = el("tr");
+        const td = el("td", null, "Reference, 0 sims greedy: " + ref.map((r) => `${r.game_mode} ${r.share.toFixed(3)} ± ${(r.ci95 ?? 0).toFixed(3)} (${r.games.toLocaleString()})`).join("; "));
+        td.colSpan = GAME_MODES.length + 2;
+        row.append(td);
+        body.append(row);
+      }
+      t.append(body);
+      wrap.append(t);
+      plot.append(wrap);
+      plot.removeAttribute("tabindex"); plot.removeAttribute("role"); plot.removeAttribute("aria-label");
+      plot.onkeydown = null; plot.onblur = null;
+      reading = false;
+      $("tooltip").hidden = true;
+      toggle.setAttribute("aria-pressed", "true");
+    };
+    toggle.addEventListener("click", () => {
+      if (tableOpen.has(id)) { tableOpen.delete(id); drawPlot(); toggle.setAttribute("aria-pressed", "false"); }
+      else { tableOpen.add(id); showTable(); }
+    });
+    const drawPlot = () => {
+      plot.replaceChildren();
+      const W = Math.max(plot.clientWidth || 400, 280), H = Math.round(Math.min(460, Math.max(240, W * 0.42)));
+      const m = { l: 44, r: 14, t: 22, b: 36 };
+      const x0 = sweepX(0, sc.levels), xEnd = Math.max(...sc.levels.map((s) => sweepX(s, sc.levels)), x0 + 1);
+      const xScale = (v) => m.l + 8 + (W - m.l - m.r - 16) * ((v - x0) / (xEnd - x0));
+      const yScale = (v) => m.t + (H - m.t - m.b) * (1 - v);
+      const surface = css("--surface");
+      const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `Strength vs search, ${run.name} ${sc.label}` });
+      const text = (attrs, str) => { const t = svg("text", attrs); t.textContent = str; return t; };
+      for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+        const y = yScale(t), parity = t === 0.25 || t === 0.5;
+        root.append(svg("line", { x1: m.l, x2: W - m.r, y1: y, y2: y, stroke: css(parity ? "--muted" : "--grid"), "stroke-width": parity ? 1.5 : 1, ...(parity ? { "stroke-dasharray": "6 4" } : {}) }));
+        root.append(text({ x: m.l - 6, y: y + 4, "text-anchor": "end", class: "tick" }, t.toFixed(2)));
+        if (parity) root.append(text({ x: m.l + 6, y: y - 4, class: "tick", fill: css("--ink-2"), "font-weight": 600 }, t === 0.5 ? "parity, duel" : "parity, 4 snakes"));
+      }
+      const ax = H - m.b;
+      root.append(svg("line", { x1: m.l, x2: W - m.r, y1: ax, y2: ax, stroke: css("--axis"), "stroke-width": 1 }));
+      const firstPos = sc.levels.find((s) => s > 0);
+      if (sc.levels.includes(0) && firstPos != null) {  // axis break between 0 and the first level
+        const bx = (xScale(0) + xScale(sweepX(firstPos, sc.levels))) / 2;
+        for (const dx of [-2, 2]) root.append(svg("line", { x1: bx + dx - 3, x2: bx + dx + 3, y1: ax + 4, y2: ax - 4, stroke: css("--axis"), "stroke-width": 1 }));
+      }
+      for (const s of sc.levels) {
+        root.append(text({ x: xScale(sweepX(s, sc.levels)), y: ax + 16, "text-anchor": "middle", class: "tick" }, s === 0 ? "0 (raw)" : String(s)));
+      }
+      root.append(text({ x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", class: "tick" }, "MCTS simulations per move (log scale)"));
+      if (sc.levels.includes(train)) {
+        const tx = xScale(sweepX(train, sc.levels));
+        root.append(svg("line", { x1: tx, x2: tx, y1: m.t, y2: ax, stroke: css("--axis"), "stroke-width": 1, "stroke-dasharray": "4 3" }));
+        root.append(text({ x: tx, y: m.t - 6, "text-anchor": "middle", class: "tick" }, `training: ${train}`));
+      }
+      const series = [
+        ...GAME_MODES.map((mode, i) => ({ name: mode, color: css(`--s${i + 1}`), pts: sc.perMode[mode], dx: [-6, -2, 2, 6][i], w: 1.25, r: 2.5, alpha: 0.5 })),
+        { name: "mean of 4 modes", color: css("--ink"), pts: sc.mean, dx: 0, w: 3.5, r: 5, alpha: 1 },
+      ];
+      const px = (s, p) => xScale(sweepX(p.sims, sc.levels)) + s.dx;
+      for (const s of series) {
+        if (s.pts.length > 1) {
+          root.append(svg("polyline", { points: s.pts.map((p) => `${px(s, p)},${yScale(p.y)}`).join(" "), fill: "none", stroke: s.color, "stroke-width": s.w, opacity: s.alpha, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+        }
+        for (const p of s.pts) {
+          const x = px(s, p), lo = yScale(Math.max(0, p.y - p.ci)), hi = yScale(Math.min(1, p.y + p.ci));
+          const wh = { stroke: s.color, "stroke-width": s.alpha < 1 ? 1 : 1.5, opacity: s.alpha < 1 ? 0.35 : 0.8 };
+          root.append(svg("line", { x1: x, x2: x, y1: lo, y2: hi, ...wh }), svg("line", { x1: x - 3, x2: x + 3, y1: lo, y2: lo, ...wh }), svg("line", { x1: x - 3, x2: x + 3, y1: hi, y2: hi, ...wh }));
+          root.append(svg("circle", { cx: x, cy: yScale(p.y), r: s.r, fill: p.complete ? s.color : surface, stroke: s.color, "stroke-width": p.complete ? 2 : 1.5, opacity: s.alpha < 1 ? 0.65 : 1 }));
+        }
+      }
+      const cross = svg("line", { y1: m.t, y2: ax, stroke: css("--axis"), "stroke-width": 1, visibility: "hidden" });
+      root.append(cross);
+      plot.append(root);
+      plot.tabIndex = 0;
+      plot.setAttribute("role", "group");
+      plot.setAttribute("aria-label", "Strength vs search: use the arrow keys to read values");
+      let at = -1;
+      const show = (i, cx, cy) => {
+        at = Math.max(0, Math.min(sc.levels.length - 1, i));
+        const s = sc.levels[at], x = xScale(sweepX(s, sc.levels));
+        cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
+        const rows = [];
+        for (const ser of series) {
+          const p = ser.pts.find((q) => q.sims === s);
+          if (!p) continue;
+          const n = `${p.games.toLocaleString()}${p.complete ? "" : "/" + (p.target || 0).toLocaleString()} games`;
+          rows.push({ value: `${p.y.toFixed(3)} ± ${p.ci.toFixed(3)}`, name: `${ser.name} · ${n}${p.play === "sample" ? " · sampled" : ""}`, color: ser.color });
+        }
+        const title = `${s} sims` + (s === train ? " (training)" : "") + (s === 0 ? " (raw network)" : "");
+        const box = root.getBoundingClientRect();
+        tooltip(title, rows, cx ?? box.left + (x / W) * box.width, cy ?? box.top + box.height / 3);
+        return title;
+      };
+      const hide = () => { reading = false; cross.setAttribute("visibility", "hidden"); $("tooltip").hidden = true; };
+      root.addEventListener("pointermove", (e) => {
+        const box = root.getBoundingClientRect();
+        const vx = ((e.clientX - box.left) / box.width) * W;
+        let best = 0;
+        sc.levels.forEach((s, i) => { if (Math.abs(xScale(sweepX(s, sc.levels)) - vx) < Math.abs(xScale(sweepX(sc.levels[best], sc.levels)) - vx)) best = i; });
+        show(best, e.clientX, e.clientY);
+      });
+      root.addEventListener("pointerleave", hide);
+      plot.onkeydown = (e) => {
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+          e.preventDefault();
+          reading = true;
+          announce(show(at < 0 ? sc.levels.length - 1 : at + (e.key === "ArrowRight" ? 1 : -1)));
+        } else if (e.key === "Escape") hide();
+      };
+      plot.onblur = hide;
+    };
+    if (tableOpen.has(id)) showTable();
+    card._redraw = () => { if (!tableOpen.has(id)) drawPlot(); };
+    return card;
+  }
+
   // --- Render ---------------------------------------------------------------------------
   let drawn = "";  // what the charts show: selection, colours and data versions
   let reading = false;  // a keyboard readout is showing: don't redraw under it
@@ -1031,6 +1242,19 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     }
     $("modes-section").hidden = !modeCharts.children.length;
     if (!charts.children.length && !modeCharts.children.length) charts.append(el("p", "hint", "Select a run above to plot it."));
+    const sweeps = $("simsweep-charts");
+    sweeps.replaceChildren();
+    $("simsweep-section").hidden = false;  // shown while drawing: a hidden card has no width to size to
+    for (const r of state.runs) {
+      const d = state.data.get(r.id);
+      if (!state.colors.has(r.id) || !d || !isAZ(d)) continue;
+      for (const sc of sweepCards(d)) {
+        const card = simsweepChart(r, d, sc);
+        sweeps.append(card);
+        card._redraw && card._redraw();
+      }
+    }
+    $("simsweep-section").hidden = !sweeps.children.length;
     const deaths = $("deaths");
     deaths.replaceChildren();
     for (const r of state.runs) {
@@ -1055,6 +1279,7 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
     }, 150);
   });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawn = ""; render(); });
+  document.addEventListener("themechange", () => { drawn = ""; render(); });
 
   $("refresh").addEventListener("click", () => {
     state.auto = !state.auto;
@@ -1239,6 +1464,22 @@ code { font-size: 12px; background: var(--wash); padding: 1px 4px; border-radius
   window.addEventListener("hashchange", route);
   route();
   refresh().then(schedule);
+})();
+</script>
+<script>
+// Theme toggle: auto (follow the system) -> light -> dark, remembered in localStorage.
+(() => {
+  const btn = document.getElementById("theme"), root = document.documentElement, order = ["auto", "light", "dark"];
+  const current = () => root.dataset.theme || "auto";
+  const show = () => { btn.textContent = "Theme: " + current(); btn.title = "Switch theme (auto follows the system setting)"; };
+  btn.addEventListener("click", () => {
+    const next = order[(order.indexOf(current()) + 1) % order.length];
+    if (next === "auto") delete root.dataset.theme; else root.dataset.theme = next;
+    try { localStorage.setItem("slinky-theme", next); } catch (e) { /* storage unavailable */ }
+    show();
+    document.dispatchEvent(new Event("themechange"));
+  });
+  show();
 })();
 </script>
 </body>
