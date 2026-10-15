@@ -30,6 +30,10 @@ simulation grows only slowly with ``M`` (cache misses, deeper descents).
    joint action per level) is recorded in a small buffer, so the backup needs
    no pointer chasing: a ``while_loop`` over the tree under ``vmap`` would
    ``select`` the whole tree on every iteration.
+   On a GPU the walk is unrolled into masked steps (a finished descent stops
+   changing), with a loop test only every few steps: the test of a
+   data-dependent ``while_loop`` is a host sync there. On the CPU it stays a
+   ``while_loop``, and both forms give the same path bit for bit.
 2. *Expansion* of one node with the exact rules (head-to-heads, tail rule,
    starvation, hazards, ``max_turns`` truncation). By default
    (``spawn_food=False``) this is ``rules.rules_step`` without the map's food
@@ -48,6 +52,15 @@ simulation grows only slowly with ``M`` (cache misses, deeper descents).
    (``leaf="network"``; see *AlphaZero* below).
 4. *Backup* of the per-player value vector ``v[N]`` to every node on the path,
    one scatter-add per statistic. Each player's statistics use its own value.
+
+**Several groups at once** (:func:`search_groups`). A trainer that plays several game
+configs (a duel and 4-snake modes, say) can search a batch of games of each in one
+loop over simulations: every simulation descends all the groups' trees, expands one
+node per game and evaluates every group's new nodes with one call of a
+:data:`GroupsEvaluator` (one network evaluation over every mode instead of one per mode),
+then backs up each group. Each game's search is :func:`search`'s, bit for bit when the
+evaluator's output for a game does not depend on the other rows of its batch. Off the
+CPU the groups also descend in lockstep, with one loop test for all of them.
 
 **Move masks.** Selection only considers ``env.action_mask`` moves (those that
 do not certainly hit a wall or body). Dead snakes and snakes that certainly
@@ -267,9 +280,23 @@ _VALUES = ("win_loss", "placement")
 # they were, so turning the noise on changes nothing else about a search.
 _ROOT_NOISE_STREAM = 0x524F4F54
 
+# On a GPU every test of a data-dependent loop is a device-to-host sync. The descent there
+# runs _DESCENT_STEPS masked steps in straight-line code, then tests every _DESCENT_CHUNK
+# steps (most simulations test once). On the CPU a test is free and the masked steps only
+# add work, so the descent keeps its while_loop (``_masked_descent_on_cpu`` lets tests run
+# the GPU's form there).
+_DESCENT_STEPS = 8
+_DESCENT_CHUNK = 2
+_masked_descent_on_cpu = False
+
 # ``evaluator(state) -> (value f32[N] in [-1, 1], prior_logits f32[N, 4])`` for ONE
 # unbatched state (see :func:`search`).
 Evaluator = Callable[[State], tuple[jax.Array, jax.Array]]
+# ``(value f32[N], prior logits f32[N, 4])``: an evaluator's output for one game.
+Net = tuple[jax.Array, jax.Array]
+# ``evaluate(states) -> nets`` for :func:`search_groups`: per group, a batch of ``E_g``
+# states to ``(value f32[E_g, N_g], prior logits f32[E_g, N_g, 4])``.
+GroupsEvaluator = Callable[[tuple[State, ...]], tuple[Net, ...]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -567,25 +594,43 @@ def _evaluate(
     return value, logits
 
 
+def _evaluate_groups(
+    evaluate: GroupsEvaluator, states: tuple[State, ...], games: tuple[GameConfig, ...]
+) -> tuple[Net, ...]:
+    """Per group ``(value float32[E, N], prior logits float32[E, N, 4])`` from ``evaluate``."""
+    nets = tuple(evaluate(states))
+    if len(nets) != len(games):
+        raise ValueError(f"evaluate must return one (value, logits) per group, got {len(nets)}")
+    out = []
+    for (value, logits), state, game in zip(nets, states, games, strict=True):
+        value, logits = jnp.asarray(value, jnp.float32), jnp.asarray(logits, jnp.float32)
+        e, n = state.turn.shape[0], game.num_snakes
+        if value.shape != (e, n) or logits.shape != (e, n, NUM_ACTIONS):
+            raise ValueError(
+                f"evaluate must return (value f32[{e}, {n}], prior logits "
+                f"f32[{e}, {n}, {NUM_ACTIONS}]) for a group of {e} games, got shapes "
+                f"{value.shape} and {logits.shape}"
+            )
+        out.append((value, logits))
+    return tuple(out)
+
+
 def _leaf_value(
     key: jax.Array,
     state: State,
     mask: jax.Array,
     env: BattlesnakeEnv,
     config: MCTSConfig,
-    evaluator: Evaluator | None = None,
-) -> tuple[jax.Array, jax.Array | None]:
-    """(float32[N] value, prior logits float32[N, 4] or None) of a newly expanded node.
+    net: Net | None = None,
+) -> jax.Array:
+    """float32[N] value of a newly expanded node.
 
-    ``mask`` is its ``env.action_mask``. The logits are the evaluator's (None if
-    the config does not call it).
+    ``mask`` is its ``env.action_mask`` and ``net`` the evaluator's output for it (None if
+    the config does not call the evaluator).
     """
-    net_value = logits = None
-    if config.uses_evaluator:
-        net_value, logits = _evaluate(evaluator, state, env.config)
     if config.rollout_steps > 0:
         state = _rollout(key, state, mask, env, config)
-    return _static_value(state, env, config, net_value), logits
+    return _static_value(state, env, config, None if net is None else net[0])
 
 
 def _node_prior(logits: jax.Array | None, legal: jax.Array, config: MCTSConfig) -> jax.Array:
@@ -603,8 +648,21 @@ def _node_prior(logits: jax.Array | None, legal: jax.Array, config: MCTSConfig) 
     return jax.nn.softmax(jnp.where(legal, logits, -jnp.inf), axis=-1)
 
 
+def root_noise_draws(key: jax.Array, num_snakes: int, config: MCTSConfig) -> jax.Array:
+    """float32[N, 4]: the log-Gamma draws of ``search(key, ...)``'s root noise, to precompute.
+
+    They depend on the key alone, so a trainer can draw them for all its searches at once
+    (the rejection loops of ``loggamma`` are data-dependent) and pass them as ``root_draws``.
+    """
+    return jax.random.loggamma(
+        jax.random.fold_in(key, _ROOT_NOISE_STREAM),
+        config.root_dirichlet_alpha,
+        (num_snakes, NUM_ACTIONS),
+    )
+
+
 def _noisy_root_prior(
-    key: jax.Array, prior: jax.Array, legal: jax.Array, config: MCTSConfig
+    log_g: jax.Array, prior: jax.Array, legal: jax.Array, config: MCTSConfig
 ) -> jax.Array:
     """``(1 - frac) * prior + frac * Dirichlet(alpha)`` over each player's legal moves.
 
@@ -615,7 +673,6 @@ def _noisy_root_prior(
     draws of a row can underflow float32, and dividing by their sum then left
     rows that did not sum to 1 (5% at alpha 0.01).
     """
-    log_g = jax.random.loggamma(key, config.root_dirichlet_alpha, prior.shape)
     noise = jax.nn.softmax(jnp.where(legal, log_g, -jnp.inf), axis=-1)
     return (1.0 - config.root_noise_frac) * prior + config.root_noise_frac * noise
 
@@ -787,16 +844,18 @@ def _init_tree(
     env: BattlesnakeEnv,
     config: MCTSConfig,
     num_nodes: int,
-    evaluator: Evaluator | None = None,
-    noise_key: jax.Array | None = None,
+    net: Net | None = None,
+    root_draws: jax.Array | None = None,
 ) -> Tree:
-    """The tree with only the root; ``noise_key`` draws the root noise (if it is on)."""
+    """The tree with only the root.
+
+    ``net`` is the evaluator's output for ``state`` (if the config calls it) and
+    ``root_draws`` are the root noise's draws (if it is on).
+    """
     n = env.config.num_snakes
     j = NUM_ACTIONS**n
     mask = env.action_mask(state)
-    net_value = logits = None
-    if config.uses_evaluator:
-        net_value, logits = _evaluate(evaluator, state, env.config)
+    net_value, logits = (None, None) if net is None else net
 
     def stack(x: jax.Array) -> jax.Array:
         x = jnp.asarray(x)
@@ -810,7 +869,7 @@ def _init_tree(
         legal = _legal(state, mask, env.config)
         prior = _node_prior(logits, legal, config)
         if config.root_noise_frac > 0:
-            prior = _noisy_root_prior(noise_key, prior, legal, config)
+            prior = _noisy_root_prior(root_draws, prior, legal, config)
         prior = stack(prior.astype(jnp.float32))
 
     rm = config.selection == "rm"
@@ -831,50 +890,12 @@ def _init_tree(
     )
 
 
-def _descend(
-    tree: Tree, bits: jax.Array, config: MCTSConfig, digits: jax.Array, max_depth: int
-) -> _Descent:
-    """Selection: walk down from the root, recording the path (see the module docstring).
-
-    ``bits`` (uint32[N, 4]) is this simulation's randomness. Every depth derives
-    its own noise from it (:func:`_depth_noise`), so the moves sampled at a node
-    do not depend on those sampled at its parent.
-    """
-    n = digits.shape[1]
-    powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
-
+def _descent_init(tree: Tree, config: MCTSConfig, n: int, max_depth: int) -> _Descent:
+    """The descent's carry at the root (``n`` players)."""
     rm = config.selection == "rm"
-
-    def body(c: _Descent) -> _Descent:
-        u_d = _depth_noise(bits, c.depth)
-        rm_fields = {}
-        if rm:
-            joint, *per_node = _rm_joint(tree, c.node, u_d, config, digits)
-            names = ("rm_legal", "rm_sigma", "rm_q", "rm_seen")
-            for name, x in zip(names, per_node, strict=True):
-                rm_fields[name] = getattr(c, name).at[c.depth].set(x)
-        else:
-            select = _puct_moves if config.selection == "puct" else _duct_moves
-            joint = jnp.sum(select(tree, c.node, u_d, config) * powers)
-        child = tree.children[c.node, joint]
-        depth = c.depth + 1
-        expand = child < 0
-        node = jnp.where(expand, c.node, child)
-        stop = expand | tree.terminal[node] | (depth >= max_depth)
-        return c._replace(
-            node=node,
-            depth=depth,
-            path_node=c.path_node.at[c.depth].set(c.node),
-            path_joint=c.path_joint.at[c.depth].set(joint),
-            expand=expand,
-            stored=tree.value[node],
-            active=~stop,
-            **rm_fields,
-        )
-
     zero = jnp.zeros((), jnp.int32)
     per_move = (max_depth, n, NUM_ACTIONS)
-    init = _Descent(
+    return _Descent(
         node=zero,
         depth=zero,
         path_node=jnp.zeros((max_depth,), jnp.int32),
@@ -887,7 +908,133 @@ def _descend(
         rm_q=jnp.zeros(per_move, jnp.float32) if rm else None,
         rm_seen=jnp.zeros(per_move, bool) if rm else None,
     )
-    return jax.lax.while_loop(lambda c: c.active, body, init)
+
+
+def _descent_body(
+    tree: Tree,
+    bits: jax.Array,
+    c: _Descent,
+    config: MCTSConfig,
+    digits: jax.Array,
+    max_depth: int,
+) -> _Descent:
+    """One edge of the descent from ``c.node`` (``c`` must be active)."""
+    n = digits.shape[1]
+    powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
+    rm = config.selection == "rm"
+    u_d = _depth_noise(bits, c.depth)
+    rm_fields = {}
+    if rm:
+        joint, *per_node = _rm_joint(tree, c.node, u_d, config, digits)
+        names = ("rm_legal", "rm_sigma", "rm_q", "rm_seen")
+        for name, x in zip(names, per_node, strict=True):
+            rm_fields[name] = getattr(c, name).at[c.depth].set(x)
+    else:
+        select = _puct_moves if config.selection == "puct" else _duct_moves
+        joint = jnp.sum(select(tree, c.node, u_d, config) * powers)
+    child = tree.children[c.node, joint]
+    depth = c.depth + 1
+    expand = child < 0
+    node = jnp.where(expand, c.node, child)
+    stop = expand | tree.terminal[node] | (depth >= max_depth)
+    return c._replace(
+        node=node,
+        depth=depth,
+        path_node=c.path_node.at[c.depth].set(c.node),
+        path_joint=c.path_joint.at[c.depth].set(joint),
+        expand=expand,
+        stored=tree.value[node],
+        active=~stop,
+        **rm_fields,
+    )
+
+
+def _masked(step: Callable[[_Descent], _Descent]) -> Callable[[_Descent], _Descent]:
+    """``step`` that leaves a finished descent unchanged (what a batched ``while_loop`` does)."""
+    return lambda c: jax.tree.map(lambda new, old: jnp.where(c.active, new, old), step(c), c)
+
+
+def _walk(steps, carries, max_depth: int):
+    """The GPU descent: masked steps (no-ops once a descent stops); one loop test per chunk."""
+    cs = tuple(carries)
+    for _ in range(min(_DESCENT_STEPS, max_depth)):
+        cs = tuple(f(c) for f, c in zip(steps, cs, strict=True))
+    if _DESCENT_STEPS >= max_depth:
+        return cs
+
+    def chunk(cs):
+        for _ in range(_DESCENT_CHUNK):
+            cs = tuple(f(c) for f, c in zip(steps, cs, strict=True))
+        return cs
+
+    def active(cs):
+        return functools.reduce(jnp.logical_or, [jnp.any(c.active) for c in cs])
+
+    return jax.lax.while_loop(active, chunk, cs)
+
+
+def _descend(
+    tree: Tree, bits: jax.Array, config: MCTSConfig, digits: jax.Array, max_depth: int
+) -> _Descent:
+    """Selection: walk down from the root, recording the path (see the module docstring).
+
+    ``bits`` (uint32[N, 4]) is this simulation's randomness. Every depth derives
+    its own noise from it (:func:`_depth_noise`), so the moves sampled at a node
+    do not depend on those sampled at its parent.
+    """
+    init = _descent_init(tree, config, digits.shape[1], max_depth)
+    body = functools.partial(
+        _descent_body, tree, bits, config=config, digits=digits, max_depth=max_depth
+    )
+
+    def plain(c):
+        return jax.lax.while_loop(lambda c: c.active, body, c)
+
+    def masked(c):
+        return _walk((_masked(body),), (c,), max_depth)[0]
+
+    if _masked_descent_on_cpu:
+        return masked(init)
+    return jax.lax.platform_dependent(init, cpu=plain, default=masked)
+
+
+def _descend_groups(
+    trees: tuple[Tree, ...],
+    bits: tuple[jax.Array, ...],
+    config: MCTSConfig,
+    digits: tuple[jax.Array, ...],
+    max_depth: int,
+) -> tuple[_Descent, ...]:
+    """:func:`_descend` for every game of every group (leaves ``[E_g, ...]``).
+
+    On the CPU each group runs its own batched ``while_loop``. Elsewhere the groups walk
+    in lockstep, so one loop test covers every group's games (see :func:`search_groups`).
+    """
+
+    def per_group(trees, bits):
+        return tuple(
+            jax.vmap(functools.partial(_descend, config=config, digits=d, max_depth=max_depth))(
+                t, b
+            )
+            for t, b, d in zip(trees, bits, digits, strict=True)
+        )
+
+    def lockstep(trees, bits):
+        def step(tree, bit, d):  # one masked edge of a group's games
+            body = functools.partial(_descent_body, config=config, digits=d, max_depth=max_depth)
+            batched = jax.vmap(lambda t, b, c: _masked(functools.partial(body, t, b))(c))
+            return functools.partial(batched, tree, bit)
+
+        steps = tuple(step(t, b, d) for t, b, d in zip(trees, bits, digits, strict=True))
+        inits = tuple(
+            jax.vmap(lambda t, n=d.shape[1]: _descent_init(t, config, n, max_depth))(t)
+            for t, d in zip(trees, digits, strict=True)
+        )
+        return _walk(steps, inits, max_depth)
+
+    if _masked_descent_on_cpu:
+        return lockstep(trees, bits)
+    return jax.lax.platform_dependent(trees, bits, cpu=per_group, default=lockstep)
 
 
 def _backup(
@@ -924,12 +1071,99 @@ def _backup(
     return tree
 
 
+class _SearchKeys(NamedTuple):
+    """The randomness of one search, split from its key."""
+
+    noise: jax.Array  # uint32[num_simulations, N, 4]: each simulation's descent bits
+    spawn: jax.Array  # food spawns of the expansions (folded with the slot)
+    roll: jax.Array  # rollouts (folded with the slot)
+    final: jax.Array  # the final move (``final="sample"``)
+
+
+def _search_keys(key: jax.Array, config: MCTSConfig, n: int) -> _SearchKeys:
+    k_noise, k_spawn, k_roll, k_final = jax.random.split(key, 4)
+    noise = jax.random.bits(k_noise, (config.num_simulations, n, NUM_ACTIONS), jnp.uint32)
+    return _SearchKeys(noise, k_spawn, k_roll, k_final)
+
+
+def _expand(
+    tree: Tree,
+    path: _Descent,
+    sim: jax.Array,
+    keys: _SearchKeys,
+    env: BattlesnakeEnv,
+    config: MCTSConfig,
+    digits: jax.Array,
+) -> tuple[State, jax.Array]:
+    """(new node's state, its ``env.action_mask``): the transition from the path's leaf.
+
+    Computed unconditionally (under vmap both branches of a cond would run anyway);
+    without an expansion, slot ``sim + 1`` stays unreferenced.
+    """
+    leaf, slot = path.node, sim + 1
+    joint = path.path_joint[jnp.maximum(path.depth - 1, 0)]
+    parent = _unbatched_barrier(jax.tree.map(lambda x: x[leaf], tree.state))
+    return _transition(jax.random.fold_in(keys.spawn, slot), parent, digits[joint], env, config)
+
+
+def _record(
+    carry: tuple[Tree, jax.Array, jax.Array],
+    path: _Descent,
+    child: State,
+    mask: jax.Array,
+    net: Net | None,
+    sim: jax.Array,
+    keys: _SearchKeys,
+    env: BattlesnakeEnv,
+    config: MCTSConfig,
+    digits: jax.Array,
+) -> tuple[Tree, jax.Array, jax.Array]:
+    """Store the new node in slot ``sim + 1``, evaluate it and back up the path.
+
+    ``carry`` is ``(tree, deepest, expanded)`` and ``net`` the evaluator's output for
+    ``child`` (None if the config does not call it).
+    """
+    tree, deepest, expanded = carry
+    game = env.config
+    leaf, slot = path.node, sim + 1
+    joint = path.path_joint[jnp.maximum(path.depth - 1, 0)]
+    new_value = _leaf_value(jax.random.fold_in(keys.roll, slot), child, mask, env, config, net)
+    # Reading ``tree.value[leaf]`` here instead would make XLA copy the array.
+    value = jnp.where(path.expand, new_value, path.stored)
+    tree = tree._replace(
+        state=jax.tree.map(lambda a, x: a.at[slot].set(x), tree.state, child),
+        children=tree.children.at[
+            jnp.where(path.expand, leaf, config.num_simulations + 1), joint
+        ].set(slot, mode="drop"),
+        legal=tree.legal.at[slot].set(_legal(child, mask, game)),
+        terminal=tree.terminal.at[slot].set(child.done),
+        value=tree.value.at[slot].set(new_value),
+    )
+    if tree.prior is not None:  # (XLA merges the repeated ``_legal``)
+        prior = _node_prior(net[1] if net is not None else None, _legal(child, mask, game), config)
+        tree = tree._replace(prior=tree.prior.at[slot].set(prior.astype(jnp.float32)))
+    tree = _backup(tree, path, value, config, digits)
+    deepest = jnp.maximum(deepest, jnp.where(path.expand, path.depth, 0))
+    return tree, deepest, expanded + path.expand.astype(jnp.int32)
+
+
+def _check_root_draws(
+    root_draws: jax.Array | None, shape: tuple[int, ...], config: MCTSConfig
+) -> None:
+    if root_draws is not None and (config.root_noise_frac == 0 or root_draws.shape != shape):
+        raise ValueError(
+            f"root_draws must be float{list(shape)} and need root_noise_frac > 0, got "
+            f"shape {root_draws.shape} with root_noise_frac {config.root_noise_frac}"
+        )
+
+
 def search(
     key: jax.Array,
     state: State,
     env: BattlesnakeEnv,
     config: MCTSConfig = DEFAULT_CONFIG,
     evaluator: Evaluator | None = None,
+    root_draws: jax.Array | None = None,
 ) -> SearchOutput:
     """Run SM-MCTS from ``state`` (one unbatched game) for every player at once.
 
@@ -949,55 +1183,150 @@ def search(
     over traced arrays, such as network parameters passed into the jitted
     function, so new parameters need no recompilation. Its value is clipped to
     ``[-1, 1]``; finished states keep their exact values and dead snakes -1.
+
+    ``root_draws`` (``root_noise_draws(key, num_snakes, config)``, float32[N, 4]) are the
+    root noise's random draws when the caller has made them ahead of the search (it is
+    refused when ``root_noise_frac`` is 0): the output is the same as without.
     """
+    tree, deepest, expanded, k_final = _run(key, state, env, config, evaluator, root_draws)
+    return _output(k_final, tree, config, deepest, expanded)
+
+
+def _run(
+    key: jax.Array,
+    state: State,
+    env: BattlesnakeEnv,
+    config: MCTSConfig,
+    evaluator: Evaluator | None,
+    root_draws: jax.Array | None = None,
+) -> tuple[Tree, jax.Array, jax.Array, jax.Array]:
+    """The simulations of :func:`search`: the final tree, deepest, expanded and the final key."""
     game = env.config
     n = game.num_snakes
     _check_game(game)
     _check_evaluator(config, evaluator)
+    _check_root_draws(root_draws, (n, NUM_ACTIONS), config)
     env = env if env.obs_fn is None else _search_env(game)
     num_sims = config.num_simulations
     max_depth = min(config.max_depth, num_sims)
     digits = jnp.asarray(_digits(n))
-    k_noise, k_spawn, k_roll, k_final = jax.random.split(key, 4)
-    noise = jax.random.bits(k_noise, (num_sims, n, NUM_ACTIONS), jnp.uint32)
+    keys = _search_keys(key, config, n)
+
+    def net_of(s: State) -> Net | None:
+        return _evaluate(evaluator, s, game) if config.uses_evaluator else None
 
     def simulate(sim, carry):
-        tree, deepest, expanded = carry
-        path = _descend(tree, noise[sim], config, digits, max_depth)
-        leaf, slot = path.node, sim + 1
-        # Expansion is computed unconditionally (under vmap both branches of a
-        # cond would run anyway); without one, slot ``sim + 1`` stays unreferenced.
-        joint = path.path_joint[jnp.maximum(path.depth - 1, 0)]
-        parent = _unbatched_barrier(jax.tree.map(lambda x: x[leaf], tree.state))
-        child, mask = _transition(
-            jax.random.fold_in(k_spawn, slot), parent, digits[joint], env, config
-        )
-        new_value, new_logits = _leaf_value(
-            jax.random.fold_in(k_roll, slot), child, mask, env, config, evaluator
-        )
-        # Reading ``tree.value[leaf]`` here instead would make XLA copy the array.
-        value = jnp.where(path.expand, new_value, path.stored)
-        tree = tree._replace(
-            state=jax.tree.map(lambda a, x: a.at[slot].set(x), tree.state, child),
-            children=tree.children.at[jnp.where(path.expand, leaf, num_sims + 1), joint].set(
-                slot, mode="drop"
-            ),
-            legal=tree.legal.at[slot].set(_legal(child, mask, game)),
-            terminal=tree.terminal.at[slot].set(child.done),
-            value=tree.value.at[slot].set(new_value),
-        )
-        if tree.prior is not None:  # (XLA merges the repeated ``_legal``)
-            prior = _node_prior(new_logits, _legal(child, mask, game), config)
-            tree = tree._replace(prior=tree.prior.at[slot].set(prior.astype(jnp.float32)))
-        tree = _backup(tree, path, value, config, digits)
-        deepest = jnp.maximum(deepest, jnp.where(path.expand, path.depth, 0))
-        return tree, deepest, expanded + path.expand.astype(jnp.int32)
+        path = _descend(carry[0], keys.noise[sim], config, digits, max_depth)
+        child, mask = _expand(carry[0], path, sim, keys, env, config, digits)
+        return _record(carry, path, child, mask, net_of(child), sim, keys, env, config, digits)
 
     zero = jnp.zeros((), jnp.int32)
-    k_root = jax.random.fold_in(key, _ROOT_NOISE_STREAM) if config.root_noise_frac > 0 else None
-    tree = _init_tree(state, env, config, num_sims + 1, evaluator, k_root)
+    if config.root_noise_frac > 0 and root_draws is None:
+        root_draws = root_noise_draws(key, n, config)
+    tree = _init_tree(state, env, config, num_sims + 1, net_of(state), root_draws)
     tree, deepest, expanded = jax.lax.fori_loop(0, num_sims, simulate, (tree, zero, zero))
-    return _output(k_final, tree, config, deepest, expanded)
+    return tree, deepest, expanded, keys.final
+
+
+def search_groups(
+    keys: tuple[jax.Array, ...],
+    states: tuple[State, ...],
+    envs: tuple[BattlesnakeEnv, ...],
+    config: MCTSConfig = DEFAULT_CONFIG,
+    evaluate: GroupsEvaluator | None = None,
+    root_draws: tuple[jax.Array, ...] | None = None,
+) -> tuple[SearchOutput, ...]:
+    """:func:`search` of several groups of games (one game config each), in lockstep.
+
+    Group ``g`` is a batch of ``E_g`` games of ``envs[g]``: ``keys[g]`` holds their
+    ``E_g`` search keys and ``states[g]`` their states, and the result is the batched
+    :class:`SearchOutput` of those games. Every group shares ``config``. The output for
+    group ``g`` is ``jax.vmap(lambda k, s: search(k, s, envs[g], config, ev_g))`` of its
+    keys and states, whenever ``evaluate(states)[g]`` is ``jax.vmap(ev_g)(states[g])``:
+    ``evaluate`` takes every group's batch of states at once, so a network can evaluate
+    every group's new nodes in one call. It is required exactly when the config uses an
+    evaluator. ``root_draws[g]`` (float32[E_g, N_g, 4]) are the root noise's draws of
+    group ``g``'s games, as in :func:`search`.
+    """
+    num_groups = len(envs)
+    if len(keys) != num_groups or len(states) != num_groups:
+        raise ValueError(
+            f"search_groups needs one batch of keys and states per env, got {len(keys)} key "
+            f"batches and {len(states)} state batches for {num_groups} envs"
+        )
+    games = tuple(e.config for e in envs)
+    for game in games:
+        _check_game(game)
+    if config.uses_evaluator != (evaluate is not None):
+        raise ValueError(
+            f"leaf={config.leaf!r}, prior={config.prior!r}: search_groups needs evaluate "
+            "exactly when the config uses an evaluator (leaf or prior is 'network')"
+        )
+    sizes = tuple(s.turn.shape[0] for s in states)
+    if root_draws is None:
+        root_draws = (None,) * num_groups
+    elif len(root_draws) != num_groups:
+        raise ValueError(f"root_draws needs one array per group, got {len(root_draws)}")
+    for draws, e, game in zip(root_draws, sizes, games, strict=True):
+        _check_root_draws(draws, (e, game.num_snakes, NUM_ACTIONS), config)
+    envs = tuple(e if e.obs_fn is None else _search_env(e.config) for e in envs)
+    num_sims = config.num_simulations
+    max_depth = min(config.max_depth, num_sims)
+    digits = tuple(jnp.asarray(_digits(game.num_snakes)) for game in games)
+    g_keys = tuple(
+        jax.vmap(lambda k, n=game.num_snakes: _search_keys(k, config, n))(k)
+        for k, game in zip(keys, games, strict=True)
+    )
+    if config.root_noise_frac > 0:
+        root_draws = tuple(
+            jax.vmap(lambda k, n=game.num_snakes: root_noise_draws(k, n, config))(k)
+            if draws is None
+            else draws
+            for k, draws, game in zip(keys, root_draws, games, strict=True)
+        )
+
+    def nets_of(states: tuple[State, ...]) -> tuple[Net | None, ...]:
+        if not config.uses_evaluator:
+            return (None,) * num_groups
+        return _evaluate_groups(evaluate, states, games)
+
+    def simulate(sim, carry):
+        trees = tuple(c[0] for c in carry)
+        bits = tuple(k.noise[:, sim] for k in g_keys)
+        paths = _descend_groups(trees, bits, config, digits, max_depth)
+        new = tuple(
+            jax.vmap(lambda t, p, k, env=env, d=d: _expand(t, p, sim, k, env, config, d))(t, p, k)
+            for t, p, k, env, d in zip(trees, paths, g_keys, envs, digits, strict=True)
+        )
+        nets = nets_of(tuple(child for child, _ in new))
+        return tuple(
+            jax.vmap(
+                lambda c, p, child, mask, net, k, env=env, d=d: _record(
+                    c, p, child, mask, net, sim, k, env, config, d
+                )
+            )(c, p, child, mask, net, k)
+            for c, p, (child, mask), net, k, env, d in zip(
+                carry, paths, new, nets, g_keys, envs, digits, strict=True
+            )
+        )
+
+    carry = tuple(
+        (
+            jax.vmap(lambda s, net, d, env=env: _init_tree(s, env, config, num_sims + 1, net, d))(
+                s, net, d
+            ),
+            jnp.zeros((e,), jnp.int32),
+            jnp.zeros((e,), jnp.int32),
+        )
+        for s, net, d, env, e in zip(states, nets_of(states), root_draws, envs, sizes, strict=True)
+    )
+    carry = jax.lax.fori_loop(0, num_sims, simulate, carry)
+    return tuple(
+        jax.vmap(lambda k, t, deepest, expanded: _output(k, t, config, deepest, expanded))(
+            k.final, *c
+        )
+        for k, c in zip(g_keys, carry, strict=True)
+    )
 
 
 def _output(
