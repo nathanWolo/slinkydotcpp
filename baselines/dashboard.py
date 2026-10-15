@@ -107,6 +107,32 @@ def read_records(run: Path) -> list[dict[str, Any]]:
     return records
 
 
+def read_simsweep(run: Path) -> list[dict[str, Any]]:
+    """The run's strength-vs-search points (``simsweep.jsonl``): the last line per point wins.
+
+    Parsed as tolerantly as :func:`read_records`; a missing file gives ``[]``.
+    """
+    try:
+        lines = (run / "simsweep.jsonl").read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    points: dict[Any, dict[str, Any]] = {}
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "simsweep":
+            continue
+        key = record.get("point")
+        if key is None:
+            key = tuple(
+                str(record.get(k)) for k in ("label", "env_steps", "game_mode", "simulations", "play")
+            )
+        points[key] = record  # re-assigning a key keeps its first-seen position
+    return list(points.values())
+
+
 def algorithm(config: dict[str, Any]) -> str:
     # dqn.py's and ppo.py's config.json have no "algorithm" key (rainbow.py's,
     # reinforce.py's, az.py's and the multi-mode trainers' do: "ppo_modes", "reinforce_modes",
@@ -217,7 +243,13 @@ def _stat_metrics(run: Path) -> tuple[float, str]:
         st = (run / "metrics.jsonl").stat()
     except OSError:
         return 0.0, "missing"
-    return st.st_mtime, f"{st.st_mtime_ns}:{st.st_size}"
+    version = f"{st.st_mtime_ns}:{st.st_size}"
+    try:  # a sweep job writes simsweep.jsonl: it changes the version, not the mtime ("live")
+        sw = (run / "simsweep.jsonl").stat()
+        version += f"|sw{sw.st_mtime_ns}:{sw.st_size}"
+    except OSError:
+        pass
+    return st.st_mtime, version
 
 
 def _number(x: Any) -> int | float | None:
@@ -409,7 +441,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             read = read_run(run)
             self._json(
-                {**run_summary(run_id, run, read), "config": read_config(run), "records": read[0]}
+                {**run_summary(run_id, run, read), "config": read_config(run),
+                    "records": read[0], "simsweep": read_simsweep(run)}
             )
         elif url.path == "/api/replays":
             listed = []
