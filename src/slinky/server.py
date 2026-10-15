@@ -522,9 +522,12 @@ class MoveLedger:
     Each answer appends one line to ``path`` (when given): time, snake, game, turn,
     ruleset, map, snake count, source (e.g. ``ladder``), the game's timeout in ms,
     the agent, the move, our compute ms and ``prev``, the verdict on this game's
-    previous answer (``applied``, ``missed``, ``gap`` or None). ``/end`` adds a line
-    with ``"end": true`` and the verdict on the last answer. Detected misses are
-    also logged as warnings.
+    previous answer (``applied``, ``missed``, ``gap`` or None), plus ``wall`` (ms from
+    the request reaching the handler to the answer sent) and ``colo`` (the Cloudflare
+    data centre of the request's ``Cf-Ray``) when known. A timeout with a short
+    ``wall`` was lost outside the server. ``/end`` adds a line with ``"end": true``
+    and the verdict on the last answer (None when our snake died before the end: the
+    engine stops asking a dead snake). Detected misses are also logged as warnings.
     """
 
     def __init__(self, path: str | None = None) -> None:
@@ -554,10 +557,12 @@ class MoveLedger:
 
     def record(
         self, snake: str, req: dict[str, Any], move: str | None, agent: str, ms: float,
-        end: bool = False,
+        end: bool = False, wall_ms: float | None = None, colo: str | None = None,
     ) -> str | None:  # fmt: skip
         """Judge the previous answer, remember this one (``move``; None at ``/end``)."""
         verdict = self.verdict(snake, req)
+        if end and verdict == "gap":
+            verdict = None  # our snake died earlier; nothing was asked since
         game = req.get("game", {}) if isinstance(req.get("game"), dict) else {}
         key = (snake, str(game.get("id")))
         try:
@@ -587,6 +592,10 @@ class MoveLedger:
                 "timeout": game.get("timeout"), "agent": agent, "move": move,
                 "ms": round(ms, 1), "prev": verdict,
             }  # fmt: skip
+            if wall_ms is not None:
+                line["wall"] = round(wall_ms, 1)
+            if colo:
+                line["colo"] = colo
             if end:
                 line["end"] = True
             try:
@@ -653,6 +662,7 @@ def make_handler(
             self._send(200, snakes[route[0]][1])
 
         def do_POST(self) -> None:
+            t_in = time.perf_counter()
             route = self._route()
             if route is None or route[1] not in ("start", "move", "end"):
                 self._send(404, {"error": "not found"})
@@ -697,8 +707,13 @@ def make_handler(
                     name,
                     ms,
                 )
+                wall = (time.perf_counter() - t_in) * 1e3
+                ray = self.headers.get("Cf-Ray", "")  # "<id>-<colo>" behind Cloudflare
                 try:
-                    ledger.record(snake, req, MOVE_NAMES[action], name, ms)
+                    ledger.record(
+                        snake, req, MOVE_NAMES[action], name, ms, wall_ms=wall,
+                        colo=ray.rpartition("-")[2] or None,
+                    )  # fmt: skip
                 except Exception:  # bookkeeping must never break play
                     log.exception("%s game %s: move ledger", snake, game)
             elif path == "start":
