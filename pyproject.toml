@@ -3,6 +3,7 @@ name = "slinky"
 version = "0.1.0"
 description = "A fast, rules-exact Battlesnake environment in JAX for reinforcement learning research"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "jax>=0.4.30",
