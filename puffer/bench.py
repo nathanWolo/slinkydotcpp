@@ -4,20 +4,27 @@
 
     .venv-puffer/bin/python puffer/bench.py                       # the four modes, markdown table
     .venv-puffer/bin/python puffer/bench.py --modes duel --num-envs 1024 --seconds 5
+    .venv-puffer/bin/python puffer/bench.py --policies random_legal --observations yes
     .venv-puffer/bin/python puffer/bench.py --train-sps           # also ~60 s of training
     .venv-puffer/bin/python puffer/bench.py --train-sps --device cuda --num-envs 512
 
-*Environment.* One process and one thread step the C games with uniformly random actions
-(``puffer.battlesnake.benchmark``: 1024 pre-generated rows of actions, 16 warm-up steps),
-so this is the raw cost of the rules, the autoreset and the statistics, with and without
-the observations. An *agent step* is one agent slot advancing one turn (PufferLib's unit,
-as in the trainer's steps per second): the slots of snakes that have died and wait for the
-game to end count too. A *game step* is a whole game advancing one turn (``num_snakes``
-agent steps). Uniformly random moves, which include reversing into the neck, end a duel
-after about 3 turns and a 4-snake game after about 4, so the autoreset (a new game) is a
-large share of the work: the figures are for that workload, most of all those without
-observations. Each cell is the best of ``--repeats`` timed runs, which keeps scheduler
-noise from lowering it.
+*Environment.* One process and one thread step the C games under a random policy
+(``puffer.battlesnake.benchmark``, 16 warm-up steps), so this is the raw cost of the rules,
+the autoreset and the statistics, with and without the observations. ``--policies`` picks
+the policies:
+
+* ``random_legal``: uniformly random among the legal moves, read from each observation's
+  mask (slinky's ``random_legal_policy``, the default of ``benchmarks/throughput.py``).
+  Games last tens of turns, as in training. Needs the observations, so it is skipped in the
+  rows without them.
+* ``random``: uniformly random moves (1024 pre-generated rows), reversing into the neck
+  included, which end a duel after about 3 turns and a 4-snake game after about 4: the
+  autoreset (a new game) is then a large share of the work.
+
+An *agent step* is one agent slot advancing one turn (PufferLib's unit, as in the trainer's
+steps per second): the slots of snakes that have died and wait for the game to end count
+too. A *game step* is a whole game advancing one turn (``num_snakes`` agent steps). Each
+cell is the best of ``--repeats`` timed runs, which keeps scheduler noise from lowering it.
 
 Observations dominate: each agent's is 5737 bytes on an 11x11 board, so at about a million
 agent steps a second the environment writes several GB/s. PuffeRL's ``Multiprocessing``
@@ -58,11 +65,21 @@ def cpu_description() -> str:
     return f"{model} ({os.cpu_count()} logical cores)"
 
 
-def measure(mode: str, num_envs: int, observations: bool, seconds: float, repeats: int) -> float:
+POLICIES = ("random_legal", "random")
+
+
+def measure(
+    mode: str,
+    num_envs: int,
+    observations: bool,
+    seconds: float,
+    repeats: int,
+    policy: str = "random",
+) -> float:
     """The best agent-steps per second of ``repeats`` runs of ``mode`` with ``num_envs`` games."""
     env = Battlesnake(num_envs=num_envs, mode=mode, compute_obs=observations)
     try:
-        return max(benchmark(env, seconds) for _ in range(repeats))
+        return max(benchmark(env, seconds, policy=policy) for _ in range(repeats))
     finally:
         env.close()
 
@@ -73,22 +90,30 @@ def environment_table(
     observations: Sequence[bool],
     seconds: float,
     repeats: int,
+    policies: Sequence[str] = ("random",),
 ) -> str:
-    """Markdown table of the environment's throughput, one row per configuration."""
+    """Markdown table of the environment's throughput, one row per configuration.
+
+    ``random_legal`` needs the observations, so it has no rows without them.
+    """
     rows = [
-        "| mode | snakes | games (num_envs) | observations | agent-steps/s | game-steps/s |",
-        "|---|---:|---:|---|---:|---:|",
+        "| mode | snakes | games (num_envs) | observations | policy | agent-steps/s "
+        "| game-steps/s |",
+        "|---|---:|---:|---|---|---:|---:|",
     ]
     for mode in modes:
         snakes = MODES[mode][2]
         for n in num_envs:
             for obs in observations:
-                agent_steps = measure(mode, n, obs, seconds, repeats)
-                rows.append(
-                    f"| {mode} | {snakes} | {n} | {'yes' if obs else 'no'} "
-                    f"| {agent_steps:,.0f} | {agent_steps / snakes:,.0f} |"
-                )
-                print(".", end="", file=sys.stderr, flush=True)  # progress
+                for policy in policies:
+                    if policy == "random_legal" and not obs:
+                        continue
+                    agent_steps = measure(mode, n, obs, seconds, repeats, policy)
+                    rows.append(
+                        f"| {mode} | {snakes} | {n} | {'yes' if obs else 'no'} | {policy} "
+                        f"| {agent_steps:,.0f} | {agent_steps / snakes:,.0f} |"
+                    )
+                    print(".", end="", file=sys.stderr, flush=True)  # progress
     print(file=sys.stderr)
     return "\n".join(rows)
 
@@ -127,6 +152,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--modes", default=",".join(MODES), help="comma-separated game modes")
     parser.add_argument("--num-envs", default="64,256,1024", help="comma-separated game counts")
     parser.add_argument("--observations", choices=("both", "yes", "no"), default="both")
+    parser.add_argument(
+        "--policies",
+        default=",".join(POLICIES),
+        help="comma-separated: random_legal (legal moves, needs observations), random",
+    )
     parser.add_argument("--seconds", type=float, default=2.0, help="timed seconds per run")
     parser.add_argument("--repeats", type=int, default=2, help="runs per cell (best is shown)")
     parser.add_argument("--train-sps", action="store_true", help="also measure PuffeRL training")
@@ -138,11 +168,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         modes = [m.strip() for m in args.modes.split(",") if m.strip()]
         sizes = [int(n) for n in args.num_envs.split(",") if n.strip()]
         observations = {"both": (True, False), "yes": (True,), "no": (False,)}[args.observations]
+        policies = [p.strip() for p in args.policies.split(",") if p.strip()]
+        for policy in policies:
+            if policy not in POLICIES:
+                parser.error(f"unknown policy {policy!r}; expected one of {', '.join(POLICIES)}")
         print(
-            f"CPU: {cpu_description()}; single process, one thread; uniformly random actions "
-            "(short games), dead snakes' waiting slots counted\n"
+            f"CPU: {cpu_description()}; single process, one thread; "
+            "dead snakes' waiting slots counted\n"
         )
-        print(environment_table(modes, sizes, observations, args.seconds, args.repeats))
+        print(environment_table(modes, sizes, observations, args.seconds, args.repeats, policies))
     if args.train_sps:
         print(f"\nPuffeRL training for {args.train_seconds:.0f} s on {cpu_description()}\n")
         print(training_table(train_argv, args.train_seconds))

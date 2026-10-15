@@ -181,7 +181,9 @@ class Battlesnake(pufferlib.PufferEnv):
             max_turns=max_turns or None,
         )
         self.board_shape = obs_format.board_shape(width, height, self.wrapped)
+        self.board_size = obs_format.board_size(width, height, self.wrapped)
         self.obs_size = obs_format.obs_size(width, height, self.wrapped)
+        self.compute_obs = bool(compute_obs)
         self.channel_scale = obs_format.channel_scale(width, height)
         self.single_observation_space = gymnasium.spaces.Box(
             low=0, high=255, shape=(self.obs_size,), dtype=np.uint8
@@ -264,19 +266,49 @@ def env_creator(name: str = "battlesnake"):
     raise ValueError(f"unknown environment {name!r}")
 
 
-def benchmark(env: Battlesnake, seconds: float = 3.0, cache: int = 1024) -> float:
-    """Agent-steps per second of ``env.step`` with uniformly random int32 actions."""
+def benchmark(
+    env: Battlesnake, seconds: float = 3.0, cache: int = 1024, policy: str = "random"
+) -> float:
+    """Agent-steps per second of ``env.step`` under a random policy.
+
+    ``policy`` is ``"random"`` (uniformly random int32 actions, pre-generated) or
+    ``"random_legal"`` (uniformly random among the moves the observation's mask allows, as
+    slinky's ``random_legal_policy``; needs ``compute_obs``). The policy's own cost, a few
+    numpy operations per step, is timed too, as slinky's benchmark times its policy.
+    """
     import time
 
+    if policy not in ("random", "random_legal"):
+        raise ValueError(f"unknown policy {policy!r}; expected 'random' or 'random_legal'")
+    if policy == "random_legal" and not env.compute_obs:
+        raise ValueError("random_legal reads the mask from the observations: needs compute_obs")
     rng = np.random.default_rng(0)
-    actions = rng.integers(0, 4, (cache, env.num_agents), dtype=np.int32)
+    mask = env.observations[:, env.board_size : env.board_size + obs_format.MASK_SIZE]
+    if policy == "random":
+        actions = rng.integers(0, 4, (cache, env.num_agents), dtype=np.int32)
+
+        def act(t: int) -> np.ndarray:
+            return actions[t % cache]
+
+    else:
+        # Random scores, zeroed on illegal moves: the argmax is uniform over the legal ones
+        # (the mask is never all zeros). 64 rows of scores cycle, which is random enough here.
+        scores = rng.random((64, env.num_agents, obs_format.MASK_SIZE), dtype=np.float32) + 1e-3
+        legal = np.empty((env.num_agents, obs_format.MASK_SIZE), np.float32)
+        chosen = np.empty(env.num_agents, np.int32)
+
+        def act(t: int) -> np.ndarray:
+            np.multiply(scores[t % 64], mask, out=legal)
+            chosen[:] = legal.argmax(axis=1)
+            return chosen
+
     env.reset(0)
     for t in range(16):  # warm up
-        env.step(actions[t])
+        env.step(act(t))
     steps, start = 0, time.perf_counter()
     while (elapsed := time.perf_counter() - start) < seconds:
         for _ in range(32):
-            env.step(actions[steps % cache])
+            env.step(act(steps))
             steps += 1
     return env.num_agents * steps / elapsed
 
@@ -289,12 +321,16 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=1024)
     parser.add_argument("--seconds", type=float, default=3.0)
     parser.add_argument("--no-obs", action="store_true")
+    parser.add_argument("--policy", choices=("random", "random_legal"), default="random")
     args = parser.parse_args()
     env = Battlesnake(num_envs=args.num_envs, mode=args.mode, compute_obs=not args.no_obs)
-    sps = benchmark(env, args.seconds)
+    sps = benchmark(env, args.seconds, policy=args.policy)
     env.close()
     obs = "without" if args.no_obs else "with"
-    print(f"{args.mode}: {env.num_agents} agents, {obs} observations: {sps:,.0f} agent-steps/s")
+    print(
+        f"{args.mode}: {env.num_agents} agents, {obs} observations, {args.policy}: "
+        f"{sps:,.0f} agent-steps/s"
+    )
 
 
 if __name__ == "__main__":

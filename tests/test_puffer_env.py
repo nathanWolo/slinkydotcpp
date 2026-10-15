@@ -1563,3 +1563,29 @@ def test_env_creator():
     assert env.game_config["ruleset"] == "royale" and env.num_agents == 8
     with pytest.raises(ValueError):
         battlesnake.env_creator("battlesnake_chess")
+
+
+def test_benchmark_policies():
+    from puffer import bench
+
+    env = battlesnake.Battlesnake(num_envs=4, mode="duel")
+    try:
+        for policy in ("random", "random_legal"):
+            assert battlesnake.benchmark(env, seconds=0.05, cache=8, policy=policy) > 0
+        with pytest.raises(ValueError, match="unknown policy"):
+            battlesnake.benchmark(env, seconds=0.05, policy="greedy")
+    finally:
+        env.close()
+    env = battlesnake.Battlesnake(num_envs=4, mode="duel", compute_obs=False)
+    try:
+        with pytest.raises(ValueError, match="needs compute_obs"):
+            battlesnake.benchmark(env, seconds=0.05, policy="random_legal")
+    finally:
+        env.close()
+    table = bench.environment_table(["duel"], [4], [True, False], 0.02, 1, bench.POLICIES)
+    rows = [line.split("|")[4:6] for line in table.splitlines()[2:]]
+    assert [[c.strip() for c in r] for r in rows] == [
+        ["yes", "random_legal"],
+        ["yes", "random"],
+        ["no", "random"],
+    ]
