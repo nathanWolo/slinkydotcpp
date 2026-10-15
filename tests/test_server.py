@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from slinky import modes
 from slinky.agents import make_agent, make_env, parse_agent
 from slinky.engine_json import state_to_engine
 from slinky.rules import royale_hazards, rules_step
