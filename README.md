@@ -17,6 +17,13 @@ algorithms.
   (start positions, food, hazards) are separate pieces, as in the official
   engine.
 
+On top of the environment the repository has RL trainers (DQN, Rainbow DQN,
+PPO, REINFORCE and AlphaZero, for the duel and for one network that plays all
+four leaderboard modes), a heuristic snake and MCTS, benchmarks, a live
+training dashboard, a server for play.battlesnake.com and a PufferLib port.
+[`RELEASE_NOTES.md`](RELEASE_NOTES.md) summarises the current release (v0.1.0)
+and its results.
+
 ## Quickstart
 
 ```bash
@@ -107,8 +114,10 @@ states, ts = batch_reset(jax.random.split(key, 4096))
     food roll; see `docs/battlesnake/ENGINE_RULES.md`.)
   - `map_state` holds the whole game's sides, so it shows the future zone.
     Observations and the heuristic never read it, but a search that simulates
-    from a state would see the true future shrinks; redraw `sides[turn // N:]`
-    at the search root if royale search is ever used.
+    from a state sees the true future shrinks, as the `az-*` and `az_modes`
+    searches do in training and in the benchmarks. `slinky.server` builds the
+    sides from the request instead, so on the ladder the search does not know
+    the future shrinks.
 - **Action mask:** masks out a move only if it certainly hits a wall or a
   body next turn, whatever the other snakes do.
   - It applies the tail rule exactly: a tail square is open unless that tail
@@ -263,6 +272,12 @@ in [`benchmarks/README.md`](benchmarks/README.md); the multi-mode tables are in
   - Specialists retrained with its 16 minibatches (standard, duel, royale) are
     no stronger head to head, so its lead there is not its extra gradient
     steps.
+- **Multi-mode REINFORCE, DQN, Rainbow and AlphaZero**
+  (`baselines/{reinforce,dqn,rainbow,az}_modes.py`, on `slinky.unified`): the
+  same design for the other algorithms, at three network sizes (`--size
+  S|M|L`), with `benchmarks/plateau.py` to stop a run when its strength stops
+  rising. Their networks are not in `baselines/checkpoints/`; results from
+  one training campaign are in [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 - **PPO in PufferLib** (`puffer/`, see [`puffer/README.md`](puffer/README.md)):
   the game ported to C as a [PufferLib](https://github.com/PufferAI/PufferLib)
   3.0 environment (checked against slinky and the engine), and ppo.py's network
@@ -330,10 +345,16 @@ python -m slinky.server --agent az-256 --agent best=az-256:runs/az-x   # two sna
   `name` in `--agent name=agent` (needed when the agent names a run directory).
   Register `<server>/<name>` as the Battlesnake's URL.
 
-- **Who plays.** The trained baselines play only the game they learned, the
-  11×11 duel. Other standard games get the heuristic (`--fallback`), compiled
-  for that board in the background; other rulesets, and a new board until it
-  has compiled, get a simple safe-move picker.
+- **Who plays.** A multi-mode agent (`ppo_modes`, `az_modes` and the other
+  `*_modes` kinds) plays every 11×11 game of the four leaderboard modes,
+  including royale and constrictor on the empty map, told the game's mode.
+  The other trained baselines play only the game they learned, the 11×11
+  duel. Other games get the heuristic (`--fallback`), compiled for that board
+  in the background; rulesets and maps the server has no config for (wrapped,
+  solo, ...), and a new board until it has compiled, get a simple safe-move
+  picker.
+- **Move log.** `--move-log FILE` appends a JSON line per answer and flags
+  answers the engine did not apply (a lower bound on timeouts).
 - **Speed.** A duel move takes about 2 ms of compute on a laptop CPU, and
   about 4 ms round trip locally; 16 games' moves arriving together are all
   answered within 60 ms.
@@ -341,6 +362,9 @@ python -m slinky.server --agent az-256 --agent best=az-256:runs/az-x   # two sna
   behind NAT needs a tunnel (e.g. `cloudflared tunnel --url
   http://127.0.0.1:8000`) or a forwarded port. Register that URL as a
   Battlesnake on play.battlesnake.com.
+- **Without a server.** `deploy/lambda/` runs the search-free trained networks
+  (`ppo`, `reinforce`, `dqn`, `rainbow`, `az-0`) in plain NumPy on AWS Lambda
+  behind one Function URL; see `build.sh` and `deploy.sh` there.
 
 ## How it works
 
@@ -363,8 +387,15 @@ engine's stage order; see
 ## Rules fidelity and tests
 
 ```bash
-.venv/bin/python -m pytest            # ~2-4 minutes; the oracle tests need Go >= 1.22
+.venv/bin/python -m pytest                       # the oracle tests need Go >= 1.22
+.venv/bin/python -m pytest tests/test_rules.py    # one file
 ```
+
+The AlphaZero and search tests (`test_mcts.py`, `test_az.py`,
+`test_search_reference.py`) compile large programs and can use a few GB of
+memory; on a small machine, run the suite one file at a time. The dashboard
+and replay-viewer tests need Node.js, and `tests/test_puffer_*.py` run only in
+the PufferLib venv (`puffer/README.md`); elsewhere they are skipped.
 
 `tools/oracle` is a small Go program that links the official rules engine.
 It is only used for testing; see its README. The tests use it in three ways:
@@ -439,7 +470,8 @@ reaches 4.3M against slinky's 559k (batch 8,192), 7.7×. The outputs are in
 2. **More modes:**
    - hazard maps other than royale, and healing pools (royale is done);
    - official API JSON (`/move` request) conversion, so a trained policy can
-     play on the real Battlesnake servers.
+     play on the real Battlesnake servers (done: `slinky.server`, and
+     `deploy/lambda/`).
 3. **Baselines:**
    - self-play DQN and Rainbow DQN, with a live training dashboard (done; see
      `baselines/`);
@@ -449,8 +481,9 @@ reaches 4.3M against slinky's 559k (batch 8,192), 7.7×. The outputs are in
    - population or league training;
    - AlphaZero-style search with a learned value and policy, on top of
      `slinky.mcts` (done; see `baselines/` and `benchmarks/README.md`);
-   - one policy for all four leaderboard modes, told the mode (done; see
-     `baselines/` and `docs/research/multimode_constrictor.md`).
+   - one policy for all four leaderboard modes, told the mode (done for all
+     five algorithms; see `baselines/`, `docs/research/multimode_constrictor.md`
+     and `RELEASE_NOTES.md`).
    - the game in C as a PufferLib environment, trained with PufferLib's PPO
      (done; see `puffer/`).
 
@@ -461,14 +494,17 @@ src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   engine_json, policies, evaluate (matches between policies),
                   heuristic (hand-written snake), mcts (simultaneous-move MCTS),
                   agents (named-agent registry), replay (+ viewer.html), modes (the
-                  four leaderboard modes and the multi-mode policy's side inputs)
-baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN, REINFORCE, AlphaZero and
-                  multi-mode PPO), their checkpoints and a live training dashboard (dashboard.py)
+                  four leaderboard modes and the multi-mode policy's side inputs),
+                  unified (shared code of the multi-mode trainers), server
+                  (Battlesnake API server)
+baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN, REINFORCE and AlphaZero, each
+                  also multi-mode), their checkpoints and a live training dashboard (dashboard.py)
 puffer/           the game in C as a PufferLib 3.0 environment, ppo.py's network in PyTorch,
                   training with PufferLib's trainer (its own venv: puffer/README.md)
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
-benchmarks/       throughput, strength and mode benchmarks, results/ (their data)
+benchmarks/       throughput, strength and mode benchmarks, the plateau watcher, results/
+deploy/lambda/    the search-free networks in NumPy as an AWS Lambda snake
 docs/research/    literature notes (simultaneous-move MCTS, Battlesnake heuristics) and
                   the multi-mode constrictor investigation
 docs/battlesnake/ official rules/API docs (MIT) + ENGINE_RULES.md
