@@ -28,6 +28,16 @@
 //! * [`Network::config`]`() -> &NetConfig`: includes `c_puct`, `fpu_reduction`, `draw_value`,
 //!   `hide_constrictor_food`, `game_modes` for the search and observation crates.
 //! * [`Network::num_params`], [`Network::scratch`].
+//! * [`Network::quantize_hidden_int8`]`(&mut self, on: bool)`: experimental, off by default (an
+//!   int8 hidden layer: 4x less weight memory, outputs off by up to ~1e-1; see its docs).
+//!
+//! # Speed
+//!
+//! The forward pass works on compressed non-zero activations and skips pixels that only see
+//! zero padding (see the `network` module docs). `cargo run --release -p slinky-net --example
+//! bench -- <run dir> <golden cases.npz>` measures it: for the M net on real states, one x86-64
+//! core (Ryzen 7 5800XT, SSE2 baseline build) takes about 18 us per board at batch 1, 2, 4 or 8
+//! (the first plain version took 50 us).
 //!
 //! The raw feature vector goes in: for `features = "no_mode"` the network masks the one-hot and
 //! shrink phase itself, for `"none"` it ignores the features. Food hiding in constrictor
