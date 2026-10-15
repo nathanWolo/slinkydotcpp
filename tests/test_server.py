@@ -220,8 +220,8 @@ def server():
     srv.shutdown()
 
 
-def _post(url: str, body: bytes) -> tuple[int, dict]:
-    req = urllib.request.Request(url, body, {"Content-Type": "application/json"})
+def _post(url: str, body: bytes, headers: dict | None = None) -> tuple[int, dict]:
+    req = urllib.request.Request(url, body, {"Content-Type": "application/json", **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             return r.status, json.loads(r.read())
@@ -750,10 +750,12 @@ def test_move_ledger_judges_each_answer(tmp_path) -> None:
     # /end judges the last answer (here: the snake ran into the wall as told) and forgets the game.
     assert ledger.record("s", ledger_request(6, 4, 6), None, "", 0.0, end=True) == "applied"
     assert ledger.record("s", ledger_request(7, 4, 7), "up", "az", 1.0) is None
+    # Our snake died after turn 7: /end comes at turn 20 and is not a gap.
+    assert ledger.record("s", ledger_request(20, 4, 8), None, "", 0.0, end=True) is None
     lines = [json.loads(line) for line in path.read_text().splitlines()]
     assert [r["prev"] for r in lines] == [
-        None, "applied", "applied", "missed", "gap", None, None, "applied", None
-    ]
+        None, "applied", "applied", "missed", "gap", None, None, "applied", None, None
+    ]  # fmt: skip
     assert lines[3] | {"t": 0} == {
         "t": 0, "snake": "s", "game": "g", "turn": 3, "ruleset": "standard", "map": "standard",
         "snakes": 2, "source": "ladder", "timeout": 500, "agent": "az", "move": "down",
@@ -785,7 +787,7 @@ def test_http_moves_are_logged(tmp_path) -> None:
         req = api_request(state_to_engine(state, DUEL), 0, game_id="logged")
         body = json.dumps(req).encode()
         assert _post(url + "/start", body) == (200, {})
-        code, answer = _post(url + "/move", body)
+        code, answer = _post(url + "/move", body, {"Cf-Ray": "8d0f2a7b1c3e4f56-SEA"})
         assert code == 200
         # Play our answer: the next request's head is one step that way.
         dx, dy = API_DELTAS[answer["move"]]
@@ -798,5 +800,6 @@ def test_http_moves_are_logged(tmp_path) -> None:
     lines = [json.loads(line) for line in path.read_text().splitlines()]
     assert [(r["move"], r["prev"], r.get("end", False)) for r in lines] == [
         (answer["move"], None, False), (None, "applied", True)
-    ]
+    ]  # fmt: skip
     assert lines[0]["agent"] and lines[0]["ms"] > 0 and lines[0]["game"] == "logged"
+    assert lines[0]["wall"] >= lines[0]["ms"] and lines[0]["colo"] == "SEA"
