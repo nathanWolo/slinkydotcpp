@@ -2,7 +2,9 @@
 
 Single-file reinforcement-learning baselines for the 1v1 duel (11×11,
 standard rules), trained by self-play on slinky, and one network for all four
-leaderboard modes ([multi-mode PPO](#multi-mode-ppo-ppo_modespy)).
+leaderboard modes ([multi-mode PPO](#multi-mode-ppo-ppo_modespy)). The table
+also lists a PPO trained with PufferLib on a C port of the game
+([`puffer/`](../puffer/README.md)).
 
 | baseline | file | training | vs `random_legal` | vs heuristic | checkpoint |
 |---|---|---|---|---|---|
@@ -11,10 +13,12 @@ leaderboard modes ([multi-mode PPO](#multi-mode-ppo-ppo_modespy)).
 | Rainbow DQN | `rainbow.py` | 81 min, 1.28M env steps | 0.983 | 0.084 | `checkpoints/rainbow-duel-seed0/` |
 | AlphaZero (`az-64`) | `az.py` | 9.7 h, 8.39M env steps | 0.999 | 0.853 | `checkpoints/az-duel-seed0/` |
 | Multi-mode PPO (generalist, in the duel) | `ppo_modes.py` | 9.75 h, 21M env steps (5.24M per mode) | 1.000 | 0.388 | `checkpoints/ppo-modes-seed0/` |
+| PPO in PufferLib | `../puffer/train.py` | 60 min, 19.7M env steps | 0.996 | 0.434 | `checkpoints/puffer-duel-seed0/` |
 
 - **Hardware:** the DQN and PPO trained on a 4-core cloud CPU (PPO pinned to
   3 cores), Rainbow on a thermally throttled laptop CPU, AlphaZero on the
-  4-core cloud CPU, multi-mode PPO on 2 pinned cores of it; no GPU.
+  4-core cloud CPU, multi-mode PPO on 2 pinned cores of it, PPO in PufferLib
+  on all 4 cores; no GPU.
 - **AlphaZero** is scored as `az-64`: the network with 64 simulations of
   search per move (7 ms per move with 32 games in flight on one core). The
   raw network alone (`az-0`) scores
@@ -35,6 +39,15 @@ leaderboard modes ([multi-mode PPO](#multi-mode-ppo-ppo_modespy)).
   in standard, the duel and royale, and has no overall gain in constrictor
   (level under sampled play).
   See [multi-mode PPO](#multi-mode-ppo-ppo_modespy).
+- **PPO in PufferLib** is ppo.py's network trained with PufferLib 3.0's
+  PyTorch trainer on a C port of the game, with `puffer/train.py`'s defaults.
+  It is not a single-file baseline: it lives in [`puffer/`](../puffer/README.md),
+  with its results. Its 60 minutes include evaluation, as the other rows do (57
+  of training). Its scores are from the strength benchmark (1,024 games
+  each; `benchmarks/results/puffer.jsonl`). It beats PPO 0.620 and the DQN
+  0.857, and is level with `az-0` head to head (0.501). Trained with ppo.py's
+  settings and budget instead (`checkpoints/puffer-duel-matched-seed0/`, 33
+  minutes with evaluation) it scores 0.999 and 0.198, and 0.396 against PPO.
 
 ### The three compared
 

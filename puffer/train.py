@@ -10,7 +10,8 @@
 A *step* here is an *agent step* (one agent slot advancing one turn), PufferLib's unit; a
 duel game turn is two. In games of 3 or more snakes the slots of snakes that have died and
 wait for the game to end count too (and are averaged into the losses, entropy and KL: PuffeRL
-cannot drop rows): under random legal play that is a fifth to a third of the rows.
+cannot drop rows): under random legal play that is a fifth to a third of the rows with 4
+snakes, and more with more snakes.
 ``--device cuda`` runs on NVIDIA and, with a ROCm build of PyTorch (which exposes AMD GPUs
 as ``cuda``), on AMD. The environment is pure C on the CPU either way.
 

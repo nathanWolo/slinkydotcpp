@@ -253,6 +253,17 @@ in [`benchmarks/README.md`](benchmarks/README.md); the multi-mode tables are in
   - Specialists retrained with its 16 minibatches (standard, duel, royale) are
     no stronger head to head, so its lead there is not its extra gradient
     steps.
+- **PPO in PufferLib** (`puffer/`, see [`puffer/README.md`](puffer/README.md)):
+  the game ported to C as a [PufferLib](https://github.com/PufferAI/PufferLib)
+  3.0 environment (checked against slinky and the engine), and ppo.py's network
+  trained with PufferLib's PyTorch trainer.
+  - In 57 minutes of training on 4 CPU cores (19.7M env steps) it beats PPO
+    0.620 and the DQN 0.857, and scores 0.434 against the heuristic. Head to
+    head it is level with `az-0` (0.501), which scores 0.484 against the
+    heuristic.
+  - With ppo.py's settings and budget (5.24M env steps) it trains in 30
+    minutes on 4 cores (ppo.py: 62 on 3), but ends weaker: 0.198 against the
+    heuristic, 0.396 against PPO.
 
 ![MCTS score against random_legal, the DQN, PPO and the heuristic, by simulations per move](benchmarks/results/strength.svg)
 
@@ -372,6 +383,14 @@ on CPU. Building float32 observation tensors (a `[21, 21, 13]` image per
 agent in a duel) then dominates, which is memory-bound on CPU. Accelerators
 should scale much better with batch size.
 
+The C port of the game in [`puffer/`](puffer/README.md#throughput) is faster on
+a CPU. On one thread it steps a duel at 407k game-steps/s with `uint8`
+observations under `random_legal`. slinky on four cores reaches 111k in a fresh
+run of this benchmark (batch 1,024; this table's older run has 99k), so that is
+3.7×. Without observations, under uniformly random moves (`--policy random`), it
+reaches 4.3M against slinky's 559k (batch 8,192), 7.7×. The outputs are in
+`benchmarks/results/puffer_throughput/`.
+
 ## Roadmap
 
 1. **Core** (done): standard, duel, solo, wrapped, constrictor and royale
@@ -392,6 +411,8 @@ should scale much better with batch size.
      `slinky.mcts` (done; see `baselines/` and `benchmarks/README.md`);
    - one policy for all four leaderboard modes, told the mode (done; see
      `baselines/` and `docs/research/multimode_constrictor.md`).
+   - the game in C as a PufferLib environment, trained with PufferLib's PPO
+     (done; see `puffer/`).
 
 ## Layout
 
@@ -403,6 +424,8 @@ src/slinky/       types, rules (turn pipeline), maps, env, observations, render,
                   four leaderboard modes and the multi-mode policy's side inputs)
 baselines/        RL baselines (self-play DQN, PPO, Rainbow DQN, AlphaZero and multi-mode
                   PPO), their checkpoints and a live training dashboard (dashboard.py)
+puffer/           the game in C as a PufferLib 3.0 environment, ppo.py's network in PyTorch,
+                  training with PufferLib's trainer (its own venv: puffer/README.md)
 tests/            unit, edge-case and engine-parity tests
 tools/oracle/     Go test oracle around the official rules engine (test-only)
 benchmarks/       throughput, strength and mode benchmarks, results/ (their data)

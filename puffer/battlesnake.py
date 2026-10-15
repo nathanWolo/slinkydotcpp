@@ -15,9 +15,9 @@ observations are the new game's.
 A dead snake's *waiting* slot has no return to learn from (value target 0, advantage about
 0 once the trainer has learned the value of the dead observation), but PuffeRL 3.0 cannot
 drop rows: the slot is stored, counted as an agent step, and averaged into the losses
-(entropy, KL), the advantage normalization and the steps per second. With 3 or more
-snakes a fifth to a third of the rows are waiting slots under random legal play; in a duel
-the game ends with the first death, so there are none.
+(entropy, KL), the advantage normalization and the steps per second. Under random legal
+play they are a fifth to a third of the rows with 4 snakes (about a tenth to a sixth with
+3, over half with 8); in a duel the game ends with the first death, so there are none.
 
 Build the extension first: ``.venv-puffer/bin/python puffer/setup.py build_ext --inplace``.
 This module does not import JAX.
