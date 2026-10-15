@@ -2,32 +2,52 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 import urllib.error
 import urllib.request
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from slinky.agents import make_agent, make_env
+from slinky import modes
+from slinky.agents import make_agent, make_env, parse_agent
 from slinky.engine_json import state_to_engine
+from slinky.rules import royale_hazards, rules_step
 from slinky.server import (
+    API_DELTAS,
+    MODE_CONFIGS,
     MOVE_NAMES,
+    UNKNOWN_SIDE,
+    MoveLedger,
     Mover,
     Server,
+    game_config,
     make_handler,
     parse_snake,
+    request_state,
     request_to_engine,
+    royale_sides,
     safe_move,
 )
-from slinky.types import GameConfig
+from slinky.types import GameConfig, Ruleset, State
 
 DUEL = GameConfig()
+# A small multi-mode checkpoint trained on all four modes (no search: fast to compile).
+MODES_AGENT = "ppo_modes:baselines/checkpoints/ppo-modes-seed0"
 
 
-def api_request(d: dict, you: int, game_id: str = "g", ruleset: str = "standard") -> dict:
+def api_request(
+    d: dict,
+    you: int,
+    game_id: str = "g",
+    ruleset: str = "standard",
+    game_map: str = "standard",
+    settings: dict | None = None,
+) -> dict:
     """A Battlesnake API move request for engine dict ``d`` from snake ``you``'s side."""
     snakes = [
         {
@@ -42,7 +62,13 @@ def api_request(d: dict, you: int, game_id: str = "g", ruleset: str = "standard"
         if not s.get("eliminated_cause")
     ]
     return {
-        "game": {"id": game_id, "ruleset": {"name": ruleset}, "map": "standard", "timeout": 500},
+        "game": {
+            "id": game_id,
+            "ruleset": {"name": ruleset, "version": "v1.2.3", "settings": settings or {}},
+            "map": game_map,
+            "source": "custom",
+            "timeout": 500,
+        },
         "turn": d["turn"],
         "board": {
             "width": d["width"],
@@ -128,7 +154,9 @@ def test_other_games_use_the_fallbacks() -> None:
     assert set(mover._fns) == {DUEL, config}
     mover.end(req)
     assert mover._games == {}
-    assert mover.move(api_request(d, 0, ruleset="royale"))[1] == "safe_move"
+    # Rulesets the agents don't model get the safe-move picker, and nothing compiles.
+    assert mover.move(api_request(d, 0, ruleset="wrapped"))[1] == "safe_move"
+    assert set(mover._fns) == {DUEL, config} and not mover._pending
 
 
 def test_compiling_a_new_board_does_not_block_duels(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,3 +284,519 @@ def test_concurrent_moves(server: str) -> None:
     with ThreadPoolExecutor(32) as pool:
         results = list(pool.map(lambda r: _post(server + "/ppo/move", r), reqs))
     assert all(code == 200 and body["move"] in MOVE_NAMES for code, body in results)
+
+
+# --- Every game mode -------------------------------------------------------------------
+
+
+def official_settings(config: GameConfig) -> dict:
+    """``game.ruleset.settings`` as the API sends it (every setting, always)."""
+    return {
+        "foodSpawnChance": config.food_spawn_chance,
+        "minimumFood": config.minimum_food,
+        "hazardDamagePerTurn": config.hazard_damage_per_turn,
+        "royale": {"shrinkEveryNTurns": config.shrink_every_n_turns},
+        "squad": {
+            "allowBodyCollisions": False,
+            "sharedElimination": False,
+            "sharedHealth": False,
+            "sharedLength": False,
+        },
+    }
+
+
+def mode_request(
+    state: State,
+    config: GameConfig,
+    you: int = 0,
+    game_id: str = "g",
+    ruleset: str | None = None,
+    game_map: str | None = None,
+) -> dict:
+    """The API move request of a slinky ``state`` in a game with ``config``."""
+    return api_request(
+        state_to_engine(state, config),
+        you,
+        game_id=game_id,
+        ruleset=ruleset or config.ruleset.value,
+        game_map=game_map or config.map,
+        settings=official_settings(config),
+    )
+
+
+# (label, config): the default config of each mode, and royale with other settings.
+GAMES = [
+    *MODE_CONFIGS.items(),
+    (
+        "royale-fast",
+        dataclasses.replace(
+            MODE_CONFIGS["royale"],
+            shrink_every_n_turns=5,
+            hazard_damage_per_turn=30,
+        ),
+    ),
+]
+WANTED_TURNS = (0, 1, 4, 5, 6, 13, 24, 25, 26, 33, 49, 50, 51, 64)
+
+
+def played_states(config: GameConfig, seed: int = 0, games: int = 12) -> dict[int, State]:
+    """Undecided states of ``random_legal`` self-play at :data:`WANTED_TURNS`, by turn."""
+    env = make_env(config, False)
+    agent = make_agent("random_legal", config)
+    policy, step = jax.jit(agent.policy), jax.jit(env.step)
+    key = jax.random.key(seed)
+    found: dict[int, State] = {}
+    for _ in range(games):
+        key, k = jax.random.split(key)
+        state, ts = env.reset(k)
+        while not bool(state.done) and int(state.turn) <= max(WANTED_TURNS):
+            if int(state.turn) in WANTED_TURNS:
+                found.setdefault(int(state.turn), state)
+            key, k1, k2 = jax.random.split(key, 3)
+            state, ts = step(k2, state, policy(k1, state, ts))
+        if len(found) == len(WANTED_TURNS):
+            break
+    return found
+
+
+@pytest.fixture(scope="module")
+def mode_games() -> dict[str, tuple[GameConfig, dict[int, State]]]:
+    return {label: (config, played_states(config)) for label, config in GAMES}
+
+
+def seat_order(state: State, you: int) -> list[int]:
+    """The seats of ``state`` in the server's order: ``you``, the other living, the dead."""
+    alive = np.asarray(state.alive)
+    n = len(alive)
+    others = [i for i in range(n) if i != you and alive[i]]
+    return [you, *others, *(i for i in range(n) if not alive[i])]
+
+
+SEAT_FIELDS = ("body", "head", "length", "health", "alive", "last_move", "elim_cause", "elim_turn")
+
+
+def reorder(state: State, order: list[int]) -> State:
+    idx = jnp.asarray(order)
+    return state._replace(**{f: getattr(state, f)[idx] for f in SEAT_FIELDS})
+
+
+def assert_same_state(got: State, want: State, config: GameConfig) -> None:
+    """``got`` (from a request) is ``want``, but for what the API can't say.
+
+    The API lists no dead snakes: their seats only agree on being dead (and empty). Of the
+    royale shrink sides only those already shown are known (see ``royale_sides``).
+    """
+    got, want = jax.device_get(got), jax.device_get(want)
+    alive = np.asarray(want.alive)
+    for field in State._fields:
+        if field == "map_state":
+            continue
+        a, b = np.asarray(getattr(got, field)), np.asarray(getattr(want, field))
+        assert a.dtype == b.dtype and a.shape == b.shape, field
+        if field in SEAT_FIELDS and field not in ("body", "alive"):
+            a, b = a[alive], b[alive]
+        np.testing.assert_array_equal(a, b, err_msg=field)
+    np.testing.assert_array_equal(np.asarray(got.elim_cause) != 0, ~alive)
+    if config.ruleset != Ruleset.ROYALE:
+        assert got.map_state == () and want.map_state == ()
+        return
+    sides, true_sides = np.asarray(got.map_state.sides), np.asarray(want.map_state.sides)
+    assert sides.dtype == true_sides.dtype and sides.shape == true_sides.shape
+    period, turn = config.shrink_every_n_turns, int(want.turn)
+    shrinks = turn // period
+    assert (sides[shrinks:] == UNKNOWN_SIDE).all()
+    if not np.asarray(want.hazard).all():  # the order of the shown shrinks is not known
+        np.testing.assert_array_equal(np.sort(sides[:shrinks]), np.sort(true_sides[:shrinks]))
+    # The same zone until the next shrink, which nobody can know.
+    for t in range(shrinks * period, (shrinks + 1) * period):
+        np.testing.assert_array_equal(
+            royale_hazards(sides, t, config), royale_hazards(true_sides, t, config), err_msg=str(t)
+        )
+
+
+@pytest.mark.parametrize("label", [label for label, _ in GAMES])
+def test_requests_rebuild_the_game(label: str, mode_games) -> None:
+    """Config and state from the API request of every mode, as a search would simulate them."""
+    config, states = mode_games[label]
+    assert len(states) >= 6 and {0, 1, 4, 5, 6} <= set(states), sorted(states)
+    if config.ruleset == Ruleset.ROYALE:  # some zone has shrunk
+        assert any(np.asarray(s.hazard).any() for s in states.values())
+    key = jax.random.key(1)
+    step = jax.jit(rules_step, static_argnums=2)
+    for turn, state in states.items():
+        alive = np.flatnonzero(np.asarray(state.alive))
+        for you in {int(alive[0]), int(alive[-1])}:
+            req = mode_request(state, config, you=you, game_id=label)
+            # The game's start (all snakes) says the snake count; the request lists the living.
+            assert game_config(req, config.num_snakes) == config
+            assert (game_config(req) == config) == (len(alive) == config.num_snakes)
+            got, want = request_state(req, config), reorder(state, seat_order(state, you))
+            assert_same_state(got, want, config)
+            # One rules step from both (a search's model of the next turn) agrees too, unless
+            # it shows a new shrink.
+            if (turn + 1) % config.shrink_every_n_turns or config.ruleset != Ruleset.ROYALE:
+                key, k = jax.random.split(key)
+                actions = jax.random.randint(k, (config.num_snakes,), 0, 4)
+                assert_same_state(step(got, actions, config), step(want, actions, config), config)
+            if config.ruleset == Ruleset.ROYALE:  # the other two ways to play royale
+                for ruleset, game_map in (("royale", "standard"), ("standard", "royale")):
+                    other = mode_request(state, config, you, label, ruleset, game_map)
+                    assert game_config(other, config.num_snakes) == config
+                    assert_same_state(request_state(other, config), want, config)
+
+
+def test_settings() -> None:
+    req = example_request_for(MODE_CONFIGS["royale"])
+    req["game"]["ruleset"]["settings"] = {
+        "foodSpawnChance": "20",  # the engine CLI sends strings
+        "minimumFood": True,  # junk keeps the default
+        "hazardDamagePerTurn": 10**12,
+        "shrinkEveryNTurns": 7,  # the CLI's flat name
+    }
+    want = dataclasses.replace(MODE_CONFIGS["royale"], shrink_every_n_turns=7)
+    assert game_config(req) == want  # junk damage keeps the default; food settings don't matter
+    want = dataclasses.replace(want, food_spawn_chance=20)  # unless the search spawns food
+    assert game_config(req, food_spawns=True) == want
+    req["game"]["ruleset"]["settings"]["royale"] = {"shrinkEveryNTurns": 9}  # the API's wins
+    assert game_config(req).shrink_every_n_turns == 9
+    req["game"]["ruleset"]["settings"]["royale"] = {"shrinkEveryNTurns": 0}  # an engine error
+    assert game_config(req) is None
+    # Only royale reads the shrink period: other modes keep their one config.
+    for mode in ("standard", "duel", "constrictor"):
+        req = example_request_for(MODE_CONFIGS[mode])
+        req["game"]["ruleset"]["settings"] = {"royale": {"shrinkEveryNTurns": 5}}
+        assert game_config(req) == MODE_CONFIGS[mode]
+        del req["game"]["ruleset"]["settings"]
+        assert game_config(req) == MODE_CONFIGS[mode]
+
+
+def example_request_for(config: GameConfig) -> dict:
+    state = make_env(config, False).reset(jax.random.key(0))[0]
+    return mode_request(state, config)
+
+
+def test_games_without_a_model() -> None:
+    req = example_request_for(MODE_CONFIGS["standard"])
+    for ruleset, game_map in (
+        ("wrapped", "standard"),
+        ("wrapped_constrictor", "standard"),
+        ("solo", "standard"),
+        ("constrictor", "royale"),
+        ("standard", "empty"),  # not a training mode (no food): the safe-move picker
+        ("royale", "empty"),
+        ("wrapped_constrictor", "empty"),
+        ("royale", "arcade_maze"),
+        ("squad", "standard"),
+    ):
+        req["game"]["ruleset"]["name"], req["game"]["map"] = ruleset, game_map
+        assert game_config(req) is None, (ruleset, game_map)
+    # Standard games on other boards keep their config (the fallback agent plays them).
+    seven = GameConfig(width=7, height=7, num_snakes=3)
+    assert game_config(example_request_for(seven)) == seven
+
+
+def test_royale_sides_when_the_zone_is_gone() -> None:
+    config = MODE_CONFIGS["royale"]
+    everything = [[x, y] for x in range(11) for y in range(11)]
+    for turn in (11 * 25, 21 * 25, 40 * 25):
+        sides = royale_sides(everything, turn, config).sides
+        assert np.asarray(royale_hazards(sides, turn, config)).all()
+        assert np.asarray(royale_hazards(sides, turn + 1, config)).all()
+
+
+@pytest.fixture(scope="module")
+def modes_mover() -> Mover:
+    return Mover(MODES_AGENT)  # precompiles all four modes
+
+
+def test_multi_mode_agent_plays_every_mode(modes_mover: Mover, mode_games) -> None:
+    """In each mode the server answers with the multi-mode agent's move, told that mode."""
+    name = parse_agent(MODES_AGENT).name
+    assert set(modes_mover._fns) == set(MODE_CONFIGS.values())
+    assert all(entry is not None and entry[0] == name for entry in modes_mover._fns.values())
+    for label, (config, states) in mode_games.items():
+        if label not in MODE_CONFIGS:
+            continue
+        policy = jax.jit(make_agent(MODES_AGENT, config).policy)  # greedy: keys change nothing
+        env = make_env(config, True)
+        checked = 0
+        for turn, state in states.items():
+            if not bool(state.alive.all()):
+                continue
+            req = mode_request(state, config, game_id=f"modes-{label}-{turn}")
+            assert modes_mover.start(req) == name
+            ts = env._timestep(state, np.zeros(config.num_snakes, np.float32), np.asarray(False))
+            want = int(policy(jax.random.key(0), state, ts)[0])
+            assert modes_mover.move(req) == (want, name), (label, turn)
+            checked += 1
+        assert checked >= 2, label
+    # A dead snake's seat is padded back in: the same compiled policy plays on.
+    for label in ("standard", "royale", "constrictor"):
+        config, states = mode_games[label]
+        dying = [s for s in states.values() if not bool(s.alive.all())]
+        if dying:
+            modes_mover.start(mode_request(states[0], config, game_id=f"padded-{label}"))
+            you = int(np.flatnonzero(np.asarray(dying[-1].alive))[0])
+            req = mode_request(dying[-1], config, you=you, game_id=f"padded-{label}")
+            assert modes_mover.move(req)[1] == name
+    assert set(modes_mover._fns) == set(MODE_CONFIGS.values()) and not modes_mover._pending
+
+
+def test_multi_mode_agent_falls_back_outside_the_modes(modes_mover: Mover) -> None:
+    # A wrapped game: no model, the safe-move picker, nothing compiled.
+    req = example_request_for(DUEL)
+    req["game"]["ruleset"]["name"] = "wrapped"
+    assert modes_mover.start(req) == "safe_move"
+    assert modes_mover.move(req)[1] == "safe_move"
+    # Another board: the fallback agent once compiled.
+    seven = example_request_for(GameConfig(width=7, height=7))
+    assert modes_mover.start(seven) == "safe_move until compiled"
+    assert modes_mover.wait_idle(timeout=300)
+    assert modes_mover.move(seven)[1] == "heuristic"
+
+
+def test_other_agents_in_the_modes() -> None:
+    """A duel-only baseline and a single-mode specialist leave the other modes to the fallback."""
+    royale = example_request_for(MODE_CONFIGS["royale"])
+    duel = example_request_for(DUEL)
+    ppo = Mover("ppo", precompile=())
+    assert not ppo.multi_mode and ppo.plays(DUEL)
+    assert not any(ppo.plays(c) for m, c in MODE_CONFIGS.items() if m != "duel")
+    specialist = Mover("ppo_modes:baselines/checkpoints/ppo-modes-duel-seed0", precompile=())
+    assert specialist.multi_mode
+    for mover, name in ((ppo, "ppo"), (specialist, specialist.agent)):
+        mover.start(royale)
+        mover.start(duel)
+        assert mover.wait_idle(timeout=300)
+        assert mover.move(royale)[1] == "heuristic"
+        assert mover.move(duel)[1] == name
+
+
+LADDER = {  # the settings the ladder sends, which are not GameConfig's defaults
+    "foodSpawnChance": 15,
+    "minimumFood": 1,
+    "hazardDamagePerTurn": 100,
+    "hazardMap": "",
+    "hazardMapAuthor": "",
+    "royale": {"shrinkEveryNTurns": 25},
+    "squad": {"allowBodyCollisions": False, "sharedElimination": False},
+}
+
+
+def ladder_request(mode: str, game_map: str | None = None, **settings) -> dict:
+    """A ladder-shaped request for ``mode``'s default config with the ladder's settings."""
+    config = MODE_CONFIGS[mode]
+    req = example_request_for(config)
+    req["game"]["source"] = "ladder"
+    req["game"]["ruleset"]["settings"] = {**LADDER, **settings}
+    req["game"]["map"] = game_map or req["game"]["map"]
+    req["game"]["ruleset"]["name"] = "standard" if mode == "duel" else config.ruleset.value
+    return req
+
+
+def test_ladder_settings_reach_the_mode_configs() -> None:
+    for mode, game_map in (
+        ("standard", "standard"),
+        ("duel", "standard"),
+        ("constrictor", "standard"),
+        ("constrictor", "empty"),  # the official constrictor ladder
+        ("royale", "royale"),
+    ):
+        req = ladder_request(mode, game_map, hazardDamagePerTurn=14 if mode == "royale" else 100)
+        # Damage 100 cannot matter without hazards; the royale default is the ladder's own.
+        assert game_config(req) == MODE_CONFIGS[mode], (mode, game_map)
+        # Neither can the food settings, which only a search that spawns food reads.
+        req["game"]["ruleset"]["settings"].update(foodSpawnChance=50, minimumFood=3)
+        assert game_config(req) == MODE_CONFIGS[mode], (mode, game_map)
+    # Where a setting matters, the config differs.
+    royale = ladder_request("royale", hazardDamagePerTurn=100)
+    assert game_config(royale) == dataclasses.replace(
+        MODE_CONFIGS["royale"], hazard_damage_per_turn=100
+    )
+    royale["game"]["ruleset"]["settings"]["royale"] = {"shrinkEveryNTurns": 10}
+    assert game_config(royale).shrink_every_n_turns == 10
+    for ruleset, game_map in (("royale", "standard"), ("standard", "royale")):
+        req = ladder_request("royale", hazardDamagePerTurn=100)
+        req["game"]["ruleset"]["name"], req["game"]["map"] = ruleset, game_map
+        assert game_config(req) == dataclasses.replace(
+            MODE_CONFIGS["royale"], hazard_damage_per_turn=100
+        ), (ruleset, game_map)
+    # A board that lists hazards keeps the damage (the rules step reads it there).
+    req = ladder_request("standard")
+    req["board"]["hazards"] = [{"x": 0, "y": 0}]
+    assert game_config(req).hazard_damage_per_turn == 100
+    # A search that samples food spawns reads the food settings, and cannot play the empty
+    # map (the standard map would spawn food it never has).
+    req = ladder_request("standard", foodSpawnChance=30, minimumFood=2)
+    want = dataclasses.replace(MODE_CONFIGS["standard"], food_spawn_chance=30, minimum_food=2)
+    assert game_config(req, food_spawns=True) == want
+    assert game_config(ladder_request("constrictor", "empty"), food_spawns=True) is None
+    assert game_config(ladder_request("constrictor", "empty")) == MODE_CONFIGS["constrictor"]
+
+
+def test_mover_knows_if_its_search_spawns_food() -> None:
+    assert Mover("ppo", precompile=()).food_spawns is False
+    assert Mover("heuristic", precompile=()).food_spawns is False
+    assert Mover("az-0", precompile=()).food_spawns is False
+    assert Mover("az-4:spawn_food=true", precompile=()).food_spawns is True
+    assert Mover("az-4", precompile=()).food_spawns is False
+
+
+EMPTY_CONSTRICTOR = dataclasses.replace(MODE_CONFIGS["constrictor"], map="empty")
+
+
+def test_constrictor_on_the_empty_map(modes_mover: Mover) -> None:
+    """The ladder's constrictor games are played as the constrictor mode, exactly."""
+    config = MODE_CONFIGS["constrictor"]
+    states = played_states(EMPTY_CONSTRICTOR, seed=3)
+    assert len(states) >= 6 and {0, 1, 4, 5, 6} <= set(states), sorted(states)
+    assert not any(np.asarray(s.food).any() for s in states.values())  # the map has no food
+    name = parse_agent(MODES_AGENT).name
+    policy = jax.jit(make_agent(MODES_AGENT, config).policy)  # told constrictor, greedy
+    env = make_env(config, True)
+    step = jax.jit(rules_step, static_argnums=2)
+    key, checked, fns = jax.random.key(2), 0, dict(modes_mover._fns)
+    for turn, state in states.items():
+        alive = np.flatnonzero(np.asarray(state.alive))
+        for you in {int(alive[0]), int(alive[-1])}:
+            req = ladder_request("constrictor", "empty")
+            req.update(
+                {
+                    k: v
+                    for k, v in mode_request(
+                        state, config, you=you, game_id=f"empty-{turn}", game_map="empty"
+                    ).items()
+                    if k != "game"
+                }
+            )
+            req["game"]["id"] = f"empty-{turn}-{you}"
+            assert req["game"]["map"] == "empty"
+            assert game_config(req, config.num_snakes) == config
+            got, want = request_state(req, config), reorder(state, seat_order(state, you))
+            assert_same_state(got, want, config)
+            # The search's forward model (the rules step, no spawns) agrees on the next turn
+            # with the empty map's own env.step, which adds no food: the map is irrelevant.
+            key, k = jax.random.split(key)
+            actions = jax.random.randint(k, (config.num_snakes,), 0, 4)
+            assert_same_state(step(got, actions, config), step(want, actions, config), config)
+            if len(alive) == config.num_snakes:  # the start of a game says its snake count
+                assert modes_mover.start(req) == name
+                true = reorder(state, seat_order(state, you))  # the agent's seat first
+                ts = env._timestep(true, np.zeros(config.num_snakes, np.float32), np.asarray(False))
+                best = int(policy(jax.random.key(0), true, ts)[0])
+                assert modes_mover.move(req) == (best, name), (turn, you)
+                checked += 1
+    assert checked >= 2
+    assert dict(modes_mover._fns) == fns  # nothing was compiled for these games
+
+
+def test_empty_map_step_equals_constrictor_rules() -> None:
+    """env.step on the empty map is the rules step plus the turn: no spawns, no other map effect."""
+    env = make_env(EMPTY_CONSTRICTOR, False)
+    state = played_states(EMPTY_CONSTRICTOR, seed=5)[6]
+    actions = jnp.array([0, 1, 2, 3])
+    nxt = env.step(jax.random.key(0), state, actions)[0]
+    ref = rules_step(state, actions, MODE_CONFIGS["constrictor"])._replace(turn=state.turn + 1)
+    assert_same_state(nxt, ref._replace(done=nxt.done), MODE_CONFIGS["constrictor"])
+
+
+def test_ladder_games_hit_the_precompiled_configs(modes_mover: Mover) -> None:
+    """With the ladder's settings no game waits for a compile: `start` names the agent."""
+    name = parse_agent(MODES_AGENT).name
+    fns = dict(modes_mover._fns)
+    for mode, game_map in (
+        ("standard", "standard"),
+        ("duel", "standard"),
+        ("constrictor", "standard"),
+        ("constrictor", "empty"),
+        ("royale", "royale"),
+    ):
+        req = ladder_request(mode, game_map, hazardDamagePerTurn=14 if mode == "royale" else 100)
+        req["game"]["id"] = f"ladder-{mode}-{game_map}"
+        assert modes_mover.start(req) == name, (mode, game_map)
+        assert modes_mover.move(req)[1] == name
+    assert dict(modes_mover._fns) == fns and not modes_mover._pending
+    req = ladder_request("standard", "empty")
+    assert modes_mover.start(req) == "safe_move"
+
+
+# --- Did the engine apply our answers? ----------------------------------------------------
+
+
+def ledger_request(turn: int, x: int, y: int, game: str = "g", w: int = 11, h: int = 11) -> dict:
+    """The parts of a request :class:`MoveLedger` reads: our head at ``turn``."""
+    return {
+        "game": {"id": game, "timeout": 500, "source": "ladder", "map": "standard",
+                 "ruleset": {"name": "standard"}},
+        "turn": turn,
+        "board": {"width": w, "height": h, "snakes": [{}, {}]},
+        "you": {"head": {"x": x, "y": y}},
+    }  # fmt: skip
+
+
+def test_move_ledger_judges_each_answer(tmp_path) -> None:
+    path = tmp_path / "moves.jsonl"
+    ledger = MoveLedger(str(path))
+    assert ledger.record("s", ledger_request(0, 5, 5), "up", "az", 30.0) is None  # nothing before
+    assert ledger.record("s", ledger_request(1, 5, 6), "left", "az", 31.0) == "applied"  # went up
+    assert ledger.record("s", ledger_request(2, 4, 6), "left", "az", 32.0) == "applied"
+    # We said left; the head went up instead: the engine used its default move.
+    assert ledger.record("s", ledger_request(3, 4, 7), "down", "az", 33.0) == "missed"
+    # Turn 4's request never reached us: turn 5 arrives after turn 3.
+    assert ledger.record("s", ledger_request(5, 4, 5), "up", "az", 34.0) == "gap"
+    # Games and snakes are judged apart.
+    assert ledger.record("other", ledger_request(6, 0, 0), "up", "az", 1.0) is None
+    assert ledger.record("s", ledger_request(0, 1, 1, game="h"), "right", "az", 1.0) is None
+    # /end judges the last answer (here: the snake ran into the wall as told) and forgets the game.
+    assert ledger.record("s", ledger_request(6, 4, 6), None, "", 0.0, end=True) == "applied"
+    assert ledger.record("s", ledger_request(7, 4, 7), "up", "az", 1.0) is None
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["prev"] for r in lines] == [
+        None, "applied", "applied", "missed", "gap", None, None, "applied", None
+    ]
+    assert lines[3] | {"t": 0} == {
+        "t": 0, "snake": "s", "game": "g", "turn": 3, "ruleset": "standard", "map": "standard",
+        "snakes": 2, "source": "ladder", "timeout": 500, "agent": "az", "move": "down",
+        "ms": 33.0, "prev": "missed",
+    }  # fmt: skip
+    assert lines[7]["end"] is True and lines[7]["move"] is None
+
+
+def test_move_ledger_wraps_and_survives_junk() -> None:
+    ledger = MoveLedger()
+    ledger.record("s", ledger_request(0, 10, 3), "right", "az", 1.0)
+    assert ledger.verdict("s", ledger_request(1, 0, 3)) == "applied"  # across the wrapped edge
+    assert ledger.verdict("s", ledger_request(1, 9, 3)) == "missed"
+    ledger.record("s", ledger_request(0, 4, 0, game="w"), "down", "az", 1.0)
+    assert ledger.verdict("s", ledger_request(1, 4, 10, game="w")) == "applied"  # y 0 -> 10: down
+    for junk in ({}, {"game": 3}, {"game": {"id": "g"}, "turn": "x"}, {"board": 3}):
+        assert ledger.record("s", junk, "up", "az", 1.0) is None
+
+
+def test_http_moves_are_logged(tmp_path) -> None:
+    path = tmp_path / "moves.jsonl"
+    info = {"apiversion": "1", "author": "t", "color": "#1", "head": "default", "tail": "default"}
+    handler = make_handler({"ppo": (Mover("ppo"), info)}, MoveLedger(str(path)))
+    srv = Server(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/ppo"
+        state = midgame_states(DUEL, 1, seed=3)[0]
+        req = api_request(state_to_engine(state, DUEL), 0, game_id="logged")
+        body = json.dumps(req).encode()
+        assert _post(url + "/start", body) == (200, {})
+        code, answer = _post(url + "/move", body)
+        assert code == 200
+        # Play our answer: the next request's head is one step that way.
+        dx, dy = API_DELTAS[answer["move"]]
+        nxt = json.loads(body)
+        nxt["turn"] += 1
+        nxt["you"]["head"] = {"x": nxt["you"]["head"]["x"] + dx, "y": nxt["you"]["head"]["y"] + dy}
+        assert _post(url + "/end", json.dumps(nxt).encode()) == (200, {})
+    finally:
+        srv.shutdown()
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(r["move"], r["prev"], r.get("end", False)) for r in lines] == [
+        (answer["move"], None, False), (None, "applied", True)
+    ]
+    assert lines[0]["agent"] and lines[0]["ms"] > 0 and lines[0]["game"] == "logged"
