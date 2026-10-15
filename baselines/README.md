@@ -1268,3 +1268,41 @@ training numbers (curves, entropy, game lengths, value weights) are in each
 checkpoint's `metrics.jsonl`. As an agent (`slinky.agents`) the generalist is `ppo_modes`, told the
 mode of the game it plays; `ppo_modes:game_mode=<mode>` overrides what it is
 told.
+
+## The other multi-mode trainers (`*_modes.py`)
+
+`reinforce_modes.py`, `dqn_modes.py`, `rainbow_modes.py` and `az_modes.py`
+train the same kind of network as `ppo_modes.py` (one network for standard,
+duel, royale and constrictor, told the mode, one group of games per mode, the
+placement reward) with REINFORCE, Double DQN, Rainbow DQN and AlphaZero. They
+share their code in `slinky.unified` (`ppo_modes.py` stays self-contained).
+Their networks are not committed to `checkpoints/`, so their agents
+(`reinforce_modes:<run dir>`, `az_modes:<run dir>:simulations=64`, ...) need an
+explicit run directory; see `slinky.agents`.
+
+```bash
+python baselines/az_modes.py --size M --run-dir runs/az-modes-M-s0
+python baselines/az_modes.py --resume runs/az-modes-M-s0   # after a stop
+touch runs/az-modes-M-s0/STOP        # checkpoint at the next chunk and exit
+python baselines/az_modes.py --resume runs/az-modes-M-s0 --cooldown <steps>
+```
+
+- **Sizes.** `--size S|M|L` (`slinky.unified.SIZES`): 3×3 convolutions with
+  (8, 16, 16), (16, 32, 32) or (32, 64, 64) channels and a hidden layer of 128,
+  256 or 512. M is `ppo_modes.py`'s network.
+- **Stopping.** `benchmarks/plateau.py` watches a run's `params-<steps>.npz`
+  snapshots, plays each against the heuristic in every mode, and writes `STOP`
+  when a trend rule finds the strength flat; `--cooldown` then anneals the
+  learning rate to 0. Its decisions are in `<run>/plateau.jsonl`.
+- **Comparing runs.** `benchmarks/compare_unified.py --runs runs --panel` and
+  `--round-robin` play the finished runs (those with a `DONE` file) against the
+  heuristic and the committed generalist, and against each other.
+- **AlphaZero generations.** `az_loop.py` (duel) repeats `az.py` fine-tuning
+  from the best network and keeps a new one only if it wins a gated match
+  (4,096 games, lower end of the 95% interval above 0.5).
+- **Results.** One GPU campaign trained all of them at sizes S and M, seed 0;
+  its numbers are in [`RELEASE_NOTES.md`](../RELEASE_NOTES.md). The campaign's
+  raw output (`plateau-cells.jsonl`, `final.jsonl`) is not committed, so those
+  numbers cannot be checked from this repository. In royale the AlphaZero
+  search steps from states that hold the future shrink sides, which a real game
+  does not give; see the README.
