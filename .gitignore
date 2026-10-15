@@ -18,3 +18,5 @@ replays/
 .venv-puffer/
 puffer/*.so
 experiments/
+# `import pufferlib` symlinks its resources into the current directory
+/resources
