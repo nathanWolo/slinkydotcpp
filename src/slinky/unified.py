@@ -352,10 +352,42 @@ def _conv3x3_fwd(x: jax.Array, w: jax.Array, stride: int):
     return conv3x3(x, w, stride), (x, w)
 
 
+# With ROCm 7.2.4 on RDNA4 (RX 9060 XT, gfx1200), rocBLAS hands some f32 GEMMs to a hipBLASLt
+# kernel whose workgroups past grid-Y index 65535 write nothing: with 2**19 or more rows, the
+# rows from 2**19 on keep stale memory (ROCm/rocm-libraries#13243, fixed in the ROCm 10 line).
+# reinforce_modes' block gradients at block_turns=50 have 640,800-row GEMMs (17,800 boards of
+# 6x6 cells). So off the CPU, the backward pass of a batch with more than _MAX_GEMM_ROWS rows
+# (samples times output cells) goes by pieces; the maths, and the CPU path, are unchanged.
+_MAX_GEMM_ROWS = 1 << 18
+
+
+def _pieces(n: int, rows_per_sample: int) -> int:
+    """How many pieces a batch of ``n`` samples is cut into (see :data:`_MAX_GEMM_ROWS`)."""
+    return -(-(n * rows_per_sample) // _MAX_GEMM_ROWS)
+
+
+def _split(x: jax.Array, pieces: int) -> jax.Array:
+    """``[n, ...] -> [pieces, ceil(n / pieces), ...]``, padded with zeros."""
+    size = -(-x.shape[0] // pieces)
+    x = jnp.pad(x, ((0, size * pieces - x.shape[0]),) + ((0, 0),) * (x.ndim - 1))
+    return x.reshape(pieces, size, *x.shape[1:])
+
+
 def _conv3x3_bwd(stride: int, residuals: tuple[jax.Array, jax.Array], g: jax.Array):
     x, w = residuals
-    _, vjp = jax.vjp(lambda x, w: _conv_im2col(x, w, stride), x, w)
-    return vjp(g)
+
+    def vjp(x: jax.Array, g: jax.Array) -> tuple[jax.Array, jax.Array]:
+        _, f = jax.vjp(lambda x, w: _conv_im2col(x, w, stride), x, w)
+        return f(g)
+
+    def by_pieces(x: jax.Array, g: jax.Array) -> tuple[jax.Array, jax.Array]:
+        pieces = _pieces(g.shape[0], g.shape[1] * g.shape[2])
+        if pieces == 1:
+            return vjp(x, g)
+        dx, dw = jax.lax.map(lambda a: vjp(*a), (_split(x, pieces), _split(g, pieces)))
+        return dx.reshape(-1, *x.shape[1:])[: x.shape[0]], jnp.sum(dw, 0)
+
+    return jax.lax.platform_dependent(x, g, cpu=vjp, default=by_pieces)
 
 
 conv3x3.defvjp(_conv3x3_fwd, _conv3x3_bwd)
