@@ -46,8 +46,10 @@ Names:
 * ``reinforce_modes``, ``dqn_modes`` and ``rainbow_modes``, each
   ``<kind>[-greedy|-sample][:<run dir>][:snapshot=<steps>][:game_mode=<mode>]``: the
   multi-mode REINFORCE, DQN and Rainbow DQN (``baselines/<kind>.py``, on
-  :mod:`slinky.unified`), named and told their mode like ``ppo_modes``. Default checkpoints
-  ``baselines/checkpoints/reinforce-modes-seed0`` and so on (the kind with dashes). Sampled
+  :mod:`slinky.unified`), named and told their mode like ``ppo_modes``. No default
+  checkpoint is committed for these (``baselines/checkpoints/reinforce-modes-seed0`` and so
+  on, the kind with dashes, is where one would be looked up), so name a run directory,
+  e.g. ``dqn_modes:runs/dqn-modes-M-s0``. Sampled
   play is a move from the policy for REINFORCE, and an epsilon-greedy move (the
   trainer's ``EVAL_EPSILON``) for the DQNs, whose greedy play is the legal argmax of their
   Q-values (Rainbow's expected return, noise off).
