@@ -16,9 +16,10 @@ Changes from ``az.py``:
   tree while the others play on. ``draw_value`` (-0.5, contempt) scales the tie of the
   snakes eliminated together on the final turn. In the duel it is ``az.py``'s
   win/loss value.
-* **One search per mode.** Each turn searches every group's games, one group after
-  another (a search is a ``vmap`` over games of one config), so a simulation's network
-  call covers ``num_envs * N`` observations of one mode.
+* **One search over every mode.** Each turn searches every group's games together
+  (:func:`slinky.mcts.search_groups`): the groups' trees advance in lockstep, and a
+  simulation's one network call covers the new nodes of every mode (``num_envs * N``
+  observations per mode). Each game's search is the same as searching its mode alone.
 * **Replay per mode** (``buffer_capacity`` positions each), and every gradient step
   samples ``batch_size`` positions of each mode; one forward pass on all of them. The
   loss is the weighted mean over the modes (``mode_weights``) of each mode's
@@ -60,11 +61,13 @@ from slinky.env import BattlesnakeEnv
 from slinky.evaluate import Policy
 from slinky.mcts import (
     Evaluator,
+    GroupsEvaluator,
     MCTSConfig,
     SearchOutput,
     placement_values,
     root_noise_draws,
     search,
+    search_groups,
 )
 from slinky.types import ACTION_DELTAS, NUM_ACTIONS, GameConfig, State, TimeStep
 from slinky.unified import Group, Params
@@ -218,6 +221,30 @@ def make_evaluator(
         return value, logits
 
     return evaluator
+
+
+def make_groups_evaluator(
+    params: Params, cfg: Config, groups: tuple[Group, ...]
+) -> GroupsEvaluator:
+    """:func:`slinky.mcts.search_groups` evaluator: every group's batch of games (each
+    told its group's mode) in one network call, split back into ``(value f32[E, N], logits
+    f32[E, N, 4])`` per group."""
+
+    def evaluate(states: tuple[State, ...]) -> tuple[tuple[jax.Array, jax.Array], ...]:
+        inputs = [unified.group_inputs(cfg, g, s) for g, s in zip(groups, states, strict=True)]
+        boards = unified.join([x[0] for x in inputs])
+        feats = unified.join([x[1] for x in inputs])
+        logits, value = network(params, boards, feats, cfg)
+        sizes = tuple(st.turn.shape[0] for st in states)
+        return tuple(
+            zip(
+                unified.split(value, groups, sizes),
+                unified.split(logits, groups, sizes),
+                strict=True,
+            )
+        )
+
+    return evaluate
 
 
 def make_policy(
@@ -562,12 +589,7 @@ def make_selfplay(cfg: Config, groups: tuple[Group, ...]) -> Callable[..., Any]:
         k_search, k_move, k_step, k_reset = jax.random.split(unified.group_key(key, group), 4)
         return jax.random.split(k_search, num_envs), k_move, k_step, k_reset
 
-    def turn_group(params, group, states, uids, key, draws):
-        keys, k_move, k_step, k_reset = turn_keys(key, group)
-        evaluator = make_evaluator(params, cfg, group)
-        out: SearchOutput = jax.vmap(
-            lambda k, s, d: search(k, s, group.sim, mcfg, evaluator, root_draws=d)
-        )(keys, states, draws)
+    def play_group(group, states, uids, out: SearchOutput, k_move, k_step, k_reset):
         log_policy = jnp.where(out.policy > 0, jnp.log(jnp.maximum(out.policy, 1e-30)), -jnp.inf)
         sampled = jax.random.categorical(k_move, log_policy).astype(jnp.int32)
         explore = (states.turn < cfg.temperature_turns)[:, None]
@@ -589,9 +611,18 @@ def make_selfplay(cfg: Config, groups: tuple[Group, ...]) -> Callable[..., Any]:
     def turn(params, carry, xs):
         states, uids = carry
         key, draws = xs
+        keys = [turn_keys(key, g) for g in groups]
+        outs = search_groups(
+            tuple(k[0] for k in keys),
+            states,
+            tuple(g.sim for g in groups),
+            mcfg,
+            make_groups_evaluator(params, cfg, groups),
+            root_draws=draws,
+        )
         out = [
-            turn_group(params, g, s, u, key, d)
-            for g, s, u, d in zip(groups, states, uids, draws, strict=True)
+            play_group(g, s, u, o, *k[1:])
+            for g, s, u, o, k in zip(groups, states, uids, outs, keys, strict=True)
         ]
         next_states = tuple(o[0][0] for o in out)
         next_uids = tuple(o[0][1] for o in out)
@@ -611,9 +642,9 @@ def make_selfplay(cfg: Config, groups: tuple[Group, ...]) -> Callable[..., Any]:
                     turn_keys(k, g)[0]
                 )
 
-            return jax.vmap(turn_draws)(keys) if mcfg.root_noise_frac > 0 else None
+            return jax.vmap(turn_draws)(keys)
 
-        draws = tuple(chunk_draws(g) for g in groups)
+        draws = tuple(chunk_draws(g) for g in groups) if mcfg.root_noise_frac > 0 else None
         carry, (traj, metrics) = jax.lax.scan(
             lambda c, x: turn(params, c, x), (states, uids), (keys, draws)
         )

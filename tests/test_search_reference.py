@@ -24,7 +24,7 @@ from test_mcts import mid_game_state, tree_copies
 
 from slinky import mcts as M
 from slinky import modes, unified
-from slinky.types import NUM_ACTIONS
+from slinky.types import NUM_ACTIONS, GameConfig
 
 pytest.importorskip("optax")
 
@@ -266,6 +266,8 @@ def _load_az_modes():
 
 
 def test_az_selfplay_matches_reference(masked):
+    # The joint search calls the real network once over every mode's rows; on the CPU at
+    # these shapes (and at 256 games of S, M and L) that rounds as the per-mode calls did.
     azm = _load_az_modes()
     cfg = azm.Config(**TINY, num_envs=4, num_steps=3, num_simulations=16, max_turns=40)
     groups = unified.make_groups(cfg)
@@ -328,3 +330,161 @@ def test_root_draws_are_checked():
     quiet = dataclasses.replace(noisy, root_noise_frac=0.0)
     with pytest.raises(ValueError, match="root_draws"):
         M.search(key, state, env, quiet, evaluator, root_draws=jnp.zeros((2, 4)))
+
+
+# --- search_groups: every mode in one lockstep search -------------------------------------
+
+GROUP_GAMES = {**MODES, "three": GameConfig(num_snakes=3)}
+
+
+def groups_eval(states):
+    """``fake_eval`` of every game of every group (row-independent, like the contract asks)."""
+    return tuple(jax.vmap(fake_eval)(s) for s in states)
+
+
+@functools.cache
+def _group_inputs(e):
+    states = tuple(
+        jax.tree.map(lambda x: x[:e], rollout_states(g, batch=BATCH, turns=25, seed=3))
+        for g in GROUP_GAMES.values()
+    )
+    keys = tuple(jax.random.split(jax.random.key(11 + i), e) for i in range(len(GROUP_GAMES)))
+    return keys, states
+
+
+@functools.cache
+def _reference_groups(name, e):
+    config, evaluator = _cfg(R, name)
+    keys, states = _group_inputs(e)
+    return tuple(
+        jax.jit(jax.vmap(lambda k, s, env=env_for(g): R.search(k, s, env, config, evaluator)))(k, s)
+        for g, k, s in zip(GROUP_GAMES.values(), keys, states, strict=True)
+    )
+
+
+@pytest.mark.parametrize("e", [5, 1])
+@pytest.mark.parametrize("name", ["duct", "rm", "az", "deep"])
+def test_search_groups_matches_per_group(masked, name, e):
+    # Every mode and a 3-snake game in one search, against each group's own 1952d9f search.
+    config, evaluator = _cfg(M, name)
+    envs = tuple(env_for(g) for g in GROUP_GAMES.values())
+    keys, states = _group_inputs(e)
+    joint = jax.jit(
+        lambda ks, ss: M.search_groups(ks, ss, envs, config, groups_eval if evaluator else None)
+    )(keys, states)
+    ref = _reference_groups(name, e)
+    if name == "deep":  # the lockstep walk's loop runs after its straight-line steps
+        assert max(int(jnp.max(r.depth)) for r in ref) > M._DESCENT_STEPS
+    assert len(joint) == len(ref)
+    for g, (a, b) in enumerate(zip(joint, ref, strict=True)):
+        assert _equal(a, b), list(GROUP_GAMES)[g]
+
+
+def test_search_groups_takes_root_draws():
+    config, _ = _cfg(M, "az")
+    envs = tuple(env_for(g) for g in GROUP_GAMES.values())
+    keys, states = _group_inputs(5)
+    draws = tuple(
+        jax.vmap(lambda k, n=g.num_snakes: M.root_noise_draws(k, n, config))(k)
+        for g, k in zip(GROUP_GAMES.values(), keys, strict=True)
+    )
+    run = jax.jit(lambda ks, ss, ds: M.search_groups(ks, ss, envs, config, groups_eval, ds))
+    assert _equal(run(keys, states, draws), _reference_groups("az", 5))
+
+
+def test_search_groups_checks_its_arguments():
+    envs = (env_for(MODES["duel"]), env_for(MODES["standard"]))
+    keys, states = _group_inputs(2)
+    pick = [list(GROUP_GAMES).index(m) for m in ("duel", "standard")]
+    keys, states = tuple(keys[i] for i in pick), tuple(states[i] for i in pick)
+    noisy, _ = _cfg(M, "az")
+    with pytest.raises(ValueError, match="evaluate"):
+        M.search_groups(keys, states, envs, noisy)
+    with pytest.raises(ValueError, match="evaluate"):
+        M.search_groups(keys, states, envs, M.MCTSConfig(num_simulations=4), groups_eval)
+    with pytest.raises(ValueError, match="one batch"):
+        M.search_groups(keys[:1], states, envs, M.MCTSConfig(num_simulations=4))
+
+    def wrong_shape(ss):
+        return tuple((v[:, :1], lg) for v, lg in groups_eval(ss))
+
+    with pytest.raises(ValueError, match="evaluate must return"):
+        M.search_groups(keys, states, envs, noisy, wrong_shape)
+    with pytest.raises(ValueError, match="root_draws"):
+        M.search_groups(keys, states, envs, noisy, groups_eval, (jnp.zeros((2, 2, 4)),) * 2)
+
+
+@pytest.mark.parametrize("on_cpu", [False, True], ids=["cpu_loop", "masked"])
+@pytest.mark.parametrize("e", [1, 2])
+def test_search_groups_tree_is_updated_in_place(monkeypatch, on_cpu, e):
+    monkeypatch.setattr(M, "_masked_descent_on_cpu", on_cpu)
+    config = M.MCTSConfig(
+        num_simulations=40, selection="puct", prior="network", leaf="network",
+        root_noise_frac=0.25,
+    )  # fmt: skip
+    games = (MODES["duel"], MODES["standard"])
+    envs = tuple(env_for(g) for g in games)
+    states = tuple(
+        jax.tree.map(lambda x: x[:e], rollout_states(g, batch=BATCH, turns=25, seed=3))
+        for g in games
+    )
+    keys = tuple(jax.random.split(jax.random.key(1 + i), e) for i in range(len(games)))
+
+    def run(ks, ss):
+        return M.search_groups(ks, ss, envs, config, groups_eval)
+
+    assert tree_copies(run, keys, states, num_nodes=41) == []
+
+
+def rowwise_network(params, boards, feats, cfg):
+    """A stand-in for ``az_modes.network`` that is exactly row-independent (slices only)."""
+    lead = boards.shape[:-3]
+    b = boards.reshape(-1, *boards.shape[-3:])
+    f = feats.reshape(-1, feats.shape[-1])
+    logits = b[:, 10, 9:13, 1] * 0.7 - b[:, 9, 10:14, 2] * 0.3 + f[:, :4] * params["policy"]["b"]
+    value = jnp.tanh(b[:, 11, 10, 3] - b[:, 10, 11, 4] + 0.1 * f[:, 0])
+    return logits.reshape(*lead, NUM_ACTIONS), value.reshape(lead)
+
+
+def test_az_selfplay_joint_with_rowwise_net(masked, monkeypatch):
+    # With a network whose rows are independent, the joint search's self-play is the
+    # 1952d9f per-mode self-play bit for bit; only the real network's batch rounding differs.
+    azm = _load_az_modes()
+    monkeypatch.setattr(azm, "network", rowwise_network)
+    monkeypatch.setattr(RA, "network", rowwise_network)
+    cfg = azm.Config(**TINY, num_envs=4, num_steps=4, num_simulations=16, max_turns=40)
+    groups = unified.make_groups(cfg)
+    runner = azm.init_runner(cfg, groups, jax.random.key(0))
+    bias = jnp.array([1.0, -2.0, 3.0, 0.0])
+    params = dict(runner.params, policy={**runner.params["policy"], "b": bias})
+    args = (params, runner.env_states, runner.uids, jax.random.key(9))
+    new = jax.jit(azm.make_selfplay(cfg, groups))(*args)
+    ref = jax.jit(RA.make_selfplay(cfg, groups))(*args)
+    assert _equal(new, ref)
+
+
+@pytest.mark.parametrize("size", ["tiny", "M"])
+def test_groups_evaluator_matches_per_group_evaluator(size):
+    # The joint search's one source of difference: one network call over every mode's
+    # rows instead of one per mode (the same rows; a GEMM's rounding may depend on the batch).
+    # With these perturbed parameters (outputs up to about 2) M differed by up to 1.6e-6.
+    azm = _load_az_modes()
+    if size == "tiny":
+        shape = TINY
+    else:
+        shape = dict(zip(("conv_channels", "hidden"), unified.SIZES[size], strict=True))
+    cfg = azm.Config(**shape, num_envs=8)
+    groups = unified.make_groups(cfg)
+    params = azm.init_network(jax.random.key(2), cfg)
+    params = jax.tree.map(lambda x: x + 0.1 * jax.random.normal(jax.random.key(3), x.shape), params)
+    states = tuple(rollout_states(g.game, batch=cfg.num_envs, turns=25, seed=4) for g in groups)
+    joint = jax.jit(lambda p, ss: azm.make_groups_evaluator(p, cfg, groups)(ss))(params, states)
+    worst = 0.0
+    for g, s, (value, logits) in zip(groups, states, joint, strict=True):
+        own = jax.vmap(lambda st, p, g=g: azm.make_evaluator(p, cfg, g)(st), (0, None))
+        own_v, own_l = jax.jit(own)(s, params)
+        np.testing.assert_allclose(value, own_v, atol=1e-5, rtol=1e-5)
+        np.testing.assert_allclose(logits, own_l, atol=1e-5, rtol=1e-5)
+        for a, b in ((value, own_v), (logits, own_l)):
+            worst = max(worst, float(jnp.max(jnp.abs(a - b))))
+    print(f"{size}: max abs difference of the joint network call {worst:.3g}")
