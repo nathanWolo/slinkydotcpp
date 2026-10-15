@@ -126,9 +126,8 @@ def read_simsweep(run: Path) -> list[dict[str, Any]]:
             continue
         key = record.get("point")
         if key is None:
-            key = tuple(
-                str(record.get(k)) for k in ("label", "env_steps", "game_mode", "simulations", "play")
-            )
+            fields = ("label", "env_steps", "game_mode", "simulations", "play")
+            key = tuple(str(record.get(k)) for k in fields)
         points[key] = record  # re-assigning a key keeps its first-seen position
     return list(points.values())
 

@@ -819,8 +819,9 @@ def test_page_links_to_a_run_and_labels_a_cap():
 
 def sweep_line(mode: str, sims: int, share: float, **extra) -> str:
     row = {
-        "type": "simsweep", "schema": 1, "point": f"{mode}-{sims}", "label": "final", "env_steps": 65_536,
-        "game_mode": mode, "simulations": sims, "play": "greedy", "chart": True, "share": share,
+        "type": "simsweep", "schema": 1, "point": f"{mode}-{sims}", "label": "final",
+        "env_steps": 65_536, "game_mode": mode, "simulations": sims, "play": "greedy",
+        "chart": True, "share": share,
         "ci95": 0.01, "games": 4096, "games_target": 4096, "complete": True,
     }  # fmt: skip
     return json.dumps({**row, **extra})
@@ -850,9 +851,10 @@ def test_simsweep_http_api(tmp_path):
     server, base = serve(tmp_path)
     try:
         before = {s["name"]: s for s in get_json(base + "/api/runs")}
-        data = get_json(f"{base}/api/metrics?run={urllib.request.quote(before['az-modes-M-s0']['id'])}")
+        metrics = f"{base}/api/metrics?run="
+        data = get_json(metrics + urllib.request.quote(before["az-modes-M-s0"]["id"]))
         assert [(r["simulations"], r["share"]) for r in data["simsweep"]] == [(64, 0.8), (4, 0.3)]
-        other = get_json(f"{base}/api/metrics?run={urllib.request.quote(before['az-modes-M-s1']['id'])}")
+        other = get_json(metrics + urllib.request.quote(before["az-modes-M-s1"]["id"]))
         assert other["simsweep"] == []
         with sweep.open("a") as f:
             f.write(sweep_line("duel", 256, 0.9) + "\n")
