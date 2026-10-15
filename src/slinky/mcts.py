@@ -30,6 +30,10 @@ simulation grows only slowly with ``M`` (cache misses, deeper descents).
    joint action per level) is recorded in a small buffer, so the backup needs
    no pointer chasing: a ``while_loop`` over the tree under ``vmap`` would
    ``select`` the whole tree on every iteration.
+   On a GPU the walk is unrolled into masked steps (a finished descent stops
+   changing), with a loop test only every few steps: the test of a
+   data-dependent ``while_loop`` is a host sync there. On the CPU it stays a
+   ``while_loop``, and both forms give the same path bit for bit.
 2. *Expansion* of one node with the exact rules (head-to-heads, tail rule,
    starvation, hazards, ``max_turns`` truncation). By default
    (``spawn_food=False``) this is ``rules.rules_step`` without the map's food
@@ -266,6 +270,15 @@ _VALUES = ("win_loss", "placement")
 # the search key gives this key (under either threefry mode), and the other keys stay as
 # they were, so turning the noise on changes nothing else about a search.
 _ROOT_NOISE_STREAM = 0x524F4F54
+
+# On a GPU every test of a data-dependent loop is a device-to-host sync. The descent there
+# runs _DESCENT_STEPS masked steps in straight-line code, then tests every _DESCENT_CHUNK
+# steps (most simulations test once). On the CPU a test is free and the masked steps only
+# add work, so the descent keeps its while_loop (``_masked_descent_on_cpu`` lets tests run
+# the GPU's form there).
+_DESCENT_STEPS = 8
+_DESCENT_CHUNK = 2
+_masked_descent_on_cpu = False
 
 # ``evaluator(state) -> (value f32[N] in [-1, 1], prior_logits f32[N, 4])`` for ONE
 # unbatched state (see :func:`search`).
@@ -831,50 +844,12 @@ def _init_tree(
     )
 
 
-def _descend(
-    tree: Tree, bits: jax.Array, config: MCTSConfig, digits: jax.Array, max_depth: int
-) -> _Descent:
-    """Selection: walk down from the root, recording the path (see the module docstring).
-
-    ``bits`` (uint32[N, 4]) is this simulation's randomness. Every depth derives
-    its own noise from it (:func:`_depth_noise`), so the moves sampled at a node
-    do not depend on those sampled at its parent.
-    """
-    n = digits.shape[1]
-    powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
-
+def _descent_init(tree: Tree, config: MCTSConfig, n: int, max_depth: int) -> _Descent:
+    """The descent's carry at the root (``n`` players)."""
     rm = config.selection == "rm"
-
-    def body(c: _Descent) -> _Descent:
-        u_d = _depth_noise(bits, c.depth)
-        rm_fields = {}
-        if rm:
-            joint, *per_node = _rm_joint(tree, c.node, u_d, config, digits)
-            names = ("rm_legal", "rm_sigma", "rm_q", "rm_seen")
-            for name, x in zip(names, per_node, strict=True):
-                rm_fields[name] = getattr(c, name).at[c.depth].set(x)
-        else:
-            select = _puct_moves if config.selection == "puct" else _duct_moves
-            joint = jnp.sum(select(tree, c.node, u_d, config) * powers)
-        child = tree.children[c.node, joint]
-        depth = c.depth + 1
-        expand = child < 0
-        node = jnp.where(expand, c.node, child)
-        stop = expand | tree.terminal[node] | (depth >= max_depth)
-        return c._replace(
-            node=node,
-            depth=depth,
-            path_node=c.path_node.at[c.depth].set(c.node),
-            path_joint=c.path_joint.at[c.depth].set(joint),
-            expand=expand,
-            stored=tree.value[node],
-            active=~stop,
-            **rm_fields,
-        )
-
     zero = jnp.zeros((), jnp.int32)
     per_move = (max_depth, n, NUM_ACTIONS)
-    init = _Descent(
+    return _Descent(
         node=zero,
         depth=zero,
         path_node=jnp.zeros((max_depth,), jnp.int32),
@@ -887,7 +862,94 @@ def _descend(
         rm_q=jnp.zeros(per_move, jnp.float32) if rm else None,
         rm_seen=jnp.zeros(per_move, bool) if rm else None,
     )
-    return jax.lax.while_loop(lambda c: c.active, body, init)
+
+
+def _descent_body(
+    tree: Tree,
+    bits: jax.Array,
+    c: _Descent,
+    config: MCTSConfig,
+    digits: jax.Array,
+    max_depth: int,
+) -> _Descent:
+    """One edge of the descent from ``c.node`` (``c`` must be active)."""
+    n = digits.shape[1]
+    powers = NUM_ACTIONS ** jnp.arange(n, dtype=jnp.int32)
+    rm = config.selection == "rm"
+    u_d = _depth_noise(bits, c.depth)
+    rm_fields = {}
+    if rm:
+        joint, *per_node = _rm_joint(tree, c.node, u_d, config, digits)
+        names = ("rm_legal", "rm_sigma", "rm_q", "rm_seen")
+        for name, x in zip(names, per_node, strict=True):
+            rm_fields[name] = getattr(c, name).at[c.depth].set(x)
+    else:
+        select = _puct_moves if config.selection == "puct" else _duct_moves
+        joint = jnp.sum(select(tree, c.node, u_d, config) * powers)
+    child = tree.children[c.node, joint]
+    depth = c.depth + 1
+    expand = child < 0
+    node = jnp.where(expand, c.node, child)
+    stop = expand | tree.terminal[node] | (depth >= max_depth)
+    return c._replace(
+        node=node,
+        depth=depth,
+        path_node=c.path_node.at[c.depth].set(c.node),
+        path_joint=c.path_joint.at[c.depth].set(joint),
+        expand=expand,
+        stored=tree.value[node],
+        active=~stop,
+        **rm_fields,
+    )
+
+
+def _masked(step: Callable[[_Descent], _Descent]) -> Callable[[_Descent], _Descent]:
+    """``step`` that leaves a finished descent unchanged (what a batched ``while_loop`` does)."""
+    return lambda c: jax.tree.map(lambda new, old: jnp.where(c.active, new, old), step(c), c)
+
+
+def _walk(steps, carries, max_depth: int):
+    """The GPU descent: masked steps (no-ops once a descent stops); one loop test per chunk."""
+    cs = tuple(carries)
+    for _ in range(min(_DESCENT_STEPS, max_depth)):
+        cs = tuple(f(c) for f, c in zip(steps, cs, strict=True))
+    if _DESCENT_STEPS >= max_depth:
+        return cs
+
+    def chunk(cs):
+        for _ in range(_DESCENT_CHUNK):
+            cs = tuple(f(c) for f, c in zip(steps, cs, strict=True))
+        return cs
+
+    def active(cs):
+        return functools.reduce(jnp.logical_or, [jnp.any(c.active) for c in cs])
+
+    return jax.lax.while_loop(active, chunk, cs)
+
+
+def _descend(
+    tree: Tree, bits: jax.Array, config: MCTSConfig, digits: jax.Array, max_depth: int
+) -> _Descent:
+    """Selection: walk down from the root, recording the path (see the module docstring).
+
+    ``bits`` (uint32[N, 4]) is this simulation's randomness. Every depth derives
+    its own noise from it (:func:`_depth_noise`), so the moves sampled at a node
+    do not depend on those sampled at its parent.
+    """
+    init = _descent_init(tree, config, digits.shape[1], max_depth)
+    body = functools.partial(
+        _descent_body, tree, bits, config=config, digits=digits, max_depth=max_depth
+    )
+
+    def plain(c):
+        return jax.lax.while_loop(lambda c: c.active, body, c)
+
+    def masked(c):
+        return _walk((_masked(body),), (c,), max_depth)[0]
+
+    if _masked_descent_on_cpu:
+        return masked(init)
+    return jax.lax.platform_dependent(init, cpu=plain, default=masked)
 
 
 def _backup(
@@ -950,6 +1012,18 @@ def search(
     function, so new parameters need no recompilation. Its value is clipped to
     ``[-1, 1]``; finished states keep their exact values and dead snakes -1.
     """
+    tree, deepest, expanded, k_final = _run(key, state, env, config, evaluator)
+    return _output(k_final, tree, config, deepest, expanded)
+
+
+def _run(
+    key: jax.Array,
+    state: State,
+    env: BattlesnakeEnv,
+    config: MCTSConfig,
+    evaluator: Evaluator | None,
+) -> tuple[Tree, jax.Array, jax.Array, jax.Array]:
+    """The simulations of :func:`search`: the final tree, deepest, expanded and the final key."""
     game = env.config
     n = game.num_snakes
     _check_game(game)
@@ -997,7 +1071,7 @@ def search(
     k_root = jax.random.fold_in(key, _ROOT_NOISE_STREAM) if config.root_noise_frac > 0 else None
     tree = _init_tree(state, env, config, num_sims + 1, evaluator, k_root)
     tree, deepest, expanded = jax.lax.fori_loop(0, num_sims, simulate, (tree, zero, zero))
-    return _output(k_final, tree, config, deepest, expanded)
+    return tree, deepest, expanded, k_final
 
 
 def _output(
