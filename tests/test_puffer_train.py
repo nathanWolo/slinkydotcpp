@@ -313,6 +313,38 @@ def lr_log(monkeypatch) -> list[float]:
     return lrs
 
 
+def test_resume_keeps_the_evaluation_schedule(tmp_path, monkeypatch):
+    evaluated = []
+    record = dict(play="greedy", opponent="random_legal", score=1.0, score_ci95=0.0, wins=1)
+    record |= dict(draws=0, losses=0, seconds=0.0)
+
+    def fake_evaluation(snapshot, *rest):
+        evaluated.append(snapshot)
+        return [dict(record)]
+
+    monkeypatch.setattr(train, "evaluate_snapshot", fake_evaluation)
+    run = tmp_path / "run"
+    every = ["--eval-games", "1", "--eval-every", str(2 * DUEL_EPOCH)]
+    train.train(run_args(run, "--total-timesteps", str(3 * DUEL_EPOCH), *every))
+    train.train(train.parse_args(["--resume", str(run), "--total-timesteps", str(6 * DUEL_EPOCH)]))
+    # Epochs 2 and 3 (the end), then 4 and 6: multiples of the interval from step 0, not 5
+    # (two epochs after the resume step).
+    steps = [int(Path(s).name.removeprefix("step-")) for s in evaluated]
+    assert steps == [k * DUEL_EPOCH for k in (2, 3, 4, 6)]
+
+
+def test_crossed():
+    assert [
+        train.crossed(10, before, now) for before, now in [(0, 9), (0, 10), (9, 25), (10, 19)]
+    ] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert not train.crossed(0, 0, 100)
+
+
 def test_resume_applies_explicit_optimizer_flags(tmp_path):
     run = tmp_path / "run"
     train.train(run_args(run, "--total-timesteps", str(3 * DUEL_EPOCH)))

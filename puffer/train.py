@@ -836,6 +836,15 @@ def format_eval(record: dict[str, Any]) -> str:
 # --- The training run --------------------------------------------------------------------
 
 
+def crossed(every: int, before: int, now: int) -> bool:
+    """Whether a multiple of ``every`` (> 0) lies in ``(before, now]``.
+
+    Evaluations and checkpoints fall on multiples of their interval counted from step 0, so a
+    resumed run keeps the schedule of the run (rather than restarting it at the resume step).
+    """
+    return every > 0 and now // every > before // every
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     """Run ``args`` (from :func:`parse_args`); returns the summary also written to the log.
 
@@ -959,10 +968,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 trainer.train()
                 update += time.perf_counter() - tick
                 step = trainer.global_step
-                if args.checkpoint_every and step - last_checkpoint >= args.checkpoint_every:
+                if crossed(args.checkpoint_every, last_checkpoint, step):
                     trainer.save_checkpoint()
                     last_checkpoint = step
-                if can_eval and args.eval_every and step - last_eval >= args.eval_every:
+                if can_eval and crossed(args.eval_every, last_eval, step):
                     tick = time.perf_counter()
                     run_eval()
                     evaluating += time.perf_counter() - tick
