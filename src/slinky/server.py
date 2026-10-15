@@ -505,6 +505,98 @@ class Mover:
         return int(act(key, state)), name
 
 
+API_DELTAS = {"up": (0, 1), "down": (0, -1), "left": (-1, 0), "right": (1, 0)}  # y points up
+
+
+class MoveLedger:
+    """Whether the engine applied each answer, and a JSON line per answer.
+
+    The engine never says that an answer came too late: it just moves the snake on
+    as if it had repeated its last move. Each game's next request (``/move`` or
+    ``/end``) shows where the snake's head went, so a head that moved another way
+    than the answer means the answer missed the game's timeout, from compute or the
+    network. A late answer that happens to be the default move goes unnoticed, so
+    the count is a lower bound. A turn that skips one means a request that never
+    reached us.
+
+    Each answer appends one line to ``path`` (when given): time, snake, game, turn,
+    ruleset, map, snake count, source (e.g. ``ladder``), the game's timeout in ms,
+    the agent, the move, our compute ms and ``prev``, the verdict on this game's
+    previous answer (``applied``, ``missed``, ``gap`` or None). ``/end`` adds a line
+    with ``"end": true`` and the verdict on the last answer. Detected misses are
+    also logged as warnings.
+    """
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._last: dict[tuple[str, str], tuple[int, str, int, int]] = {}  # turn, move, x, y
+
+    def verdict(self, snake: str, req: dict[str, Any]) -> str | None:
+        """The fate of this game's previous answer, from the head in this request."""
+        try:
+            game, turn = req["game"]["id"], int(req["turn"])
+            head, board = req["you"]["head"], req["board"]
+            x, y, w, h = int(head["x"]), int(head["y"]), int(board["width"]), int(board["height"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        with self._lock:
+            prev = self._last.get((snake, game))
+        if prev is None:
+            return None
+        prev_turn, move, px, py = prev
+        if turn != prev_turn + 1:
+            return "gap"
+        # Shortest signed step, so wrapped boards count an edge crossing as one step.
+        dx = (x - px + w // 2) % w - w // 2 if w else x - px
+        dy = (y - py + h // 2) % h - h // 2 if h else y - py
+        return "applied" if (dx, dy) == API_DELTAS[move] else "missed"
+
+    def record(
+        self, snake: str, req: dict[str, Any], move: str | None, agent: str, ms: float,
+        end: bool = False,
+    ) -> str | None:  # fmt: skip
+        """Judge the previous answer, remember this one (``move``; None at ``/end``)."""
+        verdict = self.verdict(snake, req)
+        game = req.get("game", {}) if isinstance(req.get("game"), dict) else {}
+        key = (snake, str(game.get("id")))
+        try:
+            head = req["you"]["head"]
+            last = (int(req["turn"]), move, int(head["x"]), int(head["y"]))
+        except (KeyError, TypeError, ValueError):
+            last = None
+        with self._lock:
+            if end or last is None or move is None:
+                self._last.pop(key, None)
+            else:
+                if key not in self._last and len(self._last) >= MAX_GAMES:
+                    del self._last[next(iter(self._last))]  # games whose /end never came
+                self._last[key] = last
+        if verdict in ("missed", "gap"):
+            log.warning(
+                "%s game %s turn %s: our previous answer was not applied (%s; timeout %s ms)",
+                snake, key[1], req.get("turn"), verdict, game.get("timeout"),
+            )  # fmt: skip
+        if self.path:
+            ruleset = game.get("ruleset") if isinstance(game.get("ruleset"), dict) else {}
+            board = req.get("board") if isinstance(req.get("board"), dict) else {}
+            line = {
+                "t": round(time.time(), 3), "snake": snake, "game": key[1], "turn": req.get("turn"),
+                "ruleset": ruleset.get("name"), "map": game.get("map"),
+                "snakes": len(board.get("snakes") or []), "source": game.get("source"),
+                "timeout": game.get("timeout"), "agent": agent, "move": move,
+                "ms": round(ms, 1), "prev": verdict,
+            }  # fmt: skip
+            if end:
+                line["end"] = True
+            try:
+                with self._lock, open(self.path, "a") as f:
+                    f.write(json.dumps(line) + "\n")
+            except OSError:
+                log.exception("cannot write the move log %s", self.path)
+        return verdict
+
+
 SNAKE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -521,8 +613,12 @@ def parse_snake(text: str) -> tuple[str, str]:
     return name, agent
 
 
-def make_handler(snakes: dict[str, tuple[Mover, dict[str, str]]]) -> type[BaseHTTPRequestHandler]:
-    """A handler serving each ``name -> (mover, info)`` snake under ``/<name>``."""
+def make_handler(
+    snakes: dict[str, tuple[Mover, dict[str, str]]], ledger: MoveLedger | None = None
+) -> type[BaseHTTPRequestHandler]:
+    """A handler serving each ``name -> (mover, info)`` snake under ``/<name>``; ``ledger``
+    checks that the engine applied each answer (see :class:`MoveLedger`)."""
+    ledger = ledger or MoveLedger()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "slinky"
@@ -601,6 +697,10 @@ def make_handler(snakes: dict[str, tuple[Mover, dict[str, str]]]) -> type[BaseHT
                     name,
                     ms,
                 )
+                try:
+                    ledger.record(snake, req, MOVE_NAMES[action], name, ms)
+                except Exception:  # bookkeeping must never break play
+                    log.exception("%s game %s: move ledger", snake, game)
             elif path == "start":
                 self._send(200, {})  # answer first; compiling may take a few seconds
                 try:
@@ -621,6 +721,10 @@ def make_handler(snakes: dict[str, tuple[Mover, dict[str, str]]]) -> type[BaseHT
                     log.exception("%s game %s: bad /start request", snake, game)
             else:
                 self._send(200, {})
+                try:
+                    ledger.record(snake, req, None, "", 0.0, end=True)
+                except Exception:
+                    log.exception("%s game %s: move ledger", snake, game)
                 try:
                     mover.end(req)
                     left = [s["id"] for s in req["board"]["snakes"]]
@@ -663,6 +767,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--color", default="#3b82f6")
     p.add_argument("--head", default="default")
     p.add_argument("--tail", default="default")
+    p.add_argument(
+        "--move-log",
+        help="append a JSON line per answer here, with whether the engine applied the "
+        "game's previous answer (a lower bound on timeouts; see MoveLedger)",
+    )
     args = p.parse_args(argv)
     try:
         specs = dict(parse_snake(text) for text in args.agent or ["ppo"])
@@ -694,7 +803,7 @@ def main(argv: list[str] | None = None) -> None:
             "version": f"slinky {agent}",
         }
         snakes[snake] = (mover, info)
-    server = Server((args.host, args.port), make_handler(snakes))
+    server = Server((args.host, args.port), make_handler(snakes, MoveLedger(args.move_log)))
     for snake, agent in specs.items():
         log.info("serving %s on http://%s:%d/%s", agent, args.host, args.port, snake)
     with contextlib.suppress(KeyboardInterrupt):

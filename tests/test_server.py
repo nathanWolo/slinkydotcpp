@@ -18,9 +18,11 @@ from slinky.agents import make_agent, make_env, parse_agent
 from slinky.engine_json import state_to_engine
 from slinky.rules import royale_hazards, rules_step
 from slinky.server import (
+    API_DELTAS,
     MODE_CONFIGS,
     MOVE_NAMES,
     UNKNOWN_SIDE,
+    MoveLedger,
     Mover,
     Server,
     game_config,
@@ -716,3 +718,85 @@ def test_ladder_games_hit_the_precompiled_configs(modes_mover: Mover) -> None:
     assert dict(modes_mover._fns) == fns and not modes_mover._pending
     req = ladder_request("standard", "empty")
     assert modes_mover.start(req) == "safe_move"
+
+
+# --- Did the engine apply our answers? ----------------------------------------------------
+
+
+def ledger_request(turn: int, x: int, y: int, game: str = "g", w: int = 11, h: int = 11) -> dict:
+    """The parts of a request :class:`MoveLedger` reads: our head at ``turn``."""
+    return {
+        "game": {"id": game, "timeout": 500, "source": "ladder", "map": "standard",
+                 "ruleset": {"name": "standard"}},
+        "turn": turn,
+        "board": {"width": w, "height": h, "snakes": [{}, {}]},
+        "you": {"head": {"x": x, "y": y}},
+    }  # fmt: skip
+
+
+def test_move_ledger_judges_each_answer(tmp_path) -> None:
+    path = tmp_path / "moves.jsonl"
+    ledger = MoveLedger(str(path))
+    assert ledger.record("s", ledger_request(0, 5, 5), "up", "az", 30.0) is None  # nothing before
+    assert ledger.record("s", ledger_request(1, 5, 6), "left", "az", 31.0) == "applied"  # went up
+    assert ledger.record("s", ledger_request(2, 4, 6), "left", "az", 32.0) == "applied"
+    # We said left; the head went up instead: the engine used its default move.
+    assert ledger.record("s", ledger_request(3, 4, 7), "down", "az", 33.0) == "missed"
+    # Turn 4's request never reached us: turn 5 arrives after turn 3.
+    assert ledger.record("s", ledger_request(5, 4, 5), "up", "az", 34.0) == "gap"
+    # Games and snakes are judged apart.
+    assert ledger.record("other", ledger_request(6, 0, 0), "up", "az", 1.0) is None
+    assert ledger.record("s", ledger_request(0, 1, 1, game="h"), "right", "az", 1.0) is None
+    # /end judges the last answer (here: the snake ran into the wall as told) and forgets the game.
+    assert ledger.record("s", ledger_request(6, 4, 6), None, "", 0.0, end=True) == "applied"
+    assert ledger.record("s", ledger_request(7, 4, 7), "up", "az", 1.0) is None
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["prev"] for r in lines] == [
+        None, "applied", "applied", "missed", "gap", None, None, "applied", None
+    ]
+    assert lines[3] | {"t": 0} == {
+        "t": 0, "snake": "s", "game": "g", "turn": 3, "ruleset": "standard", "map": "standard",
+        "snakes": 2, "source": "ladder", "timeout": 500, "agent": "az", "move": "down",
+        "ms": 33.0, "prev": "missed",
+    }  # fmt: skip
+    assert lines[7]["end"] is True and lines[7]["move"] is None
+
+
+def test_move_ledger_wraps_and_survives_junk() -> None:
+    ledger = MoveLedger()
+    ledger.record("s", ledger_request(0, 10, 3), "right", "az", 1.0)
+    assert ledger.verdict("s", ledger_request(1, 0, 3)) == "applied"  # across the wrapped edge
+    assert ledger.verdict("s", ledger_request(1, 9, 3)) == "missed"
+    ledger.record("s", ledger_request(0, 4, 0, game="w"), "down", "az", 1.0)
+    assert ledger.verdict("s", ledger_request(1, 4, 10, game="w")) == "applied"  # y 0 -> 10: down
+    for junk in ({}, {"game": 3}, {"game": {"id": "g"}, "turn": "x"}, {"board": 3}):
+        assert ledger.record("s", junk, "up", "az", 1.0) is None
+
+
+def test_http_moves_are_logged(tmp_path) -> None:
+    path = tmp_path / "moves.jsonl"
+    info = {"apiversion": "1", "author": "t", "color": "#1", "head": "default", "tail": "default"}
+    handler = make_handler({"ppo": (Mover("ppo"), info)}, MoveLedger(str(path)))
+    srv = Server(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/ppo"
+        state = midgame_states(DUEL, 1, seed=3)[0]
+        req = api_request(state_to_engine(state, DUEL), 0, game_id="logged")
+        body = json.dumps(req).encode()
+        assert _post(url + "/start", body) == (200, {})
+        code, answer = _post(url + "/move", body)
+        assert code == 200
+        # Play our answer: the next request's head is one step that way.
+        dx, dy = API_DELTAS[answer["move"]]
+        nxt = json.loads(body)
+        nxt["turn"] += 1
+        nxt["you"]["head"] = {"x": nxt["you"]["head"]["x"] + dx, "y": nxt["you"]["head"]["y"] + dy}
+        assert _post(url + "/end", json.dumps(nxt).encode()) == (200, {})
+    finally:
+        srv.shutdown()
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(r["move"], r["prev"], r.get("end", False)) for r in lines] == [
+        (answer["move"], None, False), (None, "applied", True)
+    ]
+    assert lines[0]["agent"] and lines[0]["ms"] > 0 and lines[0]["game"] == "logged"
