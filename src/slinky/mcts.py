@@ -959,7 +959,7 @@ def _walk(steps, carries, max_depth: int):
     cs = tuple(carries)
     for _ in range(min(_DESCENT_STEPS, max_depth)):
         cs = tuple(f(c) for f, c in zip(steps, cs, strict=True))
-    if _DESCENT_STEPS >= max_depth:
+    if max_depth <= _DESCENT_STEPS:
         return cs
 
     def chunk(cs):

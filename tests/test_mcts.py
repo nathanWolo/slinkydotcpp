@@ -591,7 +591,11 @@ def test_root_noise_is_a_distribution_for_any_alpha(alpha):
     prior = legal / jnp.sum(legal, -1, keepdims=True)
     config = M.MCTSConfig(selection="puct", root_noise_frac=1.0, root_dirichlet_alpha=alpha)
     keys = jax.random.split(jax.random.key(0), 4096)
-    noise = np.asarray(jax.vmap(lambda k: M._noisy_root_prior(M.root_noise_draws(k, 2, config), prior, legal, config))(keys))
+
+    def noisy(k):
+        return M._noisy_root_prior(M.root_noise_draws(k, 2, config), prior, legal, config)
+
+    noise = np.asarray(jax.vmap(noisy)(keys))
     assert np.isfinite(noise).all() and np.all(noise[:, ~np.asarray(legal)] == 0)
     np.testing.assert_allclose(noise.sum(-1), 1.0, rtol=1e-5)
     np.testing.assert_array_equal(noise[:, 1], np.broadcast_to([1, 0, 0, 0], (4096, 4)))

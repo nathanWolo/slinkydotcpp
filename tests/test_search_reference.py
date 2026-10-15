@@ -110,7 +110,7 @@ def _reference_outputs(name, mode, seed):
 
     batched = jax.jit(jax.vmap(one))(keys, states)
     single = [
-        jax.jit(one)(keys[i], jax.tree.map(lambda x: x[i], states)) for i in range(2)
+        jax.jit(one)(keys[i], jax.tree.map(lambda x, i=i: x[i], states)) for i in range(2)
     ]  # fmt: skip
     return batched, single
 
@@ -129,7 +129,7 @@ def test_search_matches_reference(masked, name, mode):
         ref_batched, ref_single = _reference_outputs(name, mode, seed)
         assert _equal(batched_fn(keys, states), ref_batched)
         for i in range(2):
-            out = single_fn(keys[i], jax.tree.map(lambda x: x[i], states))
+            out = single_fn(keys[i], jax.tree.map(lambda x, i=i: x[i], states))
             assert _equal(out, ref_single[i])
 
 
@@ -224,7 +224,9 @@ def test_descent_paths_match_reference(monkeypatch, name):
     monkeypatch.setattr(M, "_masked_descent_on_cpu", True)
 
     def descents(module, cfg):
-        one = lambda t, b: module._descend(t, b, cfg, digits, max_depth)
+        def one(t, b):
+            return module._descend(t, b, cfg, digits, max_depth)
+
         batched = jax.jit(jax.vmap(jax.vmap(one, in_axes=(None, 0)), in_axes=(0, 0)))
         single = jax.jit(one)
         tree0 = jax.tree.map(lambda x: x[0], trees)
@@ -313,7 +315,8 @@ def test_root_draws_are_the_same_under_any_batching():
     keys = jax.random.split(jax.random.key(3), 21).reshape(3, 7)
     nested = jax.jit(jax.vmap(jax.vmap(lambda k: M.root_noise_draws(k, 4, config))))(keys)
     flat = jax.jit(jax.vmap(lambda k: M.root_noise_draws(k, 4, config)))(keys.reshape(-1))
-    each = jnp.stack([jax.jit(lambda k: M.root_noise_draws(k, 4, config))(k) for k in keys.reshape(-1)])
+    draw = jax.jit(lambda k: M.root_noise_draws(k, 4, config))
+    each = jnp.stack([draw(k) for k in keys.reshape(-1)])
     assert nested.shape == (3, 7, 4, NUM_ACTIONS)
     assert np.array_equal(np.asarray(nested).reshape(21, 4, 4), np.asarray(flat))
     assert np.array_equal(np.asarray(flat), np.asarray(each))
@@ -356,10 +359,15 @@ def _group_inputs(e):
 def _reference_groups(name, e):
     config, evaluator = _cfg(R, name)
     keys, states = _group_inputs(e)
-    return tuple(
-        jax.jit(jax.vmap(lambda k, s, env=env_for(g): R.search(k, s, env, config, evaluator)))(k, s)
-        for g, k, s in zip(GROUP_GAMES.values(), keys, states, strict=True)
-    )
+    outs = []
+    for g, k, s in zip(GROUP_GAMES.values(), keys, states, strict=True):
+        env = env_for(g)
+
+        def one(k, s, env=env):
+            return R.search(k, s, env, config, evaluator)
+
+        outs.append(jax.jit(jax.vmap(one))(k, s))
+    return tuple(outs)
 
 
 @pytest.mark.parametrize("e", [5, 1])
