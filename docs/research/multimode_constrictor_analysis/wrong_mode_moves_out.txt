@@ -1,0 +1,5 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/wrong_mode_moves.py runs/ppo-modes-seed0
+standard     decisions  37358  told duel:  3.6%  told royale:  2.7%  told constrictor:  5.9%
+duel         decisions  24796  told standard:  3.9%  told royale:  4.3%  told constrictor:  3.9%
+royale       decisions  39554  told standard:  2.3%  told duel:  4.1%  told constrictor:  6.0%
+constrictor  decisions  32773  told standard:  4.6%  told duel:  3.8%  told royale:  4.3%

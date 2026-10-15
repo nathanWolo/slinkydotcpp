@@ -1,0 +1,9 @@
+# cd scratch/multimode/analysis/tailprobe && /home/user/slinkydotcpp/.venv/bin/python extra.py
+pooled sampled constrictor: 158897 decisions 2048 games
+ k= 1 n= 861 G picks std-best 0.237 [0.209,0.266]  S 0.174 [0.150,0.199]  G-S +0.063 [+0.035,+0.093]
+ k= 3 n= 595 G picks std-best 0.145 [0.116,0.175]  S 0.108 [0.082,0.134]  G-S +0.037 [+0.008,+0.066]
+ k= 5 n= 414 G picks std-best 0.130 [0.098,0.165]  S 0.070 [0.047,0.095]  G-S +0.060 [+0.027,+0.094]
+ k=10 n= 257 G picks std-best 0.117 [0.079,0.158]  S 0.062 [0.035,0.093]  G-S +0.054 [+0.016,+0.096]
+gsgs: T8 masked G-S +0.033, plain G-S +0.011, interaction +0.023 [+0.007,+0.038]; masked decisions/game 1.58, plain 3.23
+pooled: T8 masked G-S +0.024, plain G-S +0.009, interaction +0.015 [+0.004,+0.026]; masked decisions/game 1.53, plain 3.33
+# exit status: 0

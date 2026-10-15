@@ -18,3 +18,10 @@ replays/
 # Lambda package (deploy/lambda/build.sh)
 deploy/lambda/build/
 deploy/lambda/dist/
+
+# PufferLib environment (puffer/): its venv, the built extension and PuffeRL's checkpoints
+.venv-puffer/
+puffer/*.so
+experiments/
+# `import pufferlib` symlinks its resources into the current directory
+/resources

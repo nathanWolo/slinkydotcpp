@@ -1,0 +1,198 @@
+{
+  "meta": {
+    "jax": "0.11.2",
+    "backend": "cpu",
+    "devices": [
+      "cpu:0"
+    ],
+    "device_kinds": [
+      "cpu"
+    ],
+    "cpu_count": 4,
+    "python": "3.13.16",
+    "args": {
+      "configs": [
+        "duel",
+        "standard-4p"
+      ],
+      "batch_sizes": [
+        1024,
+        8192
+      ],
+      "turns": 100,
+      "variants": [
+        "sim",
+        "sim+ego-obs"
+      ],
+      "policy": "random",
+      "repeats": 3,
+      "quick": false,
+      "json": "experiments/puffer/slinky_r.json",
+      "seed": 0
+    }
+  },
+  "results": [
+    {
+      "config": "duel",
+      "variant": "sim",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.25951547200020286,
+      "times_s": [
+        0.3048765090024972,
+        0.25951547200020286,
+        0.3107223279985192
+      ],
+      "warmup_s": 2.478529370000615,
+      "steps_per_s": 394581.4837580087,
+      "agent_steps_per_s": 789162.9675160174,
+      "live_fraction": 1.0,
+      "episodes": 37206
+    },
+    {
+      "config": "duel",
+      "variant": "sim",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 1.4664895519999845,
+      "times_s": [
+        1.4664895519999845,
+        1.48258664199966,
+        1.6462074859991844
+      ],
+      "warmup_s": 3.4577032679990225,
+      "steps_per_s": 558612.9126407909,
+      "agent_steps_per_s": 1117225.8252815818,
+      "live_fraction": 1.0,
+      "episodes": 298123
+    },
+    {
+      "config": "duel",
+      "variant": "sim+ego-obs",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.8925340380010311,
+      "times_s": [
+        0.9048143459986022,
+        0.9046355879982002,
+        0.8925340380010311
+      ],
+      "warmup_s": 3.1795777279985487,
+      "steps_per_s": 114729.51802414251,
+      "agent_steps_per_s": 229459.03604828502,
+      "live_fraction": 1.0,
+      "episodes": 37206
+    },
+    {
+      "config": "duel",
+      "variant": "sim+ego-obs",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 9.141552847999264,
+      "times_s": [
+        9.141552847999264,
+        9.383669316997839,
+        9.445696695998777
+      ],
+      "warmup_s": 11.990482222001447,
+      "steps_per_s": 89612.78391332513,
+      "agent_steps_per_s": 179225.56782665025,
+      "live_fraction": 1.0,
+      "episodes": 298123
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 0.3631985279971559,
+      "times_s": [
+        0.3631985279971559,
+        0.3873036009972566,
+        0.4123774460022105
+      ],
+      "warmup_s": 2.552139404000627,
+      "steps_per_s": 281939.4686555609,
+      "agent_steps_per_s": 1127757.8746222437,
+      "live_fraction": 1.0,
+      "episodes": 25440
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 2.240848735000327,
+      "times_s": [
+        2.240848735000327,
+        2.2472183690006204,
+        2.3100713060011913
+      ],
+      "warmup_s": 4.184570269000687,
+      "steps_per_s": 365575.76921847893,
+      "agent_steps_per_s": 1462303.0768739157,
+      "live_fraction": 1.0,
+      "episodes": 202665
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim+ego-obs",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 2.5457616089988733,
+      "times_s": [
+        2.5457616089988733,
+        2.5648325919974013,
+        2.5922372940003697
+      ],
+      "warmup_s": 5.096942385996954,
+      "steps_per_s": 40223.719156590254,
+      "agent_steps_per_s": 160894.87662636102,
+      "live_fraction": 1.0,
+      "episodes": 25440
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim+ego-obs",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 21.486945148000814,
+      "times_s": [
+        21.682629356997495,
+        21.486945148000814,
+        21.701894434001588
+      ],
+      "warmup_s": 23.915304132999154,
+      "steps_per_s": 38125.47546230507,
+      "agent_steps_per_s": 152501.90184922027,
+      "live_fraction": 1.0,
+      "episodes": 202665
+    }
+  ],
+  "game_length": {
+    "duel": {
+      "games": 4096,
+      "finished": 4096,
+      "mean": 2.71875,
+      "median": 2.0,
+      "p90": 4.0,
+      "max": 11
+    },
+    "standard-4p": {
+      "games": 4096,
+      "finished": 4096,
+      "mean": 3.995849609375,
+      "median": 4.0,
+      "p90": 6.0,
+      "max": 19
+    }
+  }
+}

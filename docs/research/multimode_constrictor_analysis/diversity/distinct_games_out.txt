@@ -1,0 +1,20 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/diversity/distinct_games.py constrictor G,H,H,H 256 G=ppo_modes:runs/ppo-modes-seed0 H=heuristic
+constrictor G,H,H,H: 251 distinct games of 256 (all done by turn 400: True)
+
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/diversity/distinct_games.py constrictor G,P,P,P 256 G=ppo_modes:runs/ppo-modes-seed0 P=ppo
+constrictor G,P,P,P: 201 distinct games of 256 (all done by turn 400: True)
+
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/diversity/distinct_games.py constrictor G,S,G,S 512 G=ppo_modes:runs/ppo-modes-seed0 S=ppo_modes:runs/ppo-modes-constrictor-seed0
+constrictor G,S,G,S: 12 distinct games of 512 (all done by turn 400: True)
+
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/diversity/distinct_games.py constrictor G,S,G,S 1024 G=ppo_modes:runs/ppo-modes-seed0 S=ppo_modes:runs/ppo-modes-constrictor-seed0
+constrictor G,S,G,S: 12 distinct games of 1024 (all done by turn 400: True)
+
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/diversity/distinct_games.py standard G,S,G,S 128 G=ppo_modes:runs/ppo-modes-seed0 S=ppo_modes:runs/ppo-modes-standard-seed0
+standard G,S,G,S: 128 distinct games of 128 (all done by turn 400: True)
+
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/diversity/distinct_games.py royale G,S,G,S 128 G=ppo_modes:runs/ppo-modes-seed0 S=ppo_modes:runs/ppo-modes-royale-seed0
+royale G,S,G,S: 128 distinct games of 128 (all done by turn 400: True)
+
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/diversity/distinct_games.py duel G,S 128 G=ppo_modes:runs/ppo-modes-seed0 S=ppo_modes:runs/ppo-modes-duel-seed0
+duel G,S: 128 distinct games of 128 (all done by turn 400: True)

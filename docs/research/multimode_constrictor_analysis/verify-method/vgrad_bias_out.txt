@@ -1,0 +1,44 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/verify-method/vgrad_bias.py
+value leaves [('hidden/b', 17568, 256), ('hidden/w', 17824, 294912), ('value/b', 313764, 1), ('value/w', 313765, 256)]
+
+G-1048576 parts=[np.str_('pg'), np.str_('v'), np.str_('ent')]
+  value-head bias grad (sign>0 => V above targets on average), per rollout: [[0.0018, 0.0047, 0.0008, -0.0002], [0.0012, 0.0039, 0.0014, 0.0016]]
+  share of |g_v|^2 in value head: [[0.984, 0.971, 0.977, 0.947], [0.952, 0.97, 0.978, 0.902]]
+  raw split-half cosines [all]: food pairs +0.446, C vs food +0.028, ceilings [0.73, 0.61, 0.88, 0.55], C|S -0.003
+  raw split-half cosines [no value head]: food pairs +0.182, C vs food +0.022, ceilings [0.52, 0.43, 0.77, 0.56], C|S -0.091
+  raw split-half cosines [torso]: food pairs +0.182, C vs food +0.022, ceilings [0.52, 0.43, 0.77, 0.55], C|S -0.091
+
+G-2097152 parts=[np.str_('pg'), np.str_('v'), np.str_('ent')]
+  value-head bias grad (sign>0 => V above targets on average), per rollout: [[-0.0036, -0.0037, -0.0054, -0.007], [-0.0029, -0.0021, -0.0022, -0.0067]]
+  share of |g_v|^2 in value head: [[0.963, 0.967, 0.93, 0.925], [0.939, 0.979, 0.961, 0.917]]
+  raw split-half cosines [all]: food pairs +0.483, C vs food +0.319, ceilings [0.69, 0.69, 0.62, 0.91], C|S +0.339
+  raw split-half cosines [no value head]: food pairs +0.632, C vs food +0.501, ceilings [0.77, 0.66, 0.78, 0.89], C|S +0.553
+  raw split-half cosines [torso]: food pairs +0.633, C vs food +0.502, ceilings [0.77, 0.66, 0.78, 0.89], C|S +0.554
+
+G-3145728 parts=[np.str_('pg'), np.str_('v'), np.str_('ent')]
+  value-head bias grad (sign>0 => V above targets on average), per rollout: [[0.0038, 0.0042, 0.0048, 0.0081], [0.0032, 0.0042, 0.005, 0.0097]]
+  share of |g_v|^2 in value head: [[0.965, 0.956, 0.936, 0.831], [0.952, 0.94, 0.912, 0.889]]
+  raw split-half cosines [all]: food pairs +0.507, C vs food +0.053, ceilings [0.82, 0.47, 0.76, 0.55], C|S +0.011
+  raw split-half cosines [no value head]: food pairs +0.600, C vs food +0.378, ceilings [0.84, 0.64, 0.8, 0.51], C|S +0.357
+  raw split-half cosines [torso]: food pairs +0.602, C vs food +0.378, ceilings [0.84, 0.64, 0.8, 0.51], C|S +0.358
+
+G-4194304 parts=[np.str_('pg'), np.str_('v'), np.str_('ent')]
+  value-head bias grad (sign>0 => V above targets on average), per rollout: [[-0.0019, -0.0012, -0.0024, -0.0002], [-0.0024, -0.0029, -0.0027, -0.0037]]
+  share of |g_v|^2 in value head: [[0.928, 0.956, 0.874, 0.896], [0.863, 0.956, 0.953, 0.916]]
+  raw split-half cosines [all]: food pairs +0.028, C vs food +0.034, ceilings [0.69, 0.28, 0.2, 0.81], C|S -0.170
+  raw split-half cosines [no value head]: food pairs +0.340, C vs food +0.099, ceilings [0.85, 0.41, 0.46, 0.8], C|S -0.003
+  raw split-half cosines [torso]: food pairs +0.340, C vs food +0.099, ceilings [0.85, 0.4, 0.46, 0.8], C|S -0.003
+
+G-5242880 parts=[np.str_('pg'), np.str_('v'), np.str_('ent')]
+  value-head bias grad (sign>0 => V above targets on average), per rollout: [[-0.0008, -0.0004, -0.0008, 0.0007], [-0.0012, -0.0023, -0.0006, -0.0004]]
+  share of |g_v|^2 in value head: [[0.927, 0.97, 0.961, 0.918], [0.938, 0.952, 0.966, 0.941]]
+  raw split-half cosines [all]: food pairs -0.030, C vs food -0.154, ceilings [-0.04, 0.14, -0.06, 0.74], C|S -0.164
+  raw split-half cosines [no value head]: food pairs +0.048, C vs food -0.100, ceilings [0.48, -0.11, 0.08, 0.66], C|S -0.230
+  raw split-half cosines [torso]: food pairs +0.048, C vs food -0.100, ceilings [0.48, -0.11, 0.08, 0.66], C|S -0.230
+
+Sconstrictor-5242880 parts=[np.str_('pg'), np.str_('v'), np.str_('ent')]
+  value-head bias grad (sign>0 => V above targets on average), per rollout: [[-0.0026, -0.0095, -0.0158, -0.0005], [-0.0017, -0.0087, -0.0134, -0.0011]]
+  share of |g_v|^2 in value head: [[0.91, 0.988, 0.803, 0.963], [0.899, 0.981, 0.771, 0.962]]
+  raw split-half cosines [all]: food pairs +0.570, C vs food +0.123, ceilings [0.95, 0.93, 0.97, 0.73], C|S +0.112
+  raw split-half cosines [no value head]: food pairs +0.855, C vs food -0.018, ceilings [0.99, 0.93, 0.99, 0.76], C|S -0.050
+  raw split-half cosines [torso]: food pairs +0.856, C vs food -0.018, ceilings [0.99, 0.93, 0.99, 0.76], C|S -0.050

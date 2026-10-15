@@ -4,7 +4,7 @@
 |---|---|
 | `throughput.py` | environment steps per second (see the main README's Performance section) |
 | `strength.py` | playing strength: every pair of two agent lists, as resumable JSONL results and markdown tables |
-| `modes.py` | the four leaderboard modes at 4-player tables: a generalist against its per-mode specialists and fixed references (share of the win, placement, paired G-vs-S differences), as resumable JSONL results (`results/modes.jsonl`) and markdown tables |
+| `modes.py` | the four leaderboard modes at their own tables (4 snakes, 2 in the duel): a generalist against its per-mode specialists and fixed references (share of the win, placement, paired G-vs-S differences), as resumable JSONL results (`results/modes.jsonl`) and markdown tables |
 | `plot_strength.py` | the MCTS-strength-vs-simulations chart below, from `strength.py`'s results |
 | `plot_az_ladder.py` | the AlphaZero chart below: what the network's search is worth in plain MCTS simulations, per training checkpoint |
 | `mcts_latency.py` | the latency of one MCTS move of one game, and the budget that fits a time limit |
@@ -364,19 +364,24 @@ benchmarks/modes.py --table`).
 | royale | 0.705 [0.676, 0.732] | 0.698 [0.669, 0.726] | 0.341 [0.313, 0.371] |
 | constrictor | 0.406 (12 distinct games) | 0.494 [0.463, 0.524] | 0.225 [0.201, 0.252] |
 
-- **Share of the win** is the measure: 1 for a sole survivor and 1/k for each
-  of k snakes alive at a draw, summed over a policy's seats.
+- **Share of the win** is the measure, summed over a policy's seats: 1 for a
+  sole survivor, and if nobody survives, 1/k to each of the k snakes
+  eliminated on the last turn (a draw). No game reached the turn cap.
 - **Parity** is 0.5 head to head (2 seats of 4, or 1 of 2) and 0.25 for one
   seat against three heuristics (0.5 in the duel).
-- **Games:** 1,024 per cell, seats rotated, 95% Wilson intervals.
-- **Same games in every cell of a mode.** All cells of a mode play the same
-  start positions and food, so two cells that differ in one agent are
-  compared game by game.
+- **Games:** 1,024 per cell in the table above. The cells against
+  `random_legal` and the wrong-mode and cross-mode cells have 256, and `ppo`
+  against three heuristics 512. Seats are rotated, and brackets are 95% Wilson
+  intervals.
+- **Common random numbers.** All cells of a mode play the same start
+  positions and random stream, so the food matches until play diverges. Two
+  cells that differ in one agent are compared game by game.
 - **Deterministic line-ups.** Greedy networks in constrictor play the same
   game from the same start, because food is inert there and hidden from them.
   The standard map has 2 start layouts, so the greedy constrictor
-  head-to-head is 12 distinct games and its interval means nothing. `--table`
-  marks such a line-up *deterministic*; read the sampled head-to-head.
+  head-to-head is 12 distinct games. Its interval only covers which of those
+  12 came up, not play from any other start. `--table` marks such a line-up
+  *deterministic*; read the sampled head-to-head.
   [`docs/research/multimode_constrictor.md`](../docs/research/multimode_constrictor.md)
   has the investigation.
 

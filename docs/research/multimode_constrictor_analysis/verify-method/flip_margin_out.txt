@@ -1,0 +1,15 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/verify-method/flip_margin.py
+decisions with >=2 legal moves: 81240
+overall flip far G 0.110 S 0.022 | near G 0.120 S 0.023
+median margin (logit units) G 4.10 S 4.58
+margin [0,0.5): n G   5943 S   4771 | far G 0.351 S 0.226 | near G 0.354 S 0.247
+margin [0.5,1): n G   5451 S   5186 | far G 0.287 S 0.076 | near G 0.268 S 0.080
+margin [1,2): n G  10577 S   8894 | far G 0.179 S 0.025 | near G 0.192 S 0.023
+margin [2,3): n G   9294 S   8110 | far G 0.131 S 0.006 | near G 0.146 S 0.004
+margin [3,4): n G   8754 S   9063 | far G 0.089 S 0.001 | near G 0.099 S 0.001
+margin [4,6): n G  14903 S  13919 | far G 0.054 S 0.000 | near G 0.069 S 0.000
+margin [6,8): n G  10264 S  10311 | far G 0.032 S 0.000 | near G 0.045 S 0.000
+margin [8,1000000000.0): n G  16054 S  20986 | far G 0.016 S 0.000 | near G 0.028 S 0.000
+far: G 0.110, S 0.022, S reweighted to G margin distribution 0.026
+near: G 0.120, S 0.023, S reweighted to G margin distribution 0.027
+# exit status: 0

@@ -3,8 +3,9 @@
 One actor-critic network plays every mode of :mod:`slinky.modes` (``standard``:
 4 snakes, ``duel``: 2, ``royale``: 4 with shrinking hazards, ``constrictor``: 4)
 and is told which one it is playing. The same file trains a *specialist* on a
-single mode (``--game-modes duel``), so a generalist and its specialists differ
-in nothing but the modes they see. It is ``baselines/ppo.py`` (self-play with
+single mode (``--game-modes duel``), so at the same settings a generalist and its
+specialists differ in nothing but the modes they see (the reported generalist used
+``--num-minibatches 16``; see "Defaults and why"). It is ``baselines/ppo.py`` (self-play with
 parameter sharing, masked policy, per-agent episodes, PPO-clip, the same
 hyperparameters) with these changes:
 
@@ -68,9 +69,10 @@ hyperparameters) with these changes:
 * **Budgets count per mode.** ``num_envs``, ``total_env_steps``,
   ``log_every``, ``eval_every`` and ``checkpoint_every`` are per mode, so every
   mode gets exactly a specialist's env steps, and one iteration takes
-  ``update_epochs * num_minibatches`` gradient steps, the specialist's count (the
-  learning-rate decay is the same). The generalist's minibatches are the
-  union of the specialists', so it costs about as much as all of them together.
+  ``update_epochs * num_minibatches`` gradient steps, the specialist's count at the
+  same ``num_minibatches`` (the learning-rate decay is the same). The generalist's
+  minibatches are the union of the specialists', so it costs about as much as all of
+  them together.
 
 **Records.** ``metrics.jsonl`` holds ``ppo.py``'s train records (``env_steps``
 per mode; ``env_steps_all`` over all modes; the losses are the weighted means
@@ -107,7 +109,12 @@ agent registry uses; the policy computes its inputs with the training code
   ``num_minibatches=8``, ``update_epochs=4`` and the rest of the PPO and
   network settings: ``ppo.py``'s, whose duel run they produced (0.296 against
   the heuristic). Nothing was tuned for several modes; generalist and
-  specialists share them so the comparison is fair.
+  specialists share them so the comparison is fair. The exception is the
+  reported generalist (``baselines/checkpoints/ppo-modes-seed0``), trained with
+  ``--num-minibatches 16``. With 8, one step serves all four modes, and its
+  updates were too small in each (duel KL 0.47x the duel specialist's; see
+  ``baselines/README.md``). That gives it twice its specialists' gradient steps,
+  and specialists trained with 16 are the control.
 * ``reward=placement``, ``features=all``, ``value_norm=True``,
   ``hide_constrictor_food=True``: as argued above.
 * ``snapshot_at=1_310_720``: a quarter of the run, where the four-mode
@@ -129,7 +136,7 @@ agent registry uses; the policy computes its inputs with the training code
 
 Commands::
 
-    python baselines/ppo_modes.py                                   # the generalist
+    python baselines/ppo_modes.py --num-minibatches 16              # the generalist as reported
     python baselines/ppo_modes.py --game-modes duel                 # a specialist
     python baselines/ppo_modes.py --game-modes royale --run-dir runs/ppo-modes-royale-seed0
     # ppo.py, bit for bit (in the duel the placement reward is win/loss):

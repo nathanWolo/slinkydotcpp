@@ -1,0 +1,16 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/deaths.py scratch/multimode/analysis/tailprobe/con_gsgs_s_dec.npz
+scratch/multimode/analysis/tailprobe/con_gsgs_s_dec.npz games=1024
+ G: seats=2048 deaths=1602  deaths/seat=0.782 [0.767,0.799]  masked-trap deaths/seat=0.028 [0.021,0.036]  plain-trap deaths/seat=0.036 [0.028,0.044]
+ S: seats=2048 deaths=1598  deaths/seat=0.780 [0.765,0.795]  masked-trap deaths/seat=0.016 [0.010,0.021]  plain-trap deaths/seat=0.038 [0.029,0.046]
+ G-S deaths/seat = +0.002 [-0.026,+0.032]
+ G-S masked/seat = +0.013 [+0.004,+0.021]
+ G-S plain/seat = -0.002 [-0.013,+0.010]
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/deaths.py scratch/multimode/analysis/tailprobe/con_gsgs_s_dec.npz dedup
+scratch/multimode/analysis/tailprobe/con_gsgs_s_dec.npz games=1024
+ G: seats=2048 deaths=1602  deaths/seat=0.782 [0.767,0.799]  masked-trap deaths/seat=0.028 [0.021,0.036]  plain-trap deaths/seat=0.036 [0.028,0.044]
+ S: seats=2048 deaths=1598  deaths/seat=0.780 [0.765,0.795]  masked-trap deaths/seat=0.016 [0.010,0.021]  plain-trap deaths/seat=0.038 [0.029,0.046]
+ G-S deaths/seat = +0.002 [-0.026,+0.032]
+ G-S masked/seat = +0.013 [+0.004,+0.021]
+ G-S plain/seat = -0.002 [-0.013,+0.010]
+# exit status: 0

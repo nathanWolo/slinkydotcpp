@@ -1,0 +1,14 @@
+# Four copies of `puffer/battlesnake.py --mode duel --num-envs 1024 --seconds 8 --policy <policy>`,
+# each pinned to one core with taskset, run at once; totals are agent-steps/s summed.
+random_legal:
+duel: 2048 agents, with observations, random_legal: 772,471 agent-steps/s
+duel: 2048 agents, with observations, random_legal: 799,028 agent-steps/s
+duel: 2048 agents, with observations, random_legal: 776,010 agent-steps/s
+duel: 2048 agents, with observations, random_legal: 771,783 agent-steps/s
+total 3119292 agent-steps/s
+random --no-obs:
+duel: 2048 agents, without observations, random: 8,145,657 agent-steps/s
+duel: 2048 agents, without observations, random: 7,958,483 agent-steps/s
+duel: 2048 agents, without observations, random: 8,320,857 agent-steps/s
+duel: 2048 agents, without observations, random: 8,273,609 agent-steps/s
+total 32698606 agent-steps/s

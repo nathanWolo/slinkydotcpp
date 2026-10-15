@@ -1,0 +1,30 @@
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs_s.npz
+scratch/multimode/analysis/tailprobe/con_gsgs_s.npz games=1024 G share (2 seats of 4, parity 0.5) = 0.495 [0.466,0.524]  G wins=465 S wins=475 split=84
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs_o3.npz
+scratch/multimode/analysis/tailprobe/con_gsgs_o3.npz games=1024 G share (2 seats of 4, parity 0.5) = 0.490 [0.461,0.518]  G wins=461 S wins=480 split=83
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs_o3.npz dedup
+scratch/multimode/analysis/tailprobe/con_gsgs_o3.npz games=631 G share (2 seats of 4, parity 0.5) = 0.515 [0.478,0.551]  G wins=295 S wins=275 split=61
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs_s.npz dedup
+scratch/multimode/analysis/tailprobe/con_gsgs_s.npz games=1024 G share (2 seats of 4, parity 0.5) = 0.495 [0.467,0.524]  G wins=465 S wins=475 split=84
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs_o1.npz
+scratch/multimode/analysis/tailprobe/con_gsgs_o1.npz games=1024 G share (2 seats of 4, parity 0.5) = 0.446 [0.417,0.474]  G wins=396 S wins=506 split=122
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs_o1.npz dedup
+scratch/multimode/analysis/tailprobe/con_gsgs_o1.npz games=189 G share (2 seats of 4, parity 0.5) = 0.492 [0.421,0.561]  G wins=84 S wins=87 split=18
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs.npz
+scratch/multimode/analysis/tailprobe/con_gsgs.npz games=512 G share (2 seats of 4, parity 0.5) = 0.428 [0.388,0.466]  G wins=180 S wins=254 split=78
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/con_gsgs.npz dedup
+scratch/multimode/analysis/tailprobe/con_gsgs.npz games=95 G share (2 seats of 4, parity 0.5) = 0.421 [0.332,0.516]  G wins=32 S wins=47 split=16
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/roy_gsgs_s.npz
+scratch/multimode/analysis/tailprobe/roy_gsgs_s.npz games=256 G share (2 seats of 4, parity 0.5) = 0.742 [0.688,0.793]  G wins=190 S wins=66 split=0
+# exit status: 0
+# cd /home/user/slinkydotcpp && /home/user/slinkydotcpp/.venv/bin/python scratch/multimode/analysis/tailprobe/share.py scratch/multimode/analysis/tailprobe/std_gsgs_s.npz
+scratch/multimode/analysis/tailprobe/std_gsgs_s.npz games=256 G share (2 seats of 4, parity 0.5) = 0.809 [0.762,0.852]  G wins=197 S wins=39 split=20
+# exit status: 0

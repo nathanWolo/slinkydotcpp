@@ -1,0 +1,388 @@
+{
+  "meta": {
+    "jax": "0.11.2",
+    "backend": "cpu",
+    "devices": [
+      "cpu:0"
+    ],
+    "device_kinds": [
+      "cpu"
+    ],
+    "cpu_count": 4,
+    "python": "3.13.16",
+    "args": {
+      "configs": [
+        "duel",
+        "standard-4p",
+        "constrictor-2p"
+      ],
+      "batch_sizes": [
+        64,
+        1024,
+        8192
+      ],
+      "turns": 100,
+      "variants": [
+        "sim",
+        "sim+ego-obs"
+      ],
+      "policy": "random_legal",
+      "repeats": 3,
+      "quick": false,
+      "json": "experiments/puffer/slinky_rl.json",
+      "seed": 0
+    }
+  },
+  "results": [
+    {
+      "config": "duel",
+      "variant": "sim",
+      "batch": 64,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.0489855539999553,
+      "times_s": [
+        0.05288472800020827,
+        0.05377950899855932,
+        0.0489855539999553
+      ],
+      "warmup_s": 2.1419845550008176,
+      "steps_per_s": 130650.76287604791,
+      "agent_steps_per_s": 261301.52575209583,
+      "live_fraction": 1.0,
+      "episodes": 67
+    },
+    {
+      "config": "duel",
+      "variant": "sim",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.3097549820013228,
+      "times_s": [
+        0.35471366999991005,
+        0.3097549820013228,
+        0.3427240660021198
+      ],
+      "warmup_s": 2.5984712629979185,
+      "steps_per_s": 330583.8677344105,
+      "agent_steps_per_s": 661167.735468821,
+      "live_fraction": 1.0,
+      "episodes": 1115
+    },
+    {
+      "config": "duel",
+      "variant": "sim",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 1.6047061440003745,
+      "times_s": [
+        1.7173005740005465,
+        1.9441738820023602,
+        1.6047061440003745
+      ],
+      "warmup_s": 3.771308246003173,
+      "steps_per_s": 510498.4504875236,
+      "agent_steps_per_s": 1020996.9009750471,
+      "live_fraction": 1.0,
+      "episodes": 8973
+    },
+    {
+      "config": "duel",
+      "variant": "sim+ego-obs",
+      "batch": 64,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.1051587660003861,
+      "times_s": [
+        0.12520979700275348,
+        0.11375227100143093,
+        0.1051587660003861
+      ],
+      "warmup_s": 2.5043333690009604,
+      "steps_per_s": 60860.356615220284,
+      "agent_steps_per_s": 121720.71323044057,
+      "live_fraction": 1.0,
+      "episodes": 67
+    },
+    {
+      "config": "duel",
+      "variant": "sim+ego-obs",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.924610625999776,
+      "times_s": [
+        0.9449607259994082,
+        0.9308694729988929,
+        0.924610625999776
+      ],
+      "warmup_s": 3.769656661999761,
+      "steps_per_s": 110749.32206113843,
+      "agent_steps_per_s": 221498.64412227686,
+      "live_fraction": 1.0,
+      "episodes": 1115
+    },
+    {
+      "config": "duel",
+      "variant": "sim+ego-obs",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 9.096399412999745,
+      "times_s": [
+        9.566448789999413,
+        9.568206886000553,
+        9.096399412999745
+      ],
+      "warmup_s": 12.072905728000478,
+      "steps_per_s": 90057.61101796762,
+      "agent_steps_per_s": 180115.22203593524,
+      "live_fraction": 1.0,
+      "episodes": 8973
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim",
+      "batch": 64,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 0.06420584299848997,
+      "times_s": [
+        0.06420584299848997,
+        0.07165565299874288,
+        0.07370089400137658
+      ],
+      "warmup_s": 2.370456534998084,
+      "steps_per_s": 99679.40145495044,
+      "agent_steps_per_s": 398717.60581980174,
+      "live_fraction": 1.0,
+      "episodes": 47
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 0.43196777300181566,
+      "times_s": [
+        0.47113238599922624,
+        0.4597349370014854,
+        0.43196777300181566
+      ],
+      "warmup_s": 2.945062340997538,
+      "steps_per_s": 237054.72120849532,
+      "agent_steps_per_s": 948218.8848339813,
+      "live_fraction": 1.0,
+      "episodes": 839
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 2.394502441999066,
+      "times_s": [
+        2.397004272999766,
+        2.459774294999079,
+        2.394502441999066
+      ],
+      "warmup_s": 4.385132081999473,
+      "steps_per_s": 342117.0033621204,
+      "agent_steps_per_s": 1368468.0134484817,
+      "live_fraction": 1.0,
+      "episodes": 6978
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim+ego-obs",
+      "batch": 64,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 0.16296560499904444,
+      "times_s": [
+        0.17495377199884388,
+        0.17461381499742856,
+        0.16296560499904444
+      ],
+      "warmup_s": 2.8171669180010213,
+      "steps_per_s": 39272.09057418912,
+      "agent_steps_per_s": 157088.36229675647,
+      "live_fraction": 1.0,
+      "episodes": 47
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim+ego-obs",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 2.1026314629998524,
+      "times_s": [
+        2.1026314629998524,
+        2.4465849570005958,
+        2.400484786998277
+      ],
+      "warmup_s": 4.882814816999598,
+      "steps_per_s": 48700.87878068016,
+      "agent_steps_per_s": 194803.51512272065,
+      "live_fraction": 1.0,
+      "episodes": 839
+    },
+    {
+      "config": "standard-4p",
+      "variant": "sim+ego-obs",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 4,
+      "best_s": 21.71423173400035,
+      "times_s": [
+        21.943071832996793,
+        21.71423173400035,
+        22.14536600700012
+      ],
+      "warmup_s": 25.093119982000644,
+      "steps_per_s": 37726.40957484528,
+      "agent_steps_per_s": 150905.63829938113,
+      "live_fraction": 1.0,
+      "episodes": 6978
+    },
+    {
+      "config": "constrictor-2p",
+      "variant": "sim",
+      "batch": 64,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.048731975999544375,
+      "times_s": [
+        0.056825319999916246,
+        0.05223171600300702,
+        0.048731975999544375
+      ],
+      "warmup_s": 1.9567805789993145,
+      "steps_per_s": 131330.60723948147,
+      "agent_steps_per_s": 262661.21447896294,
+      "live_fraction": 1.0,
+      "episodes": 309
+    },
+    {
+      "config": "constrictor-2p",
+      "variant": "sim",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.307729993997782,
+      "times_s": [
+        0.307729993997782,
+        0.3132140499983507,
+        0.3288601849999395
+      ],
+      "warmup_s": 2.526345295998908,
+      "steps_per_s": 332759.24348387716,
+      "agent_steps_per_s": 665518.4869677543,
+      "live_fraction": 1.0,
+      "episodes": 4905
+    },
+    {
+      "config": "constrictor-2p",
+      "variant": "sim",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 1.606656304000353,
+      "times_s": [
+        1.7255042729993875,
+        1.606656304000353,
+        1.7295483089983463
+      ],
+      "warmup_s": 3.7392846440016,
+      "steps_per_s": 509878.8072846102,
+      "agent_steps_per_s": 1019757.6145692203,
+      "live_fraction": 1.0,
+      "episodes": 39510
+    },
+    {
+      "config": "constrictor-2p",
+      "variant": "sim+ego-obs",
+      "batch": 64,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.10605521199977375,
+      "times_s": [
+        0.11218516799999634,
+        0.10962360099802027,
+        0.10605521199977375
+      ],
+      "warmup_s": 2.737637189002271,
+      "steps_per_s": 60345.92623334395,
+      "agent_steps_per_s": 120691.8524666879,
+      "live_fraction": 1.0,
+      "episodes": 309
+    },
+    {
+      "config": "constrictor-2p",
+      "variant": "sim+ego-obs",
+      "batch": 1024,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 0.9638288839996676,
+      "times_s": [
+        1.0038295979975373,
+        1.0305319110011624,
+        0.9638288839996676
+      ],
+      "warmup_s": 3.4277851420010848,
+      "steps_per_s": 106242.92517055893,
+      "agent_steps_per_s": 212485.85034111785,
+      "live_fraction": 1.0,
+      "episodes": 4905
+    },
+    {
+      "config": "constrictor-2p",
+      "variant": "sim+ego-obs",
+      "batch": 8192,
+      "turns": 100,
+      "num_snakes": 2,
+      "best_s": 9.573589756997535,
+      "times_s": [
+        9.77044170299996,
+        9.781157309000264,
+        9.573589756997535
+      ],
+      "warmup_s": 12.0056135440027,
+      "steps_per_s": 85568.73866474483,
+      "agent_steps_per_s": 171137.47732948966,
+      "live_fraction": 1.0,
+      "episodes": 39510
+    }
+  ],
+  "game_length": {
+    "duel": {
+      "games": 4096,
+      "finished": 4096,
+      "mean": 70.826416015625,
+      "median": 66.0,
+      "p90": 130.0,
+      "max": 285
+    },
+    "standard-4p": {
+      "games": 4096,
+      "finished": 4096,
+      "mean": 79.62890625,
+      "median": 76.0,
+      "p90": 133.0,
+      "max": 256
+    },
+    "constrictor-2p": {
+      "games": 4096,
+      "finished": 4096,
+      "mean": 19.227294921875,
+      "median": 18.0,
+      "p90": 30.0,
+      "max": 50
+    }
+  }
+}
