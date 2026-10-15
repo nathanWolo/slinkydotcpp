@@ -1,1 +1,47 @@
-//! slinky-net (to be written)
+//! slinky-net: weights loading and the forward pass of slinky's multi-mode AlphaZero network.
+//!
+//! Ports `az_modes.network` (`baselines/az_modes.py:198`), `unified.torso`/`conv_features`
+//! (`src/slinky/unified.py:431-470`) and the `params.npz` / `config.json` loaders
+//! (`unified.py:666-712`); see `native-az/SPEC.md` sections 1, 2 and 8. No JAX, no BLAS, no
+//! unsafe, no panics on bad files or inputs (every failure is a [`NetError`]).
+//!
+//! # Public API
+//!
+//! ```no_run
+//! use slinky_net::{Network, OBS_LEN, NUM_FEATURES};
+//! let net = Network::load("/path/to/run-dir")?;          // config.json + params.npz
+//! let mut scratch = net.scratch();                      // reusable buffers, one per thread
+//! let (obs, feats) = (vec![0f32; 2 * OBS_LEN], vec![0f32; 2 * NUM_FEATURES]);
+//! let mut logits = [[0f32; 4]; 2];
+//! let mut values = [0f32; 2];
+//! net.forward_into(&mut scratch, &obs, &feats, &mut logits, &mut values)?;   // no allocation
+//! let out = net.forward(&obs, &feats)?;                 // allocating convenience: Output { logits, values }
+//! # Ok::<(), slinky_net::NetError>(())
+//! ```
+//!
+//! * [`Network::load`]`(run_dir) -> Result<Network, NetError>`; also
+//!   [`Network::from_npz_bytes`]`(NetConfig, &[u8])` and [`Network::from_arrays`]`(NetConfig, HashMap<String, Array>)`.
+//! * [`Network::forward_into`]`(&self, &mut Scratch, obs: &[f32], feats: &[f32], logits: &mut [[f32; 4]], values: &mut [f32]) -> Result<(), NetError>`;
+//!   the batch size is `values.len()`; `obs` is `[B][21][21][13]` (NHWC, [`OBS_LEN`] floats per row),
+//!   `feats` is `[B][7]` as produced by `modes.mode_features`. Rows are independent.
+//! * [`Network::forward`]`(&self, obs, feats) -> Result<Output, NetError>`.
+//! * [`Network::config`]`() -> &NetConfig`: includes `c_puct`, `fpu_reduction`, `draw_value`,
+//!   `hide_constrictor_food`, `game_modes` for the search and observation crates.
+//! * [`Network::num_params`], [`Network::scratch`].
+//!
+//! The raw feature vector goes in: for `features = "no_mode"` the network masks the one-hot and
+//! shrink phase itself, for `"none"` it ignores the features. Food hiding in constrictor
+//! (`hide_constrictor_food`) is the observation builder's job. Only `compute_dtype = "float32"`
+//! is implemented; other dtypes are refused at load time.
+
+mod config;
+mod error;
+mod network;
+pub mod npy;
+
+pub use config::{
+    FeatureMode, NUM_ACTIONS, NUM_FEATURES, NetConfig, OBS_CHANNELS, OBS_COLS, OBS_LEN, OBS_ROWS,
+};
+pub use error::NetError;
+pub use network::{Network, Output, Scratch};
+pub use npy::Array;
