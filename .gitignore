@@ -14,3 +14,7 @@ tools/oracle/bin/
 runs/
 # Recorded replays (python -m slinky.replay)
 replays/
+# PufferLib environment (puffer/): its venv, the built extension and PuffeRL's checkpoints
+.venv-puffer/
+puffer/*.so
+experiments/
