@@ -3,5 +3,18 @@ name = "slinky-lambda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "AWS Lambda (provided.al2023, arm64) handler for the native slinky AlphaZero snakes"
 
 [dependencies]
+lambda_http = "1"
+tokio = { version = "1", features = ["macros"] }
+serde_json = "1"
+
+# The real engine plugs in at the marked place in src/main.rs
+# (`engine_choose_move`); enable with `--features engine` once
+# slinky-search exposes `choose_move`.
+# slinky-search = { path = "../search", optional = true }
+
+[features]
+default = []
+# engine = ["dep:slinky-search"]
