@@ -38,10 +38,21 @@ the rules need from a request: the ruleset (``game.ruleset.name``), the map
   (:func:`royale_sides`); the sides of shrinks still to come are unknown (the
   engine draws them at random), so the search assumes the zone stays put until
   the next shrink is shown;
-* ``constrictor`` ruleset on the ``standard`` map.
+* ``constrictor`` ruleset on the ``standard`` map, or on the ``empty`` map (the
+  official constrictor ladder's). Constrictor removes all food every turn, and
+  the empty map only lacks the standard map's food spawns, so a search that
+  never spawns food (every agent here by default; ``spawn_food`` is the
+  exception) plays both identically: the empty-map game is read as the
+  standard-map constrictor config the agents are trained on. A search that
+  samples spawns would add food the empty map never has, so it gets no config.
 
 Any other ruleset or map (wrapped, solo, constrictor on the royale map, the
-``empty`` map, ...) has no config, and a plain safe-move picker plays.
+standard ruleset on the ``empty`` map, ...) has no config, and a plain
+safe-move picker plays.
+
+Settings that cannot change a game are not part of its config, so that the
+ladder's values (its ``hazardDamagePerTurn`` is not the default) reach the
+precompiled configs: see :func:`game_config`.
 
 Agents. A multi-mode agent (:data:`slinky.agents.MODES_KINDS`) plays every
 11x11 game that has a mode (:func:`slinky.modes.mode_of`), told that mode (or
@@ -147,20 +158,42 @@ def _setting(settings: Any, key: str, default: int) -> int:
     return value if -MAX_SETTING <= value <= MAX_SETTING else default
 
 
-def game_config(req: dict[str, Any], num_snakes: int | None = None) -> GameConfig | None:
+def game_config(
+    req: dict[str, Any], num_snakes: int | None = None, food_spawns: bool = False
+) -> GameConfig | None:
     """The :class:`GameConfig` of a request's game, or None for a game the rules don't model.
 
     Standard, royale and constrictor games (see the module docstring); the three royale
     variants share the config of the royale ruleset on the royale map. ``num_snakes`` is
     the game's snake count at the start, if known (the request lists the living only).
-    The settings come from ``game.ruleset.settings``; the shrink period is only read
-    in royale, so the other modes keep one config whatever their requests carry there.
+    The settings come from ``game.ruleset.settings``, but only those that can change
+    play are kept; the others stay at the :class:`GameConfig` defaults, so the games
+    of one mode share one compiled config whatever the ladder sends:
+
+    * ``foodSpawnChance`` and ``minimumFood`` are read only by the map's food spawning
+      (``maps.spawn_food_standard``), which a search runs only with ``spawn_food``
+      (``food_spawns``); the rules step, the state rebuild and the observations never
+      read them (the request lists the food that exists). Kept only if ``food_spawns``.
+    * ``hazardDamagePerTurn`` is read by ``rules.rules_step`` where a snake stands in
+      a hazard. Outside royale, the standard and empty maps place none, so with none
+      on the board it cannot matter; royale (hazards of its own) and a board that
+      lists hazards keep it.
+    * the shrink period is read only in royale (zone, shrink phase feature).
+
+    Constrictor on the ``empty`` map is the constrictor mode's config (standard map)
+    unless ``food_spawns``, see the module docstring.
     """
     game = req.get("game", {})
     ruleset = game.get("ruleset", {}) or {}
     name = ruleset.get("name", "standard")
     map_name = game.get("map", "standard")
-    if name not in ("standard", "royale", "constrictor") or map_name not in ("standard", "royale"):
+    if name not in ("standard", "royale", "constrictor") or map_name not in (
+        "standard",
+        "royale",
+        "empty",
+    ):
+        return None
+    if map_name == "empty" and (name != "constrictor" or food_spawns):
         return None
     royale = name == "royale" or map_name == "royale"
     if royale and name == "constrictor":
@@ -171,16 +204,14 @@ def game_config(req: dict[str, Any], num_snakes: int | None = None) -> GameConfi
         return None
     settings = ruleset.get("settings") or {}
     d = GameConfig()
-    fields: dict[str, Any] = {
-        "width": w,
-        "height": h,
-        "num_snakes": n,
-        "food_spawn_chance": _setting(settings, "foodSpawnChance", d.food_spawn_chance),
-        "minimum_food": _setting(settings, "minimumFood", d.minimum_food),
-        "hazard_damage_per_turn": _setting(
+    fields: dict[str, Any] = {"width": w, "height": h, "num_snakes": n}
+    if food_spawns:
+        fields["food_spawn_chance"] = _setting(settings, "foodSpawnChance", d.food_spawn_chance)
+        fields["minimum_food"] = _setting(settings, "minimumFood", d.minimum_food)
+    if royale or board.get("hazards"):
+        fields["hazard_damage_per_turn"] = _setting(
             settings, "hazardDamagePerTurn", d.hazard_damage_per_turn
-        ),
-    }
+        )
     if royale:
         royale_settings = settings.get("royale") if isinstance(settings, dict) else None
         # The API nests it under "royale"; the engine CLI's flat name is read too.
@@ -188,7 +219,7 @@ def game_config(req: dict[str, Any], num_snakes: int | None = None) -> GameConfi
         shrink = _setting(royale_settings, "shrinkEveryNTurns", shrink)
         fields.update(ruleset=Ruleset.ROYALE, map="royale", shrink_every_n_turns=shrink)
     elif name == "constrictor":
-        fields.update(ruleset=Ruleset.CONSTRICTOR)
+        fields.update(ruleset=Ruleset.CONSTRICTOR)  # map "standard", also for "empty"
     try:
         return GameConfig(**fields)
     except ValueError:  # e.g. shrinkEveryNTurns 0, an engine error
@@ -346,6 +377,8 @@ class Mover:
         self.agent = spec.name
         self.multi_mode = spec.kind in MODES_KINDS
         self.fallback = parse_agent(fallback).name
+        # Whether the agent's search samples food spawns (then the food settings matter).
+        self.food_spawns = bool(getattr(spec.mcts, "spawn_food", False))
         if precompile is None:
             precompile = tuple(MODE_CONFIGS.values()) if self.multi_mode else (DUEL,)
             precompile = (DUEL, *(c for c in precompile if c != DUEL))
@@ -364,9 +397,10 @@ class Mover:
             self._compile(config)
         if precompile:
             log.info(
-                "%s: precompiled %d game configs in %.1f s",
+                "%s: precompiled %d game configs (%s) in %.1f s",
                 self.agent,
                 len(precompile),
+                ", ".join(f"{game_mode(c) or 'no mode'} {c.num_snakes}p" for c in precompile),
                 time.perf_counter() - t,
             )
 
@@ -439,7 +473,7 @@ class Mover:
     def start(self, req: dict[str, Any]) -> str:
         """Remember the game's snake count and start compiling its board; who will play."""
         game, n = req["game"].get("id"), len(req["board"]["snakes"])
-        config = game_config(req)
+        config = game_config(req, food_spawns=self.food_spawns)
         with self._lock:
             if game is not None:
                 if len(self._games) >= MAX_GAMES:  # games whose /end never came
@@ -459,7 +493,7 @@ class Mover:
         check_sizes(req)
         with self._lock:
             n = self._games.get(req.get("game", {}).get("id"))
-            config = game_config(req, n)
+            config = game_config(req, n, self.food_spawns)
             entry = None if config is None else self._lookup(config)
             self._moves += 1
             move_index = self._moves

@@ -331,8 +331,6 @@ GAMES = [
             MODE_CONFIGS["royale"],
             shrink_every_n_turns=5,
             hazard_damage_per_turn=30,
-            food_spawn_chance=25,
-            minimum_food=2,
         ),
     ),
 ]
@@ -453,8 +451,10 @@ def test_settings() -> None:
         "hazardDamagePerTurn": 10**12,
         "shrinkEveryNTurns": 7,  # the CLI's flat name
     }
-    want = dataclasses.replace(MODE_CONFIGS["royale"], food_spawn_chance=20, shrink_every_n_turns=7)
-    assert game_config(req) == want
+    want = dataclasses.replace(MODE_CONFIGS["royale"], shrink_every_n_turns=7)
+    assert game_config(req) == want  # junk damage keeps the default; food settings don't matter
+    want = dataclasses.replace(want, food_spawn_chance=20)  # unless the search spawns food
+    assert game_config(req, food_spawns=True) == want
     req["game"]["ruleset"]["settings"]["royale"] = {"shrinkEveryNTurns": 9}  # the API's wins
     assert game_config(req).shrink_every_n_turns == 9
     req["game"]["ruleset"]["settings"]["royale"] = {"shrinkEveryNTurns": 0}  # an engine error
@@ -480,7 +480,9 @@ def test_games_without_a_model() -> None:
         ("wrapped_constrictor", "standard"),
         ("solo", "standard"),
         ("constrictor", "royale"),
-        ("standard", "empty"),
+        ("standard", "empty"),  # not a training mode (no food): the safe-move picker
+        ("royale", "empty"),
+        ("wrapped_constrictor", "empty"),
         ("royale", "arcade_maze"),
         ("squad", "standard"),
     ):
@@ -566,3 +568,151 @@ def test_other_agents_in_the_modes() -> None:
         assert mover.wait_idle(timeout=300)
         assert mover.move(royale)[1] == "heuristic"
         assert mover.move(duel)[1] == name
+
+
+LADDER = {  # the settings the ladder sends, which are not GameConfig's defaults
+    "foodSpawnChance": 15,
+    "minimumFood": 1,
+    "hazardDamagePerTurn": 100,
+    "hazardMap": "",
+    "hazardMapAuthor": "",
+    "royale": {"shrinkEveryNTurns": 25},
+    "squad": {"allowBodyCollisions": False, "sharedElimination": False},
+}
+
+
+def ladder_request(mode: str, game_map: str | None = None, **settings) -> dict:
+    """A ladder-shaped request for ``mode``'s default config with the ladder's settings."""
+    config = MODE_CONFIGS[mode]
+    req = example_request_for(config)
+    req["game"]["source"] = "ladder"
+    req["game"]["ruleset"]["settings"] = {**LADDER, **settings}
+    req["game"]["map"] = game_map or req["game"]["map"]
+    req["game"]["ruleset"]["name"] = "standard" if mode == "duel" else config.ruleset.value
+    return req
+
+
+def test_ladder_settings_reach_the_mode_configs() -> None:
+    for mode, game_map in (
+        ("standard", "standard"),
+        ("duel", "standard"),
+        ("constrictor", "standard"),
+        ("constrictor", "empty"),  # the official constrictor ladder
+        ("royale", "royale"),
+    ):
+        req = ladder_request(mode, game_map, hazardDamagePerTurn=14 if mode == "royale" else 100)
+        # Damage 100 cannot matter without hazards; the royale default is the ladder's own.
+        assert game_config(req) == MODE_CONFIGS[mode], (mode, game_map)
+        # Neither can the food settings, which only a search that spawns food reads.
+        req["game"]["ruleset"]["settings"].update(foodSpawnChance=50, minimumFood=3)
+        assert game_config(req) == MODE_CONFIGS[mode], (mode, game_map)
+    # Where a setting matters, the config differs.
+    royale = ladder_request("royale", hazardDamagePerTurn=100)
+    assert game_config(royale) == dataclasses.replace(
+        MODE_CONFIGS["royale"], hazard_damage_per_turn=100
+    )
+    royale["game"]["ruleset"]["settings"]["royale"] = {"shrinkEveryNTurns": 10}
+    assert game_config(royale).shrink_every_n_turns == 10
+    for ruleset, game_map in (("royale", "standard"), ("standard", "royale")):
+        req = ladder_request("royale", hazardDamagePerTurn=100)
+        req["game"]["ruleset"]["name"], req["game"]["map"] = ruleset, game_map
+        assert game_config(req) == dataclasses.replace(
+            MODE_CONFIGS["royale"], hazard_damage_per_turn=100
+        ), (ruleset, game_map)
+    # A board that lists hazards keeps the damage (the rules step reads it there).
+    req = ladder_request("standard")
+    req["board"]["hazards"] = [{"x": 0, "y": 0}]
+    assert game_config(req).hazard_damage_per_turn == 100
+    # A search that samples food spawns reads the food settings, and cannot play the empty
+    # map (the standard map would spawn food it never has).
+    req = ladder_request("standard", foodSpawnChance=30, minimumFood=2)
+    want = dataclasses.replace(MODE_CONFIGS["standard"], food_spawn_chance=30, minimum_food=2)
+    assert game_config(req, food_spawns=True) == want
+    assert game_config(ladder_request("constrictor", "empty"), food_spawns=True) is None
+    assert game_config(ladder_request("constrictor", "empty")) == MODE_CONFIGS["constrictor"]
+
+
+def test_mover_knows_if_its_search_spawns_food() -> None:
+    assert Mover("ppo", precompile=()).food_spawns is False
+    assert Mover("heuristic", precompile=()).food_spawns is False
+    assert Mover("az-0", precompile=()).food_spawns is False
+    assert Mover("az-4:spawn_food=true", precompile=()).food_spawns is True
+    assert Mover("az-4", precompile=()).food_spawns is False
+
+
+EMPTY_CONSTRICTOR = dataclasses.replace(MODE_CONFIGS["constrictor"], map="empty")
+
+
+def test_constrictor_on_the_empty_map(modes_mover: Mover) -> None:
+    """The ladder's constrictor games are played as the constrictor mode, exactly."""
+    config = MODE_CONFIGS["constrictor"]
+    states = played_states(EMPTY_CONSTRICTOR, seed=3)
+    assert len(states) >= 6 and {0, 1, 4, 5, 6} <= set(states), sorted(states)
+    assert not any(np.asarray(s.food).any() for s in states.values())  # the map has no food
+    name = parse_agent(MODES_AGENT).name
+    policy = jax.jit(make_agent(MODES_AGENT, config).policy)  # told constrictor, greedy
+    env = make_env(config, True)
+    step = jax.jit(rules_step, static_argnums=2)
+    key, checked, fns = jax.random.key(2), 0, dict(modes_mover._fns)
+    for turn, state in states.items():
+        alive = np.flatnonzero(np.asarray(state.alive))
+        for you in {int(alive[0]), int(alive[-1])}:
+            req = ladder_request("constrictor", "empty")
+            req.update(
+                {
+                    k: v
+                    for k, v in mode_request(
+                        state, config, you=you, game_id=f"empty-{turn}", game_map="empty"
+                    ).items()
+                    if k != "game"
+                }
+            )
+            req["game"]["id"] = f"empty-{turn}-{you}"
+            assert req["game"]["map"] == "empty"
+            assert game_config(req, config.num_snakes) == config
+            got, want = request_state(req, config), reorder(state, seat_order(state, you))
+            assert_same_state(got, want, config)
+            # The search's forward model (the rules step, no spawns) agrees on the next turn
+            # with the empty map's own env.step, which adds no food: the map is irrelevant.
+            key, k = jax.random.split(key)
+            actions = jax.random.randint(k, (config.num_snakes,), 0, 4)
+            assert_same_state(step(got, actions, config), step(want, actions, config), config)
+            if len(alive) == config.num_snakes:  # the start of a game says its snake count
+                assert modes_mover.start(req) == name
+                true = reorder(state, seat_order(state, you))  # the agent's seat first
+                ts = env._timestep(true, np.zeros(config.num_snakes, np.float32), np.asarray(False))
+                best = int(policy(jax.random.key(0), true, ts)[0])
+                assert modes_mover.move(req) == (best, name), (turn, you)
+                checked += 1
+    assert checked >= 2
+    assert dict(modes_mover._fns) == fns  # nothing was compiled for these games
+
+
+def test_empty_map_step_equals_constrictor_rules() -> None:
+    """env.step on the empty map is the rules step plus the turn: no spawns, no other map effect."""
+    env = make_env(EMPTY_CONSTRICTOR, False)
+    state = played_states(EMPTY_CONSTRICTOR, seed=5)[6]
+    actions = jnp.array([0, 1, 2, 3])
+    nxt = env.step(jax.random.key(0), state, actions)[0]
+    ref = rules_step(state, actions, MODE_CONFIGS["constrictor"])._replace(turn=state.turn + 1)
+    assert_same_state(nxt, ref._replace(done=nxt.done), MODE_CONFIGS["constrictor"])
+
+
+def test_ladder_games_hit_the_precompiled_configs(modes_mover: Mover) -> None:
+    """With the ladder's settings no game waits for a compile: `start` names the agent."""
+    name = parse_agent(MODES_AGENT).name
+    fns = dict(modes_mover._fns)
+    for mode, game_map in (
+        ("standard", "standard"),
+        ("duel", "standard"),
+        ("constrictor", "standard"),
+        ("constrictor", "empty"),
+        ("royale", "royale"),
+    ):
+        req = ladder_request(mode, game_map, hazardDamagePerTurn=14 if mode == "royale" else 100)
+        req["game"]["id"] = f"ladder-{mode}-{game_map}"
+        assert modes_mover.start(req) == name, (mode, game_map)
+        assert modes_mover.move(req)[1] == name
+    assert dict(modes_mover._fns) == fns and not modes_mover._pending
+    req = ladder_request("standard", "empty")
+    assert modes_mover.start(req) == "safe_move"
