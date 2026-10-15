@@ -1,9 +1,9 @@
 """Final comparison of the unified-agents campaign: every finished multi-mode run, side by side.
 
 The agents are the run directories under ``--runs`` named ``<algo>-modes-<S|M|L>-s<seed>``
-with a ``DONE`` file (``rocdxg-work/campaign/train.sh``: trained to a plateau or the cap,
-then cooled down); each plays with its final ``params.npz``. Cells are
-:mod:`benchmarks.modes` cells (the same games in every cell of a mode), played on the CPU:
+with a ``DONE`` file (the marker a campaign script writes when a run has trained to a
+plateau or the step cap and been cooled down); each plays with its final ``params.npz``.
+Cells are :mod:`benchmarks.modes` cells (the same games in every cell of a mode), played on the CPU:
 
 * **Panel** (``--panel``): in every game mode, each agent ``X`` against the heuristic
   (``X,H,H,H``; duel ``X,H``) and against the committed generalist G0
@@ -18,9 +18,9 @@ then cooled down); each plays with its final ``params.npz``. Cells are
 
 ``--table`` prints both from ``--out``. Usage::
 
-    python benchmarks/compare_unified.py --runs /root/runs --out final.jsonl --panel --jobs 6
-    python benchmarks/compare_unified.py --runs /root/runs --out final.jsonl --round-robin --jobs 6
-    python benchmarks/compare_unified.py --runs /root/runs --out final.jsonl --table
+    python benchmarks/compare_unified.py --runs runs --out final.jsonl --panel --jobs 6
+    python benchmarks/compare_unified.py --runs runs --out final.jsonl --round-robin --jobs 6
+    python benchmarks/compare_unified.py --runs runs --out final.jsonl --table
 """
 
 from __future__ import annotations
