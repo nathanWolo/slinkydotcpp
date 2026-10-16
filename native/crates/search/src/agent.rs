@@ -12,9 +12,24 @@
 //! state, ts)[0]` up to float rounding in the network (SPEC.md 2.6). (The Python server itself
 //! uses `fold_in(key(0), move_counter)`, which [`crate::JaxKey::fold_in`] can reproduce.)
 //!
-//! Where the Python server would fall back to its heuristic agent (a board other than 11x11,
-//! a mode the run was not trained on) this crate returns [`SearchError::Unsupported`]; the
-//! caller answers with the safe move ([`Agent::respond`] does so).
+//! # Known difference: no heuristic fallback
+//!
+//! Where the Python server builds a game config but its multi-mode agent will not play it,
+//! `Mover._build` (server.py:416-433) plays its *fallback* agent, `heuristic`
+//! (`slinky.heuristic`): a game with no mode (one seat, e.g. a lone snake listed without the
+//! `/start` count; or more than 4 seats on a board other than 11x11), a board other than 11x11
+//! (up to 25x25), or a mode the run was not trained on. This crate has no heuristic agent:
+//! those games are [`SearchError::Unsupported`] (or an [`slinky_api::ApiError::Unsupported`]
+//! for boards larger than the rules crate's 11x11) and [`Agent::respond`] answers with the
+//! safe move, as Python does for games with no config at all. This is a deliberate gap, not a
+//! conversion bug: the ladder's games (11x11, 2 to 4 snakes, the four modes every az_modes run
+//! trains on) never reach the fallback, and the heuristic is a separate ~950-line JAX policy
+//! (flood fills, Voronoi races, a duel joint search, random tie-breaks) on boards up to 25x25
+//! that the 121-cell rules crate does not represent. Porting it is follow-up work.
+//!
+//! A body the Python handler refuses with HTTP 400 ([`slinky_api::ApiError::Json`]: not JSON,
+//! over 64 KB, a non-object `game`) gets no move from Python; [`Agent::respond`] answers "up"
+//! (the caller may answer 400 instead).
 
 use crate::SearchError;
 use crate::eval::NetEvaluator;

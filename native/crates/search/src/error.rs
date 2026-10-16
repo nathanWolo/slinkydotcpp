@@ -10,7 +10,8 @@ use std::fmt;
 #[derive(Debug)]
 pub enum SearchError {
     /// A game the agent does not play: board size, seat count, or a mode outside the run's
-    /// `game_modes` (`agents.check_game`, agents.py:300-336).
+    /// `game_modes` (`agents.check_game`, agents.py:300-336). Python plays some of these with
+    /// its heuristic fallback agent, which is not ported (see the `agent` module docs).
     Unsupported(String),
     /// The noise source had no bits for this simulation.
     Noise {
