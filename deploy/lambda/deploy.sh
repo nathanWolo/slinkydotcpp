@@ -15,9 +15,10 @@
 # The function's environment variables: the deployed ones are kept; the
 # defaults below fill in what is missing; any of these set in this shell
 # overrides the deployed value: SNAKE_AUTHOR, SNAKE_HEAD, SNAKE_TAIL (defaults
-# slinky, default, default), SNAKE_SIMULATIONS_AZ_256 (256), NATIVE_MARGIN_MS
-# (150), NATIVE_THREADS, and every SNAKE_COLOR_*, SNAKE_SIMULATIONS_* and
-# SNAKE_BUDGET_MS_*. The AWS CLI is $AWS, else `aws` on the PATH, else
+# slinky, default, default), SNAKE_HEAD_AZ_256 and SNAKE_TAIL_AZ_256
+# (cosmic-horror, as the ladder server), SNAKE_SIMULATIONS_AZ_256 (256),
+# NATIVE_MARGIN_MS (150), NATIVE_THREADS, and every SNAKE_COLOR_*,
+# SNAKE_HEAD_*, SNAKE_TAIL_*, SNAKE_SIMULATIONS_* and SNAKE_BUDGET_MS_*. The AWS CLI is $AWS, else `aws` on the PATH, else
 # ~/.local/bin/aws.
 set -euo pipefail
 
@@ -87,13 +88,15 @@ merged = {
     "SNAKE_AUTHOR": "slinky",
     "SNAKE_HEAD": "default",
     "SNAKE_TAIL": "default",
+    "SNAKE_HEAD_AZ_256": "cosmic-horror",
+    "SNAKE_TAIL_AZ_256": "cosmic-horror",
     "SNAKE_SIMULATIONS_AZ_256": "256",
     "NATIVE_MARGIN_MS": "150",
 }
 merged.update(deployed)
 for k, v in os.environ.items():
     if k in ("SNAKE_AUTHOR", "SNAKE_HEAD", "SNAKE_TAIL", "NATIVE_MARGIN_MS", "NATIVE_THREADS") or (
-        k.startswith(("SNAKE_COLOR_", "SNAKE_SIMULATIONS_", "SNAKE_BUDGET_MS_"))
+        k.startswith(("SNAKE_COLOR_", "SNAKE_HEAD_", "SNAKE_TAIL_", "SNAKE_SIMULATIONS_", "SNAKE_BUDGET_MS_"))
     ):
         merged[k] = v
 with open(sys.argv[1], "w") as f:

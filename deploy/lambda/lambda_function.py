@@ -26,8 +26,9 @@ or answers nonsense, the move is :func:`snake_numpy.safe_move` and the engine is
 restarted on the next request.
 
 Settings (environment variables): ``SNAKE_AUTHOR``, ``SNAKE_HEAD``,
-``SNAKE_TAIL`` and ``SNAKE_COLOR_<NAME>`` (e.g. ``SNAKE_COLOR_PPO``) for the
-info responses; ``CHECKPOINTS`` for the checkpoint directories (default:
+``SNAKE_TAIL``, ``SNAKE_COLOR_<NAME>`` (e.g. ``SNAKE_COLOR_PPO``) and
+``SNAKE_HEAD_<NAME>`` / ``SNAKE_TAIL_<NAME>`` (one snake's head and tail, over
+``SNAKE_HEAD`` / ``SNAKE_TAIL``) for the info responses; ``CHECKPOINTS`` for the checkpoint directories (default:
 ``checkpoints/`` next to this file, as ``build.sh`` packages them). Native
 snakes: ``SNAKE_SIMULATIONS_<NAME>`` (simulations per move, default from the
 name: 256 for ``az-256``), ``SNAKE_BUDGET_MS_<NAME>`` (optional: also stop that
@@ -100,8 +101,8 @@ def info(name: str) -> dict[str, str]:
         "color": os.environ.get(
             f"SNAKE_COLOR_{env_key(name)}", (NATIVE[name] if native else SNAKES[name])[1]
         ),
-        "head": os.environ.get("SNAKE_HEAD", "default"),
-        "tail": os.environ.get("SNAKE_TAIL", "default"),
+        "head": os.environ.get(f"SNAKE_HEAD_{env_key(name)}", os.environ.get("SNAKE_HEAD", "default")),
+        "tail": os.environ.get(f"SNAKE_TAIL_{env_key(name)}", os.environ.get("SNAKE_TAIL", "default")),
         "version": f"slinky {name} ({'native' if native else 'numpy'})",
     }
 
