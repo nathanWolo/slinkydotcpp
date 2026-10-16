@@ -33,6 +33,7 @@ fn config(mode: Mode, games: u64, threads: usize, out: PathBuf) -> MatchConfig {
         max_turns: 500,
         view: View::State,
         early_stop: true,
+        per_seat: false,
         threads,
         target_ci: None,
         target_ci_draws: false,

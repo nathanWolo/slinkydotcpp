@@ -64,6 +64,8 @@ pub struct MatchConfig {
     pub view: View,
     /// End games once decided between the agents.
     pub early_stop: bool,
+    /// Search once per seat instead of once per agent ([`crate::Setup::per_seat`]).
+    pub per_seat: bool,
     /// Worker threads (games at once).
     pub threads: usize,
     /// `--target-ci`: stop once the score's 95% half-width is at most this.
@@ -124,7 +126,7 @@ fn player_json(p: &Player) -> Value {
 /// The matchup identity: the agents, their weights, the game, the cut-off, the seed, the view
 /// and early stopping. Games of the same matchup are the same games.
 pub fn matchup_id(cfg: &MatchConfig, players: [&Player; 2]) -> String {
-    let desc = json!({
+    let mut desc = json!({
         "schema": SCHEMA,
         "a": player_json(players[0]),
         "b": player_json(players[1]),
@@ -134,6 +136,9 @@ pub fn matchup_id(cfg: &MatchConfig, players: [&Player; 2]) -> String {
         "view": cfg.view.name(),
         "early_stop": cfg.early_stop,
     });
+    if cfg.per_seat && cfg.view == View::State {
+        desc["per_seat"] = json!(true); // (absent otherwise: ids of earlier runs stay valid)
+    }
     hash_hex(&desc.to_string())
 }
 
@@ -386,11 +391,16 @@ pub fn run_matchup(cfg: &MatchConfig, players: [&Player; 2]) -> Result<Value, St
     let deterministic = players.iter().all(|p| p.spec.is_deterministic());
     log(&format!(
         "{tag} matchup {mid}: {total_games} games max in {} rounds of {}, {} threads, view {}, \
-         max {} turns{}{}",
+         searches per {}, max {} turns{}{}",
         rounds.len(),
         round_size(cfg),
         cfg.threads,
         cfg.view.name(),
+        if cfg.per_seat || cfg.view == View::Request {
+            "seat"
+        } else {
+            "agent"
+        },
         cfg.max_turns,
         if done.is_empty() {
             String::new()
@@ -541,6 +551,7 @@ pub fn run_matchup(cfg: &MatchConfig, players: [&Player; 2]) -> Result<Value, St
             max_turns: cfg.max_turns,
             view: cfg.view,
             early_stop: cfg.early_stop,
+            per_seat: cfg.per_seat,
         };
         let threads = cfg.threads.clamp(1, todo.len().max(1));
         let mut io_error: Option<String> = None;
@@ -664,6 +675,7 @@ pub fn run_matchup(cfg: &MatchConfig, players: [&Player; 2]) -> Result<Value, St
         "game": env_json(&cfg.env),
         "view": cfg.view.name(),
         "early_stop": cfg.early_stop,
+        "per_seat": cfg.per_seat || cfg.view == View::Request,
         "max_turns": cfg.max_turns,
         "seed": cfg.seed,
         "games_requested": cfg.games,

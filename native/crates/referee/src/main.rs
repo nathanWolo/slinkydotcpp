@@ -34,6 +34,8 @@ Options:
   --view state|request
                       state: search the true state (default, as slinky's strength.py);
                       request: each seat gets the ladder's /move request (one search per seat)
+  --per-seat          search once per seat, each with its own noise (default: once per agent
+                      for all its seats, as slinky; biased against A in 4-snake self-matches)
   --full-games        play 4-snake games to the end (default: stop once A is dead or alone;
                       the statistics are the same)
   --out FILE          summary JSONL (default naz-match.jsonl); also FILE.games.jsonl and
@@ -61,6 +63,7 @@ struct Args {
     max_turns: i32,
     view: View,
     full_games: bool,
+    per_seat: bool,
     out: PathBuf,
     rerun: bool,
     sequential: bool,
@@ -106,6 +109,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         max_turns: 500,
         view: View::State,
         full_games: false,
+        per_seat: false,
         out: PathBuf::from("naz-match.jsonl"),
         rerun: false,
         sequential: false,
@@ -145,6 +149,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     View::from_name(&v).ok_or(format!("--view: {v:?} is not state or request"))?;
             }
             "--full-games" => a.full_games = true,
+            "--per-seat" => a.per_seat = true,
             "--out" => a.out = PathBuf::from(value("--out")?),
             "--rerun" => a.rerun = true,
             "--sequential" => a.sequential = true,
@@ -324,6 +329,7 @@ fn run(args: &Args) -> Result<(), String> {
             max_turns: args.max_turns,
             view: args.view,
             early_stop: !args.full_games,
+            per_seat: args.per_seat,
             threads: args.threads,
             target_ci: args.target_ci,
             target_ci_draws: args.target_ci_draws,

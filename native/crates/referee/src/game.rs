@@ -8,6 +8,14 @@
 //! game is the same whatever the thread count, the order games run in, or which other games
 //! are played, as long as both agents have deterministic budgets.
 //!
+//! Searches per turn: by default an agent searches once per turn and plays the moves of all
+//! its seats from that one tree (slinky's line-up). With `per_seat` each seat is searched
+//! separately with its own noise, as independent ladder snakes are. This matters with 4
+//! snakes: B's three seats taken from one tree move consistently with each other's predicted
+//! moves, which A's separate tree does not share, and that biases a self-match against A
+//! (measured: share 0.20 instead of 0.25 in royale and constrictor at 256 simulations).
+//! [`View::Request`] is always per seat.
+//!
 //! Views: with [`View::State`] (the default, as slinky's strength tests) an agent searches the
 //! true game state, which includes the royale shrink sides drawn at reset. With
 //! [`View::Request`] each seat is asked as the ladder asks it: the state becomes a `/move`
@@ -69,6 +77,8 @@ pub struct Setup<'a> {
     pub view: View,
     /// End a game once it is decided between the agents (A dead, or A alone).
     pub early_stop: bool,
+    /// [`View::State`]: search once per seat (each with its own noise), not once per agent.
+    pub per_seat: bool,
 }
 
 /// One thread's search workspaces, per agent.
@@ -210,30 +220,43 @@ pub fn play_game(
                         state,
                         mode: env.mode(),
                     };
-                    let t = Instant::now();
-                    let budget = agent.budget().budget_from(t);
-                    let seed = noise_seed(0);
-                    let trees = &mut ws.trees[p];
-                    let res = if trees.len() > 1 {
-                        agent.search_game_threads(trees, &g, budget, seed)
+                    // One search for all the agent's seats, or one per seat with its own noise.
+                    let groups: Vec<(u64, Vec<usize>)> = if setup.per_seat {
+                        seats.iter().map(|&s| (1 + s as u64, vec![s])).collect()
                     } else {
-                        agent.search_game(&mut trees[0], &g, budget, &mut JaxNoise::from_seed(seed))
+                        vec![(0, seats.clone())]
                     };
-                    let us = t.elapsed().as_micros().min(u32::MAX as u128) as u32;
-                    match res {
-                        Ok(m) => {
-                            for &s in &seats {
-                                actions[s] = m.search.action[s];
+                    for (extra, group) in groups {
+                        let t = Instant::now();
+                        let budget = agent.budget().budget_from(t);
+                        let seed = noise_seed(extra);
+                        let trees = &mut ws.trees[p];
+                        let res = if trees.len() > 1 {
+                            agent.search_game_threads(trees, &g, budget, seed)
+                        } else {
+                            agent.search_game(
+                                &mut trees[0],
+                                &g,
+                                budget,
+                                &mut JaxNoise::from_seed(seed),
+                            )
+                        };
+                        let us = t.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                        match res {
+                            Ok(m) => {
+                                for &s in &group {
+                                    actions[s] = m.search.action[s];
+                                }
+                                log.us.push(us);
+                                log.sims
+                                    .push(m.search.simulations.min(u32::MAX as usize) as u32);
                             }
-                            log.us.push(us);
-                            log.sims
-                                .push(m.search.simulations.min(u32::MAX as usize) as u32);
-                        }
-                        Err(_) => {
-                            log.errors += 1;
-                            let a = random_legal(&mut policy_rng[p], rules, &state);
-                            for &s in &seats {
-                                actions[s] = a[s];
+                            Err(_) => {
+                                log.errors += 1;
+                                let a = random_legal(&mut policy_rng[p], rules, &state);
+                                for &s in &group {
+                                    actions[s] = a[s];
+                                }
                             }
                         }
                     }
