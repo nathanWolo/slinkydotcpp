@@ -510,7 +510,11 @@ impl Network {
     }
 
     /// Build from a config and named arrays (`"conv0/w"`, ...), validating every shape.
+    ///
+    /// The config is validated again ([`NetConfig::validate`]): its fields are public, so it
+    /// may not come from [`NetConfig::from_json`].
     pub fn from_arrays(cfg: NetConfig, mut m: HashMap<String, Array>) -> Result<Network, NetError> {
+        cfg.validate()?;
         let (mut h, mut w, mut cin) = (OBS_ROWS, OBS_COLS, OBS_CHANNELS);
         let mut convs = Vec::new();
         for (i, (&cout, &stride)) in cfg.conv_channels.iter().zip(&cfg.conv_strides).enumerate() {
@@ -845,7 +849,7 @@ mod tests {
 
     fn random_net(channels: &[usize], strides: &[usize], hidden: usize, features: &str) -> Network {
         let cfg = NetConfig::from_json(&format!(
-            r#"{{"conv_channels":{channels:?},"conv_strides":{strides:?},"hidden":{hidden},"features":"{features}"}}"#
+            r#"{{"algorithm":"az_modes","conv_channels":{channels:?},"conv_strides":{strides:?},"hidden":{hidden},"features":"{features}"}}"#
         ))
         .unwrap();
         let mut rng = Rng(channels.iter().sum::<usize>() as u64 + hidden as u64);

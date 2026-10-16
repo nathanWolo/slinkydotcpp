@@ -111,16 +111,24 @@ fn default_draw() -> f32 {
     -0.5
 }
 
+/// The mode names a run may train on (`modes.MODE_NAMES`, src/slinky/modes.py:43).
+pub const MODE_NAMES: [&str; 4] = ["standard", "duel", "royale", "constrictor"];
+
 impl NetConfig {
     /// Parse and validate the text of a `config.json`.
+    ///
+    /// As `unified.load_config` (unified.py:702-712), the file must say `"algorithm":
+    /// "az_modes"`; the fields are then checked as `ModesSettings.__post_init__`
+    /// (unified.py:131-140) checks the ones the engine reads (see [`NetConfig::validate`]).
     pub fn from_json(text: &str) -> Result<NetConfig, NetError> {
         let r: Raw = serde_json::from_str(text).map_err(|e| NetError::Json(e.to_string()))?;
-        if let Some(a) = &r.algorithm
-            && a != "az_modes"
-        {
-            return Err(NetError::Unsupported(format!(
-                "algorithm {a:?}, expected \"az_modes\""
-            )));
+        match r.algorithm.as_deref() {
+            Some("az_modes") => {}
+            a => {
+                return Err(NetError::Unsupported(format!(
+                    "algorithm {a:?}, expected \"az_modes\""
+                )));
+            }
         }
         if r.compute_dtype != "float32" {
             return Err(NetError::Unsupported(format!(
@@ -134,32 +142,7 @@ impl NetConfig {
             "none" => FeatureMode::None,
             f => return Err(NetError::Unsupported(format!("features {f:?}"))),
         };
-        if r.conv_channels.len() != r.conv_strides.len() {
-            return Err(NetError::Unsupported(
-                "conv_channels and conv_strides differ in length".into(),
-            ));
-        }
-        if r.conv_channels.is_empty()
-            || r.conv_channels.contains(&0)
-            || r.conv_strides.contains(&0)
-            || r.hidden == 0
-        {
-            return Err(NetError::Unsupported(
-                "empty or zero-sized layer in config".into(),
-            ));
-        }
-        if r.conv_channels.len() > 16
-            || r.conv_channels
-                .iter()
-                .chain(&r.conv_strides)
-                .any(|&c| c > 4096)
-            || r.hidden > 1 << 16
-        {
-            return Err(NetError::Unsupported(
-                "implausibly large layer sizes in config".into(),
-            ));
-        }
-        Ok(NetConfig {
+        let cfg = NetConfig {
             conv_channels: r.conv_channels,
             conv_strides: r.conv_strides,
             hidden: r.hidden,
@@ -169,7 +152,65 @@ impl NetConfig {
             c_puct: r.c_puct,
             fpu_reduction: r.fpu_reduction,
             draw_value: r.draw_value,
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Check the fields a caller may have edited after [`NetConfig::from_json`] (they are
+    /// public): `game_modes` non-empty, known names, no duplicates (`ModesSettings`,
+    /// unified.py:131-136); one stride per convolution, at least one convolution, no zero or
+    /// implausibly large sizes. [`crate::Network::from_arrays`] calls it too.
+    pub fn validate(&self) -> Result<(), NetError> {
+        if self.game_modes.is_empty() {
+            return Err(NetError::Unsupported(
+                "game_modes must name at least one mode".into(),
+            ));
+        }
+        if let Some(m) = self
+            .game_modes
+            .iter()
+            .find(|m| !MODE_NAMES.contains(&m.as_str()))
+        {
+            return Err(NetError::Unsupported(format!(
+                "unknown game mode {m:?}; expected some of {MODE_NAMES:?}"
+            )));
+        }
+        for (i, m) in self.game_modes.iter().enumerate() {
+            if self.game_modes[..i].contains(m) {
+                return Err(NetError::Unsupported(format!(
+                    "game_modes has duplicates: {:?}",
+                    self.game_modes
+                )));
+            }
+        }
+        if self.conv_channels.len() != self.conv_strides.len() {
+            return Err(NetError::Unsupported(
+                "conv_channels and conv_strides differ in length".into(),
+            ));
+        }
+        if self.conv_channels.is_empty()
+            || self.conv_channels.contains(&0)
+            || self.conv_strides.contains(&0)
+            || self.hidden == 0
+        {
+            return Err(NetError::Unsupported(
+                "empty or zero-sized layer in config".into(),
+            ));
+        }
+        if self.conv_channels.len() > 16
+            || self
+                .conv_channels
+                .iter()
+                .chain(&self.conv_strides)
+                .any(|&c| c > 4096)
+            || self.hidden > 1 << 16
+        {
+            return Err(NetError::Unsupported(
+                "implausibly large layer sizes in config".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -181,10 +222,29 @@ mod tests {
     fn defaults_and_errors() {
         let c = NetConfig::from_json(r#"{"algorithm":"az_modes","unknown":1}"#).unwrap();
         assert_eq!(c.conv_channels, vec![16, 32, 32]);
-        assert!(NetConfig::from_json(r#"{"compute_dtype":"bfloat16"}"#).is_err());
+        assert_eq!(c.game_modes, MODE_NAMES.map(String::from).to_vec());
+        let az = |rest: &str| format!(r#"{{"algorithm":"az_modes",{rest}}}"#);
+        assert!(NetConfig::from_json(&az(r#""compute_dtype":"bfloat16""#)).is_err());
         assert!(NetConfig::from_json(r#"{"algorithm":"ppo"}"#).is_err());
-        assert!(NetConfig::from_json(r#"{"features":"x"}"#).is_err());
-        assert!(NetConfig::from_json(r#"{"conv_strides":[1]}"#).is_err());
+        assert!(NetConfig::from_json(&az(r#""features":"x""#)).is_err());
+        assert!(NetConfig::from_json(&az(r#""conv_strides":[1]"#)).is_err());
         assert!(NetConfig::from_json("nonsense").is_err());
+    }
+
+    /// `unified.load_config` and `ModesSettings.__post_init__` refuse these, so Rust must too.
+    #[test]
+    fn algorithm_and_game_modes_like_python() {
+        for bad in [
+            "{}",
+            r#"{"algorithm":null}"#,
+            r#"{"algorithm":"az_modes","game_modes":[]}"#,
+            r#"{"algorithm":"az_modes","game_modes":["foo"]}"#,
+            r#"{"algorithm":"az_modes","game_modes":["duel","duel"]}"#,
+            r#"{"algorithm":"az_modes","game_modes":null}"#,
+        ] {
+            assert!(NetConfig::from_json(bad).is_err(), "{bad}");
+        }
+        let c = NetConfig::from_json(r#"{"algorithm":"az_modes","game_modes":["duel"]}"#).unwrap();
+        assert_eq!(c.game_modes, ["duel"]);
     }
 }

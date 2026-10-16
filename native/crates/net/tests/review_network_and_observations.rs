@@ -441,7 +441,10 @@ fn network_rejects_bad_input_without_panicking() {
     }
     // Integer-valued floats in config.json (Python's json.dump writes 1 for a float field set to
     // the int 1) must parse.
-    let c = NetConfig::from_json(r#"{"c_puct":1,"fpu_reduction":0,"draw_value":-1}"#).unwrap();
+    let c = NetConfig::from_json(
+        r#"{"algorithm":"az_modes","c_puct":1,"fpu_reduction":0,"draw_value":-1}"#,
+    )
+    .unwrap();
     assert_eq!((c.c_puct, c.fpu_reduction, c.draw_value), (1.0, 0.0, -1.0));
 }
 
@@ -479,17 +482,15 @@ fn arrays_for(
 }
 
 /// `NetConfig`'s fields are public, so a hand-built config bypasses `from_json`'s validation.
-/// `Network::from_arrays` then panics (divide by zero on a zero stride, `convs.len() - 1`
-/// underflow on no convolutions) or silently drops layers (`zip` of channel and stride lists of
-/// different lengths) instead of returning an error. Not reachable from a request (configs come
-/// from config.json at load time), but the crate promises no panics on bad input.
+/// `Network::from_arrays` used to panic (divide by zero on a zero stride, `convs.len() - 1`
+/// underflow on no convolutions) or silently drop layers (`zip` of channel and stride lists of
+/// different lengths); it now validates the config again and returns an error.
 /// (conv_channels, conv_strides, the (cout, stride) the arrays are shaped for).
 type Spec = (Vec<usize>, Vec<usize>, Vec<(usize, usize)>);
 
 #[test]
-#[ignore = "bug: Network::from_arrays panics / truncates on a hand-built NetConfig (empty convs, zero stride, length mismatch)"]
 fn from_arrays_validates_hand_built_configs() {
-    let base = NetConfig::from_json("{}").unwrap();
+    let base = NetConfig::from_json(r#"{"algorithm":"az_modes"}"#).unwrap();
     let cases: [Spec; 3] = [
         (vec![], vec![], vec![]),
         (vec![16], vec![0], vec![(16, 0)]),

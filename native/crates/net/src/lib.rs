@@ -50,7 +50,8 @@ mod network;
 pub mod npy;
 
 pub use config::{
-    FeatureMode, NUM_ACTIONS, NUM_FEATURES, NetConfig, OBS_CHANNELS, OBS_COLS, OBS_LEN, OBS_ROWS,
+    FeatureMode, MODE_NAMES, NUM_ACTIONS, NUM_FEATURES, NetConfig, OBS_CHANNELS, OBS_COLS, OBS_LEN,
+    OBS_ROWS,
 };
 pub use error::NetError;
 pub use network::{Network, Output, Scratch};
