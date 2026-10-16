@@ -24,7 +24,7 @@ functions they port.
 | `crates/api` | `slinky-api` | Battlesnake API types. Converts a request into a config, a mode and a state (our snake in seat 0), and computes the safe-move fallback. Requests are read with Python's semantics (`py.rs`) | `server.py` (`game_config`, `request_state`, `royale_sides`, `safe_move`), `engine_json.py` |
 | `crates/search` | `slinky-search` | The PUCT search, JAX threefry noise, the `Agent` API (request in, move out) and the `naz` CLI | `mcts.search`, `az_modes.agent_search` / `make_evaluator` / `make_policy`, `agents.check_game` |
 | `crates/lambda` | `slinky-lambda` | An AWS Lambda handler skeleton (routing, the info response and the `/start` snake-count cache). It is **not yet wired to the engine** and answers "up"; see its README | `deploy/lambda` |
-| `crates/referee` | `slinky-referee` | Placeholder (empty `main`) for strength tests between servers | none |
+| `crates/referee` | `slinky-referee` | `naz-match`: strength tests between native agents in the four ladder modes (multi-threaded, resumable, sequential stopping) | `benchmarks/strength.py`, `evaluate.run_match` / `play_table` scoring, eval-speed `--sequential` |
 
 Dependency order: `rules`, then `obs` and `api`, then `search`. `net` has no engine dependencies,
 and `search` uses all four.
@@ -154,6 +154,129 @@ the network round trip.
 
 Run it with:
 `NAZ_GOLDEN=... taskset -c N cargo run --release -p slinky-search --example bench -- <run dir> [cases per config]`.
+
+## Strength tests (naz-match)
+
+`naz-match` (crate `referee`) plays native agents against each other in the four ladder modes,
+the native counterpart of `benchmarks/strength.py`. Duel: A and B alternate seats. 4 snakes: A
+holds seat `g % 4` of game `g` and B the other three, which is the line-up of `evaluate.run_match`
+and of `play_table` with `(0, 1, 1, 1)`. By default each seat searches separately with its own
+noise, as independent ladder snakes do (see "Per-seat searches" below). Games run one per
+thread. Each game is fixed by `(seed, game id)`, so the thread count does not
+change any game, as long as both agents use simulation budgets.
+
+```bash
+B=$CARGO_TARGET_DIR/release/naz-match            # cargo build --release -p slinky-referee
+R=/home/nathan/slinky-serve/az-modes-M-s0
+# 1024 against 256 simulations: the duel stops sequentially, then 256 games of each 4p mode
+$B --a "az_modes:$R:simulations=1024" --b $R --mode duel --games 1024 --sequential --out s.jsonl
+$B --a "az_modes:$R:simulations=1024" --b $R --mode standard,royale,constrictor --games 256 --out s.jsonl
+$B --a "az_modes:$R:time_ms=350" --b $R --mode duel --games 256 --view request --out t.jsonl
+$B --table s.jsonl                               # markdown table of the summary lines
+```
+
+Agents:
+
+* `random_legal`;
+* `az_modes:<run dir>` with `:simulations=N` (default 256), or `:time_ms=T[:max_simulations=N]`
+  (not deterministic), and optionally `:threads=K`. A bare run dir also works.
+
+Options:
+
+* `--mode` (default `all`), `--games` (default 256, rounded up to whole seat rotations),
+  `--round-games` (default 64), `--seed`, `--threads` (default: all cores);
+* `--max-turns` (default 500): a harness cut-off, which counts as a draw if A is still alive;
+* `--view request`: each seat gets the ladder's `/move` request and searches it, one search per
+  seat. The default `state` view searches the true state, as slinky's strength tests do, and so
+  it knows the royale shrink sides;
+* `--full-games`: by default a 4p game stops once A is dead or alone. All the statistics are
+  already fixed at that point;
+* `--per-agent`: B plays its three seats from one search per turn, as slinky's `run_match` does.
+  This is biased; see below.
+
+Output is resumable. `--out F` gets one summary line per matchup. `F.games.jsonl` gets one line
+per game, written as soon as the game ends. It holds the final alive flags, elimination turns
+and causes, A's result, and each agent's search time and simulations per move. `F.rounds.jsonl`
+gets one line per round, with strength.py's W/D/L columns first. Running the same command again
+plays only the missing games. Raising `--games` continues a finished matchup and reuses its
+games. A summary that is already in `F` is skipped unless `--rerun`.
+
+Statistics, following slinky's conventions:
+
+* W/D/L and the score, where a draw counts 1/2. A draw is a cut-off with A alive, or A dying on
+  the last turn together with every other snake. The score has the Wald half-width of
+  `slinky.evaluate` and the Wilson interval of strength.py;
+* for the duel, Elo with its interval;
+* for 4 snakes, A's share of the win (parity 0.25) and its placement (parity 2.5), each with a
+  95% interval;
+* per agent and mode, the search time per move (p50, p90, p99, max) and the simulations per
+  move.
+
+Stopping:
+
+* `--target-ci W` stops once the Wilson half-width is at most `W`, after at least 64 games
+  (`--target-ci-draws` uses the draw-aware interval instead);
+* `--sequential` is the eval-speed branch's anytime-valid test. Four Kelly betting e-processes
+  run on the per-round W/D/L counts, and the test reports an always-valid 95% confidence
+  sequence (`cs95_*`, `elo_cs95_*`). Its parameters are `--seq-elo` (default 35) for the duel,
+  or `--seq-p0` and `--seq-margin` for 4 snakes, plus `--seq-alpha` and `--seq-beta` (default
+  0.05).
+
+The test is ported to Rust rather than read back from Python. It is about a hundred lines of pure
+functions, and the port keeps `naz-match` one binary that decides its stop between rounds on
+machines without the JAX stack (the laptops, AWS).
+
+Checks (`cargo test -p slinky-referee`, and `native/golden/referee_golden.py`):
+
+* **Sequential test against the eval-speed Python.** 400 random cases (decisions, stop rounds,
+  test ends) agree exactly. The log e-values agree to 4e-14 (Python 3.12's compensated `sum`).
+  The confidence sequence agrees to 1e-16, since `lgamma` is CPython's.
+* **Scoring against slinky's own code.** `referee_golden.py --only scoring --results F...`
+  replays the referee's games through `evaluate.run_match` and `play_table`, using a stand-in env
+  that follows each recorded game. W/D/L, truncations, mean turns, and each game's share and
+  placement agree on 32 matchups (10,096 games: random and network agents, the laptop runs below,
+  cut-offs at 25, 120 and 500 turns, full and early-stopped 4p games).
+* **Other tests:** hand-checked final states, identical games with 1 and 4 threads in all modes,
+  resume after a kill (torn line), continuing 32 to 64 games, `--target-ci`, a sequential stop,
+  the request view, and per-seat against per-agent searches.
+
+### Per-seat searches
+
+slinky's `run_match` asks each policy once per turn and gives B's three seats the moves of one
+search. Those three snakes then move consistently with one tree's predictions of each other,
+which A's separate tree does not share. A 4p self-match is therefore biased against A. Measured
+with M at 256 simulations, constrictor, 512 games on the same seed:
+
+| searches | A's share (parity 0.25) | A's placement (parity 2.5) |
+|---|---|---|
+| per agent (`--per-agent`, slinky's) | 0.187 +- 0.028 | 2.74 +- 0.08 |
+| per seat (default) | 0.255 +- 0.034 | 2.46 +- 0.09 |
+
+Royale showed the same bias (0.201 +- 0.049 per agent). This bias also affects 4-snake
+results from `benchmarks/strength.py` for searching agents. In the duel each agent has one seat,
+so both settings play the same games.
+
+### Measured (2026-10-15, M network, laptops, view `state`)
+
+| matchup | mode | games | result |
+|---|---|---|---|
+| 256 vs 256 (self) | duel | 512 | score 0.479 [0.436, 0.522], Elo -15 [-45, +15] |
+| 256 vs 256 (self), per seat | standard / royale / constrictor | 256 / 256 / 512 | share 0.236 +- 0.051 / 0.275 +- 0.054 / 0.255 +- 0.034; placement 2.55 / 2.44 / 2.46 |
+| 1024 vs 256 | duel, `--sequential` | 64 (stopped: A>B) | score 0.758 [0.640, 0.846], Elo +198 [+100, +296], always-valid CS [0.533, 0.909] |
+| 1024 vs 256, per seat | standard | 256 | share 0.490 +- 0.060, placement 1.96 +- 0.14 |
+| 1024 vs 256, per seat | royale | 256 | share 0.408 +- 0.060, placement 2.12 +- 0.14 |
+| 1024 vs 256, per seat | constrictor | 256 | share 0.319 +- 0.051, placement 2.35 +- 0.12 |
+| `time_ms=200` vs 256 | duel, `--sequential` | 64 (stopped: A>B) | score 0.805 [0.692, 0.883], Elo +246 [+140, +352]; 1,968 simulations per move (p50) |
+
+More search wins clearly in every mode. Each laptop core ran one game, with 7 to 9 games at once
+on 8 or 12 hyperthreads, so the per-move times are slower than one quiet core. Ms per move
+(p50 / p99) on the ThinkPad with 9 games at once:
+
+* duel: 1024 simulations 92 / 212, 256 simulations 24 / 72;
+* standard 4p: 1024 simulations 137 / 456;
+* `time_ms=200`: 200.1 / 200.3, max 204.0. The deadline holds under load.
+
+On pop-os-2 with 7 games at once, 256 simulations took 44 (duel) to 70 (4p) ms at p50.
 
 ## Weight-loading contract
 
