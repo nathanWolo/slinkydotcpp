@@ -220,16 +220,15 @@ fn describe(a: &GameState, b: &GameState, cfg: &GameConfig) -> String {
     out.join("; ")
 }
 
-/// Compare one group directory; returns (states, transitions, mismatch descriptions).
-/// Whether the placement values for `draw` with `n` seats are compared. BUG (draw term
-/// association, see `review_all_draws_bitwise`): with 4 seats and an all-dead tie the Rust
-/// `draw * tied * (1/3)` differs by one ulp from XLA's `tied * (draw * (1/3))` for draws such as
-/// -0.45, -0.9 or -0.123, so the always-on tests compare 4-seat placement values only for the
-/// deployed draw -0.5 (exact either way) until the fix lands.
+/// Whether the placement values for `draw` with `n` seats are compared. The draw term used to be
+/// rounded as `draw * tied * (1/3)`, one ulp off XLA's `tied * (draw * (1/3))` for 4 seats and
+/// draws such as -0.45, so the per-group tests compared 4-seat values only for the deployed
+/// -0.5; now fixed, `review_all_draws_bitwise` compares every draw.
 fn draw_checked(n: usize, draw: f64, all: bool) -> bool {
     all || n < 4 || draw == -0.5
 }
 
+/// Compare one group directory; returns (states, transitions, mismatch descriptions).
 fn check_group(dir: &Path, all_draws: bool) -> (usize, usize, Vec<String>) {
     let m = read_meta(dir);
     let cfg = m.cfg;
@@ -405,14 +404,12 @@ fn review_placement_values() {
     check_placement(false);
 }
 
-/// BUG: `placement_values` adds the draw term as `(draw * tied) * (1/(N-1))`; the jitted Python
-/// (`draw_value * tied / (n - 1)`, mcts.py:562) is compiled by XLA into
+/// Fixed bug: `placement_values` added the draw term as `(draw * tied) * (1/(N-1))`; the jitted
+/// Python (`draw_value * tied / (n - 1)`, mcts.py:562) is compiled by XLA into
 /// `tied * (draw * (1/(N-1)))` with `draw * (1/(N-1))` constant-folded in f32. With N = 4 and
 /// three or four seats tied at the end, the two differ by one ulp for draws such as -0.45
-/// (Rust -0.45, Python -0.45000002), -0.9 and -0.123. The deployed -0.5 is exact either way.
-/// Fix: `*v += tied * (draw_value * recip)`. Verified offline against all 21,600 records.
+/// (Python -0.45000002), -0.9 and -0.123. The deployed -0.5 is exact either way.
 #[test]
-#[ignore = "bug: placement draw term association (1 ulp, N = 4, non-dyadic draws)"]
 fn review_all_draws_bitwise() {
     check_placement(true);
     run_groups(true, |_| true);

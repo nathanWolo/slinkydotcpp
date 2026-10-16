@@ -760,8 +760,6 @@ fn review_lone_survivor_plays_first_safe_move() {
 /// `mcts.placement_values(state, standard 4p, draw)` with all four seats eliminated on turn 5):
 /// XLA evaluates `draw * tied / (n - 1)` as `tied * (f32(draw) * f32(1/3))`.
 #[test]
-#[ignore = "BUG (rules crate, retrained configs only): 4-seat draw term rounded as (draw*tied)*recip, \
-            XLA computes tied*(draw*recip)"]
 fn placement_draw_term_matches_xla() {
     let cfg = GameConfig::new(11, 11, 4, Ruleset::Standard).unwrap();
     let mut s = GameState::new(&cfg);

@@ -137,7 +137,9 @@ impl GameState {
         let last = out.iter().copied().max().unwrap_or(i32::MAX);
         let nobody = !self.alive[..n].iter().any(|&a| a);
         let tied = out.iter().filter(|&&o| o == last).count() as f32 - 1.0;
-        let draw = draw_value * tied * recip;
+        // XLA folds `draw_value * tied / (n - 1)` (mcts.py:562) into
+        // `tied * (draw_value * (1/(n-1)))`, with the constant product rounded in f32 first.
+        let draw = tied * (draw_value * recip);
         let mut values = [0f32; MAX_SNAKES];
         for (i, v) in values.iter_mut().enumerate().take(n) {
             let outlasted = out.iter().filter(|&&o| out[i] > o).count() as i32;
