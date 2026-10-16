@@ -36,6 +36,9 @@ aws() { "$AWS" --profile "$profile" --region "$region" "$@"; }
 python3 -c "import sys, zipfile; n = set(zipfile.ZipFile(sys.argv[1]).namelist()); \
 sys.exit(not {'bin/slinky-engine', 'weights/az-modes/params.npz'} <= n)" "$zip" \
     || { echo "$zip has no native engine: rebuild it with build.sh" >&2; exit 1; }
+python3 -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); \
+sys.exit(any(z.read(f) != open(sys.argv[2] + '/' + f, 'rb').read() for f in ('lambda_function.py', 'snake_numpy.py')))" \
+    "$zip" "$here" || { echo "$zip has an old lambda_function.py or snake_numpy.py: rebuild it with build.sh" >&2; exit 1; }
 
 account="$(aws sts get-caller-identity --query Account --output text)"
 echo "account $account, region $region, function $fn"
