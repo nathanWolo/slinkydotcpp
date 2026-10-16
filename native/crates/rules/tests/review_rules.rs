@@ -630,13 +630,12 @@ fn royale_shrink_timing() {
     assert!(c2.hazard[..MAX_CELLS].iter().filter(|&&v| v > 0).count() == 11);
 }
 
-/// BUG (minor, unreachable from a request: `set_snake` and the step only store 0 to 3): an
+/// Fixed bug (minor, unreachable from a request: `set_snake` and the step only store 0 to 3): an
 /// out-of-range stored `last_move` with an invalid action. The jitted Python (checked by hand)
 /// keeps the raw int8 `last_move` (7 stays 7) and indexes `_DELTAS` with JAX's gather, which
-/// wraps negative int8 ids once (-1 -> RIGHT) and then clamps (-5 -> UP). Rust clamps with
-/// `last_move.min(3)` (u8 251, i.e. int8 -5, moves RIGHT) and stores the clamped 3.
+/// wraps negative int8 ids once (-1 -> RIGHT) and then clamps (-5 -> UP). Rust used to clamp
+/// with `last_move.min(3)` and store the clamped value.
 #[test]
-#[ignore = "bug (minor, unreachable): out-of-range last_move handling differs from JAX gather"]
 fn out_of_range_last_move_like_jax() {
     let cfg = GameConfig::new(11, 11, 2, Ruleset::Standard).unwrap();
     let base = build(&cfg, &[(&[(5, 5)], 50), (&[(2, 2)], 50)]);

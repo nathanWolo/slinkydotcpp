@@ -31,6 +31,16 @@ use crate::{Cause, GameState};
 /// `last_move`, the engine's default (rules.py:77-82).
 pub type Actions = [u8; MAX_SNAKES];
 
+/// Row of `DELTAS` that `_DELTAS[move]` reads in the jitted Python (rules.py:83) for a stored
+/// move id. `last_move` is int8 there: a negative id wraps once (`id + 4`, numpy-style), and
+/// the gather then clamps to `[0, 3]`. Only reachable with a hand-set out-of-range `last_move`
+/// (the step and `set_snake` store 0 to 3), but it keeps the port exact for any state.
+fn jax_delta_index(mv: u8) -> usize {
+    let id = i32::from(mv as i8);
+    let id = if id < 0 { id + 4 } else { id };
+    id.clamp(0, 3) as usize
+}
+
 /// The royale hazard grid (0 or 1 per cell) of the zone shown at `turn`
 /// (`rules.royale_hazards`, rules.py:90-108): `turn / shrink_every_n_turns` shrinks have happened
 /// (floor division), and the first that many `sides` say which edge each one moved
@@ -73,10 +83,10 @@ impl GameState {
                 continue;
             }
             let a = actions[i];
-            // An out-of-range stored last_move is clamped, as a JAX gather would clamp it.
-            let mv = if a < 4 { a } else { self.last_move[i].min(3) };
+            // An invalid action repeats the stored last_move, kept raw as Python keeps it.
+            let mv = if a < 4 { a } else { self.last_move[i] };
             moves[i] = mv;
-            let (dx, dy) = DELTAS[mv as usize];
+            let (dx, dy) = DELTAS[jax_delta_index(mv)];
             let [x, y] = self.head[i];
             let nh = [x.wrapping_add(dx), y.wrapping_add(dy)];
             self.head[i] = nh;
