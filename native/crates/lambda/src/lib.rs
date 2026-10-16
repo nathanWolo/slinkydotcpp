@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use slinky_api::{PyValue, Request};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 const MAX_BODY: usize = 1 << 16;
@@ -75,8 +76,21 @@ pub fn seed_text(v: Option<&PyValue>, raw: bool) -> String {
 /// An HTTP answer: status code and JSON text.
 pub type Reply = (u16, String);
 
+static LOG_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// Writes the JSON log lines to stderr instead of stdout (the engine process, whose stdout
+/// carries its answers).
+pub fn log_to_stderr() {
+    LOG_TO_STDERR.store(true, Ordering::Relaxed);
+}
+
 fn log(v: Value) {
-    println!("{v}"); // one JSON line per event in CloudWatch
+    // One JSON line per event in CloudWatch.
+    if LOG_TO_STDERR.load(Ordering::Relaxed) {
+        eprintln!("{v}");
+    } else {
+        println!("{v}");
+    }
 }
 
 fn reply(code: u16, body: Value) -> Reply {

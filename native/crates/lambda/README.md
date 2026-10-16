@@ -1,8 +1,18 @@
 # slinky-lambda
 
-AWS Lambda handler (custom runtime `provided.al2023`, arm64 or x86_64) for the native
-AlphaZero snakes. It sits next to the Python deployment in `deploy/lambda/` and routes the same
-way behind one Function URL:
+The native AlphaZero snakes on AWS Lambda, two ways:
+
+* **Deployed: `slinky-engine` inside the Python Lambda** (`deploy/lambda/`, function
+  `slinky-snake`). The Python handler serves the numpy snakes and, for the native ones
+  (`lambda_function.NATIVE`: `/az-256`), starts `bin/slinky-engine` once per container and
+  talks to it in JSON lines (`src/bin/engine.rs`: one request line in, one answer line out,
+  logs on stderr). One function, one URL and one bill for every snake. See
+  `deploy/lambda/README.md`.
+* A standalone custom-runtime handler (`provided.al2023`, `src/main.rs`, binary
+  `slinky-lambda`), described below. Not deployed; kept tested.
+
+Both use the same handler (`App`) and engine (`SnakeEngine`). The standalone one routes like
+the Python deployment behind one Function URL:
 
     GET  /<snake>          info (apiversion, author, color, head, tail, version)
     POST /<snake>/start    remembers the game's snake count (bounded per-process cache)
@@ -26,11 +36,24 @@ the M network), each move is the faithful decoupled-PUCT search of the Python ag
 | `THREADS` | root-parallel search trees, one per vCPU (`1` is the plain search) | 1 |
 | `TIE_SEED` | one fixed tie-break seed for every move (tests) | derived, see below |
 | `MEMORY_LIMIT_MB` | cap on one search tree (the search stops early when it is reached) | 256 |
+| `DEADLINE_MARGIN_MS` | time kept for the network and Lambda's overhead: every search stops at `game.timeout` less this (see Deadline) | 150 |
+| `DEBUG_PANIC` | `search:<game id>` or `handler:<game id>`: panic on that game's `/move` (tests only) | off |
 | `SNAKE_AUTHOR`, `SNAKE_HEAD`, `SNAKE_TAIL`, `SNAKE_COLOR_<NAME>` | info response (`<NAME>` upper case, `-` and `.` become `_`) | `slinky`, `default`, `default`, `#8b5cf6` |
 
 A malformed setting (`SIMULATIONS=0`, a bad `SNAKES` item, two snakes with one name) makes the
 function fail at init with a message, which shows in the first invocation's error. A snake whose
 weights cannot be loaded keeps answering with the safe move and logs why (event `load`).
+
+### Deadline
+
+Every search stops at the request's deadline, whatever its settings: `game.timeout` (500 ms
+when the request has none, or one that is not a positive number) less `DEADLINE_MARGIN_MS`,
+counted from the request's arrival at the handler, and never after the invocation's own
+deadline less the margin. When the deadline cuts a search, the move is the best of the
+simulations run so far (at least one always runs). `BUDGET_MS` past the deadline is cut to it.
+A fixed `SIMULATIONS` search that ends before its deadline is unchanged (the 461 Python goldens
+still agree). Each move's log line has `deadline_ms` (arrival to deadline) and `cut` (the
+deadline or the memory cap stopped the search early).
 
 ### Seed policy
 
@@ -47,10 +70,19 @@ each move's log line). `TIE_SEED` overrides it.
 
 Any error answers HTTP 200 with the safe move (`slinky_api::safe_move`): a request the engine cannot
 read, a game the network does not play (not 11x11, not 2 to 4 snakes, a mode the run was not
-trained on: the Python heuristic fallback is not ported), missing weights. A panic is caught too
-when the binary is built with `panic = "unwind"` (the workspace default is `abort`; the build
-commands below set it; that path has no test). Only malformed HTTP bodies (not JSON, no game id,
-over 64 KiB) get a 400, as in the Python handler.
+trained on: the Python heuristic fallback is not ported), missing weights. Bodies are read with
+Python's `json.loads` dialect (`slinky_api::Request`: `NaN`, a BOM, lone surrogates, deep
+nesting) and any `game.id` type is accepted, as the Python handler does; only bodies Python
+refuses (not JSON, not an object, no `game.id`, over 64 KiB, base64 that does not decode) get a
+400. The event is read as plain JSON with `lambda_runtime` (not `lambda_http`, whose event
+conversion `expect`s valid base64 and a valid URI), so no request can panic outside the
+handler. A panic in the handler or the search answers the safe move (a 500 for other routes)
+and the process keeps serving, when the binary is built with `panic = "unwind"`: the
+workspace default is `abort`, so the deploy builds set `CARGO_PROFILE_RELEASE_PANIC=unwind`
+(`tests/runtime.rs` checks it with `DEBUG_PANIC` and prints SKIP for an abort build; run the
+tests with that variable set to cover it). The weights' `params.npz` entries are checked
+against their CRC-32 at load: a corrupted file is a load error (the snake answers the safe
+move and logs why).
 
 ### `/start` cache limit
 
@@ -95,7 +127,8 @@ not tried.
 
 ## Tests and local run
 
-    cargo test -p slinky-lambda --release     # 5 unit tests, 5 handler tests (about 6 s)
+    cargo test -p slinky-lambda --release     # unit, handler, review, runtime, engine_pipe tests
+    CARGO_PROFILE_RELEASE_PANIC=unwind cargo test -p slinky-lambda --release   # + the panic test
 
 `tests/handler.rs` (needs the deployed M run dir, `$NAZ_RUN` to change it; the golden part needs
 the vectors in `$NAZ_GOLDEN`, both SKIP when missing) checks, through the same `App::handle` the
@@ -189,7 +222,7 @@ and a cold start come on top. Keep `BUDGET_MS` at 300 or less, or use a fixed `S
 measured) but are two trees, not one tree of the double size: their strength relative to a single
 1024-simulation tree is not measured.
 
-## Deploy outline (not run: needs AWS credentials)
+## Deploy outline for the standalone handler (not used: the engine ships inside `deploy/lambda`)
 
 Mirror `deploy/lambda/deploy.sh` (role, log group with 14-day retention, S3 bucket for the
 package, public Function URL, reserved concurrency) with these differences:

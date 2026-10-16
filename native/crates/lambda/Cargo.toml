@@ -13,6 +13,11 @@ path = "src/lib.rs"
 name = "slinky-lambda"
 path = "src/main.rs"
 
+# The engine as a child process of the Python Lambda (deploy/lambda): JSON lines in and out.
+[[bin]]
+name = "slinky-engine"
+path = "src/bin/engine.rs"
+
 [dependencies]
 lambda_runtime = { version = "1", default-features = false }
 base64 = "0.22"

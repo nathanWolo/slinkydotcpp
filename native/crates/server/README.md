@@ -36,7 +36,7 @@ running. In an abort build, the process exits and systemd restarts it (`Restart=
 slinky-native-server --snake NAME=RUN_DIR[:simulations=N][:budget_ms=T] [--snake ...]
     [--host 127.0.0.1] [--port 8000] [--author slinky] [--color "#3b82f6"]
     [--head default] [--tail default] [--move-log FILE] [--threads N]
-    [--answer-by-ms 400] [--no-benchmark]
+    [--answer-by-ms 400] [--margin-ms 100] [--no-benchmark]
 ```
 
 * `--snake NAME=RUN_DIR[:OPTS]` serves a snake at `/NAME`. Repeat the flag to serve several
@@ -60,7 +60,15 @@ slinky-native-server --snake NAME=RUN_DIR[:simulations=N][:budget_ms=T] [--snake
 * `--answer-by-ms MS` answers with the safe move when the search is still running MS ms
   after the request arrived. The default is 400; 0 always waits. This is new: the Python
   server has no such deadline. It only fires under overload (all threads busy). The faithful
-  256-simulation search takes 10 to 20 ms.
+  256-simulation search takes 10 to 20 ms. A `budget_ms` search stops 20 ms before it, so a
+  `budget_ms` at or past `--answer-by-ms` still plays the agent's move (it used to make every
+  move the safe move).
+* `--margin-ms MS` (default 100): every search, a fixed simulation count included, stops at
+  the request's deadline, `game.timeout` (500 ms when the request has none or an unusable one)
+  less MS less 20 ms after the request arrived, and plays its best move so far; the safe move
+  is sent at the latest at `game.timeout` less MS. A faithful search that ends before its
+  deadline is unchanged. With the defaults, a 500 ms game is due 400 ms after arrival, as
+  `--answer-by-ms` already was; a 200 ms game is searched for at most 80 ms.
 * `--no-benchmark` skips the startup self-benchmark (see "Seeds").
 
 ### Replacing the ladder bot
@@ -127,7 +135,10 @@ benchmark on), the two servers search the same requests with the same tie noise.
   never reach that case (see the workspace README, known gap 5).
 * Where Python's own `safe_move` raises, the move is "up" in both, but Python names the agent
   `none` and native names it `safe_move`.
-* A search still running after `--answer-by-ms` gets the safe move (Python has no deadline).
+* A search still running after `--answer-by-ms` gets the safe move, and every search stops by
+  `game.timeout` less `--margin-ms` (Python has no deadline).
+* A client that shuts its write side after sending the request (half-close) gets its answer
+  (hyper `half_close(true)`), as with Python's `http.server`.
 * Connections close after each response, as with Python's HTTP/1.0 handler.
 
 ## HTTP stack: hyper 1 on tokio
