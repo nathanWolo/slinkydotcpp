@@ -742,6 +742,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "slinky-env"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "slinky-api",
+ "slinky-rules",
+]
+
+[[package]]
 name = "slinky-lambda"
 version = "0.1.0"
 dependencies = [
