@@ -174,10 +174,28 @@ pub struct Choice {
     pub error: Option<String>,
 }
 
+/// A `/start` cache key. Python's dict finds an id by equality, and a NaN id (a new float
+/// object on every request) equals nothing, itself included: each NaN `/start` adds an entry
+/// no request ever finds (and that only eviction removes), so a NaN gets a key of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum GameKey {
+    Id(Key),
+    NaN(u64),
+}
+
+impl GameKey {
+    /// The key a lookup uses: `None` for a NaN, which is never found.
+    fn lookup(key: Key) -> Option<GameKey> {
+        (key != Key::NaN).then_some(GameKey::Id(key))
+    }
+}
+
 #[derive(Debug, Default)]
 struct SnakeState {
     /// game id -> snakes at `/start`.
-    games: OrderedMap<Key, usize>,
+    games: OrderedMap<GameKey, usize>,
+    /// NaN ids stored so far (each gets its own [`GameKey::NaN`]).
+    nan_ids: u64,
     /// Moves counted so far (the Python server's `Mover._moves`).
     moves: u64,
 }
@@ -282,7 +300,13 @@ impl Snake {
             if st.games.len() >= MAX_GAMES {
                 st.games.pop_first(); // games whose /end never came
             }
-            let key = id.key().map_err(|e| e.0)?;
+            let key = match id.key().map_err(|e| e.0)? {
+                Key::NaN => {
+                    st.nan_ids += 1;
+                    GameKey::NaN(st.nan_ids)
+                }
+                key => GameKey::Id(key),
+            };
             st.games.insert(key, n);
         }
         let plays = game_from_request(req, Some(n))
@@ -297,8 +321,9 @@ impl Snake {
 
     /// `/end`: forgets the game (`Mover.end`); an error where Python's raises.
     pub fn end(&self, req: &Request) -> Result<(), String> {
-        if let Some(id) = req.root().get("game").and_then(|g| g.get("id")) {
-            let key = id.key().map_err(|e| e.0)?;
+        if let Some(id) = req.root().get("game").and_then(|g| g.get("id"))
+            && let Some(key) = GameKey::lookup(id.key().map_err(|e| e.0)?)
+        {
             lock(&self.state).games.remove(&key);
         }
         Ok(())
@@ -307,7 +332,7 @@ impl Snake {
     /// The snake count remembered at `/start` for this game.
     pub fn starting_snakes(&self, req: &Request) -> Option<usize> {
         let id = req.root().get("game").and_then(|g| g.get("id"))?;
-        let key = id.key().ok()?;
+        let key = GameKey::lookup(id.key().ok()?)?;
         lock(&self.state).games.get(&key).copied()
     }
 
@@ -344,7 +369,7 @@ impl Snake {
         let (starting, index) = {
             let mut st = lock(&self.state);
             let starting = match &key {
-                Some(Ok(k)) => st.games.get(k).copied(),
+                Some(Ok(k)) => GameKey::lookup(k.clone()).and_then(|k| st.games.get(&k).copied()),
                 _ => None,
             };
             let counts =

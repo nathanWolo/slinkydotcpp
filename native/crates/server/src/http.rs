@@ -184,7 +184,10 @@ fn header_text(v: &HeaderValue) -> String {
 /// Answers one request (`Handler.do_GET` / `do_POST`).
 pub async fn handle(app: &App, req: hyper::Request<Incoming>) -> Response<Full<Bytes>> {
     let t_in = Instant::now();
-    let path = req.uri().path().to_string();
+    // `self.path.split("?")[0]`: Python routes on the raw request target, so an absolute-form
+    // target (`http://host/s/move`) is split whole and is a 404, not the path's route.
+    let target = req.uri().to_string();
+    let path = target.split('?').next().unwrap_or_default().to_string();
     match *req.method() {
         Method::GET => {
             if path.is_empty() || path == "/" {

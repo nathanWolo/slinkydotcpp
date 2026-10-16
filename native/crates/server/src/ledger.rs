@@ -100,7 +100,8 @@ fn py_int(v: &PyValue) -> Result<Num, IntError> {
         PyValue::Float(f) if f.is_infinite() => Err(IntError::Overflow),
         PyValue::Float(f) => {
             let t = f.trunc();
-            if t.abs() < 1e38 {
+            const LIMIT: f64 = 1.7014118346046923e38; // 2^127: below, `t` is an exact i128
+            if (-LIMIT..LIMIT).contains(&t) {
                 Ok(Num::Int(t as i128))
             } else {
                 let digits = format!("{:.0}", t.abs());
@@ -115,7 +116,7 @@ fn py_int(v: &PyValue) -> Result<Num, IntError> {
     }
 }
 
-/// Python's floor division and modulo of `i128`s (`None` on overflow or a zero divisor).
+/// Python's floor division of `i128`s (`None` on overflow or a zero divisor).
 fn floor_div(a: i128, b: i128) -> Option<i128> {
     let q = a.checked_div(b)?;
     Some(if (a % b != 0) && ((a < 0) != (b < 0)) {
@@ -125,28 +126,128 @@ fn floor_div(a: i128, b: i128) -> Option<i128> {
     })
 }
 
-fn floor_mod(a: i128, b: i128) -> Option<i128> {
-    let r = a.checked_rem(b)?;
-    Some(if r != 0 && ((r < 0) != (b < 0)) {
-        r + b
-    } else {
-        r
-    })
+/// `-n` of an integer (an `i128` that overflows becomes a [`Num::Big`]; [`Num::add`]
+/// normalises it again).
+fn negate(n: &Num) -> Num {
+    match n {
+        Num::Int(i) => i.checked_neg().map_or_else(
+            || Num::Big {
+                negative: false,
+                digits: i.unsigned_abs().to_string(),
+            },
+            Num::Int,
+        ),
+        Num::Big { negative, digits } => Num::Big {
+            negative: !negative,
+            digits: digits.clone(),
+        },
+        Num::Float(f) => Num::Float(-f),
+    }
 }
 
-/// The shortest signed step from `p` to `x` on an axis of size `w` (a wrapped board crosses an
-/// edge in one step): `(x - p + w // 2) % w - w // 2 if w else x - p`. `None` when the numbers
-/// leave `i128` (Python would still compute it; such a head never matches a move).
-fn step(x: &Num, p: &Num, w: &Num) -> Option<i128> {
-    let (Num::Int(x), Num::Int(p), Num::Int(w)) = (x, p, w) else {
-        return None;
+/// The magnitude of an integer as little-endian 64-bit limbs, no high zero limbs (empty for 0
+/// or a float, which `py_int` never returns).
+fn limbs(n: &Num) -> Vec<u64> {
+    let mut out = match n {
+        Num::Int(i) => {
+            let u = i.unsigned_abs();
+            vec![u as u64, (u >> 64) as u64]
+        }
+        Num::Big { digits, .. } => {
+            let mut out: Vec<u64> = Vec::new();
+            for d in digits.bytes() {
+                // out = out * 10 + d
+                let mut carry = u128::from(d.wrapping_sub(b'0') % 10);
+                for l in out.iter_mut() {
+                    let v = u128::from(*l) * 10 + carry;
+                    *l = v as u64;
+                    carry = v >> 64;
+                }
+                if carry > 0 {
+                    out.push(carry as u64);
+                }
+            }
+            out
+        }
+        Num::Float(_) => Vec::new(),
     };
-    let d = x.checked_sub(*p)?;
-    if *w == 0 {
-        return Some(d);
+    while out.last() == Some(&0) {
+        out.pop();
     }
-    let half = floor_div(*w, 2)?;
-    floor_mod(d.checked_add(half)?, *w)?.checked_sub(half)
+    out
+}
+
+/// Whether the integer `m` (not 0) divides the integer `a`, exactly at any size (binary long
+/// division of the magnitudes: about `bits(a) * limbs(m)` word operations, a few million for
+/// the largest numbers a request can hold).
+fn divides(m: &Num, a: &Num) -> bool {
+    let (m, a) = (limbs(m), limbs(a));
+    if a.is_empty() {
+        return true;
+    }
+    if m.is_empty() {
+        return false;
+    }
+    // r < m always; one extra limb holds r * 2 + 1 before it is reduced.
+    let mut r = vec![0u64; m.len() + 1];
+    let ge = |r: &[u64]| -> bool {
+        if r[m.len()] != 0 {
+            return true;
+        }
+        for k in (0..m.len()).rev() {
+            if r[k] != m[k] {
+                return r[k] > m[k];
+            }
+        }
+        true
+    };
+    for bit in (0..a.len() * 64).rev() {
+        let mut carry = (a[bit / 64] >> (bit % 64)) & 1;
+        for l in r.iter_mut() {
+            let next = *l >> 63;
+            *l = (*l << 1) | carry;
+            carry = next;
+        }
+        if ge(&r) {
+            let mut borrow = 0u64;
+            for (k, l) in r.iter_mut().enumerate() {
+                let sub = m.get(k).copied().unwrap_or(0);
+                let (v, b1) = l.overflowing_sub(sub);
+                let (v, b2) = v.overflowing_sub(borrow);
+                *l = v;
+                borrow = u64::from(b1 || b2);
+            }
+        }
+    }
+    r.iter().all(|&l| l == 0)
+}
+
+/// Whether the shortest signed step from `p` to `x` on an axis of size `w` is `delta`, with
+/// Python's exact integers: `(x - p + w // 2) % w - w // 2 if w else x - p` (a wrapped board
+/// crosses an edge in one step). For `w != 0` that is `delta` exactly when `delta + w // 2` is
+/// a possible value of `% w` and `w` divides `x - p - delta`. The arguments are integers
+/// (`py_int` returns no floats).
+fn steps_by(x: &Num, p: &Num, w: &Num, delta: i128) -> bool {
+    let Ok(e) = x.add(&negate(p)).and_then(|d| d.add(&Num::Int(-delta))) else {
+        return false;
+    };
+    match w {
+        Num::Int(0) => matches!(e, Num::Int(0)),
+        Num::Int(w) => {
+            let Some(t) = floor_div(*w, 2).and_then(|h| h.checked_add(delta)) else {
+                return false;
+            };
+            let in_range = if *w > 0 {
+                (0..*w).contains(&t)
+            } else {
+                *w < t && t <= 0
+            };
+            in_range && divides(&Num::Int(*w), &e)
+        }
+        // |w| >= 2^127: `delta + w // 2` is always a possible value of `% w`.
+        Num::Big { .. } => divides(w, &e),
+        Num::Float(_) => false,
+    }
 }
 
 /// What the ledger remembers of a game's last answer: turn, move, head.
@@ -249,10 +350,11 @@ impl MoveLedger {
         if next_turn.and_then(|t| turn.compare(&t)) != Some(CmpOrdering::Equal) {
             return Ok(Some(Verdict::Gap));
         }
-        let want = prev.mv.delta();
-        let got = (step(&x, &prev.x, &w), step(&y, &prev.y, &h));
+        let (dx, dy) = prev.mv.delta();
         Ok(Some(
-            if got == (Some(i128::from(want.0)), Some(i128::from(want.1))) {
+            if steps_by(&x, &prev.x, &w, i128::from(dx))
+                && steps_by(&y, &prev.y, &h, i128::from(dy))
+            {
                 Verdict::Applied
             } else {
                 Verdict::Missed
@@ -608,10 +710,51 @@ mod tests {
                 .is_err()
         );
         // Negative and zero board sizes follow Python's floor arithmetic.
-        assert_eq!(step(&Num::Int(0), &Num::Int(10), &Num::Int(11)), Some(1));
-        assert_eq!(step(&Num::Int(10), &Num::Int(0), &Num::Int(11)), Some(-1));
-        assert_eq!(step(&Num::Int(3), &Num::Int(1), &Num::Int(0)), Some(2));
-        assert_eq!(step(&Num::Int(3), &Num::Int(1), &Num::Int(-4)), Some(2));
+        let i = Num::Int;
+        assert!(steps_by(&i(0), &i(10), &i(11), 1));
+        assert!(steps_by(&i(10), &i(0), &i(11), -1));
+        assert!(steps_by(&i(3), &i(2), &i(0), 1) && !steps_by(&i(3), &i(1), &i(0), 1));
+        assert!(!steps_by(&i(3), &i(1), &i(-4), 1)); // the step is 2
+        assert!(steps_by(&i(3), &i(2), &i(-4), 1) && steps_by(&i(2), &i(3), &i(-4), -1));
+        // (1 - 0 + 1) % 2 - 1 == -1 and (0 - 1 + 1) % 2 - 1 == -1: on a width of 2 every
+        // step is 0 or -1, as in Python.
+        assert!(!steps_by(&i(1), &i(0), &i(2), 1) && steps_by(&i(0), &i(1), &i(2), -1));
+        assert!(steps_by(&i(1), &i(0), &i(2), -1));
+        assert!(steps_by(&i(0), &i(0), &i(1), 0) && !steps_by(&i(1), &i(0), &i(1), 1));
+        // Beyond i128, exactly (Python's integers).
+        let big = |negative: bool, digits: &str| Num::Big {
+            negative,
+            digits: digits.into(),
+        };
+        let e40 = big(false, "10000000000000000000000000000000000000000");
+        let e40p1 = big(false, "10000000000000000000000000000000000000001");
+        assert!(steps_by(&i(4), &i(3), &e40, 1));
+        assert!(steps_by(
+            &i(4),
+            &i(3),
+            &big(true, "10000000000000000000000000000000000000000"),
+            1
+        ));
+        assert!(steps_by(&e40p1, &e40, &i(11), 1) && !steps_by(&e40p1, &e40, &i(11), -1));
+        assert!(steps_by(&e40, &e40p1, &e40, -1));
+        // x - p = 10**40 + 1 on a width of 10**40 wraps to a step of 1.
+        assert!(steps_by(&e40p1, &i(0), &e40, 1));
+        assert!(!steps_by(&i(i128::MIN), &i(i128::MAX), &i(0), 1));
+        // (d - 1) % -1 + 1 == 1: on a width of -1 every step is 1.
+        assert!(steps_by(&i(i128::MAX), &i(i128::MIN), &i(-1), 1));
+        assert!(!steps_by(&i(i128::MAX), &i(i128::MIN), &i(-1), 0));
+        assert!(divides(
+            &i(3),
+            &big(false, "300000000000000000000000000000000000000000000000000")
+        ));
+        assert!(!divides(
+            &e40p1,
+            &big(false, "300000000000000000000000000000000000000000000000000")
+        ));
+        assert!(divides(
+            &e40,
+            &big(true, "300000000000000000000000000000000000000000000000000")
+        ));
         // A truthy non-container snakes list raises after the bookkeeping (with a log file).
         let path = temp_path("junk.jsonl");
         let l = MoveLedger::new(Some(path.clone()));

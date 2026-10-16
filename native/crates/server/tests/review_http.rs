@@ -343,9 +343,9 @@ fn odd_targets_and_methods() {
 /// The absolute-form request target (`POST http://host/s/move`): Python's `self.path` is the
 /// whole URL, so `_route` sees `["http:", "host", "s", "move"]` and answers 404; hyper's
 /// `uri().path()` is `/s/move` and the native server plays the move. Harmless for the ladder
-/// (no proxy sends absolute-form), recorded as a parity difference.
+/// (no proxy sends absolute-form), recorded as a parity difference. (Fixed: the handler routes
+/// on the whole target, as Python does.)
 #[test]
-#[ignore = "parity difference: absolute-form targets are routed by their path (Python: 404)"]
 fn absolute_form_target_is_404_as_in_python() {
     let Some(dir) = run_dir() else { return };
     let srv = server_with(&[format!("s={dir}:simulations=8")], None, 2, None);
@@ -566,13 +566,13 @@ fn start_cache_evicts_like_python() {
     assert_eq!(has(&Value::Null), None);
 }
 
-/// BUG (api `Key::NaN` derives `Eq`; engine.rs keys the `/start` cache with it): a NaN game id
+/// Fixed (engine.rs gives each NaN id its own never-matching key). Was BUG (api `Key::NaN`
+/// derives `Eq`; engine.rs keys the `/start` cache with it): a NaN game id
 /// (`json.loads("NaN")`) is a new float object on every request, so Python's
 /// `self._games.get(nan)` never finds it and every NaN `/start` adds an entry. Here all NaN
 /// ids are one key: a `/move` with a NaN id gets the snake count stored at a NaN `/start`
 /// (a 4-seat game where Python plays the living snakes only).
 #[test]
-#[ignore = "bug: NaN game ids share one /start cache entry (Python never finds a NaN id)"]
 fn start_cache_never_finds_a_nan_id() {
     let Some(dir) = run_dir() else { return };
     slinky_server_native::log::set_quiet(true);

@@ -109,7 +109,7 @@ fn huge(text: &str) -> bool {
     text.contains("10000000000000000000000000000000000000000") || text.contains("1e+40")
 }
 
-/// Every call of the fuzz except the huge-number cases (see the ignored test below).
+/// Every call of the fuzz except the huge-number cases (see the test below).
 #[test]
 fn ledger_matches_python_call_by_call() {
     let Some(g) = golden() else { return };
@@ -125,15 +125,17 @@ fn ledger_matches_python_call_by_call() {
         other.len(),
         calls.len()
     );
-    // The huge-number cases are checked by the ignored test.
-    eprintln!("{} huge-number calls differ (ignored test)", big.len());
+    // The huge-number cases are checked by the test below.
+    eprintln!(
+        "{} huge-number calls differ (see ledger_huge_numbers_match_python)",
+        big.len()
+    );
 }
 
-/// BUG (ledger.rs `step`): a board width/height or head coordinate outside i128 makes `step`
+/// Fixed (exact integer arithmetic in `steps_by`). Was BUG (ledger.rs `step`): a board width/height or head coordinate outside i128 makes `step`
 /// return None, so the verdict is `missed` where Python's exact integer arithmetic says
 /// `applied` (width 10**40 with a one-step move, or x = 10**40 moving to 10**40 + 1).
 #[test]
-#[ignore = "bug: ledger step() gives up on numbers beyond i128 (Python: applied, Rust: missed)"]
 fn ledger_huge_numbers_match_python() {
     let Some(g) = golden() else { return };
     let calls = g["calls"].as_array().unwrap();
