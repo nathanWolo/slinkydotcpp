@@ -1,162 +1,161 @@
 //! The fallback move for requests the engine cannot play (`server.safe_move`, server.py:277-309).
 //!
-//! It never fails: whatever the JSON looks like, [`safe_move_json`] returns a move. It reads
-//! only the board size, the snake bodies, `you` and the other snakes' heads and lengths, so it
-//! works for games with rulesets the agent does not model and for requests the conversion
-//! refused (a duplicate food, a missing turn, an unknown ruleset).
+//! A line-by-line port with Python's semantics (see `py.rs`): the request's fields are read
+//! as Python reads them (`5.0` and `5` are the same cell, a string `length` cannot be compared
+//! with a number, a ruleset name list containing `"wrapped"` makes the board wrap), and
+//! wherever Python's `safe_move` raises, the server answers 0, "up" (server.py:672-677), so
+//! [`safe_move`] does too. It never fails and never panics: integer arithmetic is checked.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use serde_json::Value;
 use slinky_rules::{DELTAS, Move};
 
 use crate::Request;
+use crate::py::{Key, Num, PyResult, PyValue, number, py_cmp, py_eq, py_ge};
 
-/// What [`safe_move`] looks at.
-struct View {
-    width: i64,
-    height: i64,
-    wrapped: bool,
-    /// Body segments that stay put next turn: all but the tail of every snake.
-    blocked: HashSet<(i64, i64)>,
-    /// `(head, length)` of every snake on the board.
-    snakes: Vec<((i64, i64), i64, bool)>,
-    head: (i64, i64),
-    length: i64,
+/// A move that stays on the board and avoids body segments that stay put, preferring cells that
+/// bigger-or-equal snakes cannot reach next turn; "up" wherever Python's `safe_move` raises.
+pub fn safe_move(req: &Request) -> Move {
+    python_safe_move(req.root()).unwrap_or(Move::Up)
 }
 
-/// The move itself. Ties go to the lowest action id; with nothing to prefer it is `Up`.
-fn choose(v: &View) -> Move {
-    // Cells the other snakes (as long as us or longer) may step on next turn.
-    let mut danger: HashSet<(i64, i64)> = HashSet::new();
-    for &((hx, hy), len, is_you) in &v.snakes {
-        if !is_you && len >= v.length {
+/// [`safe_move`] on the request's JSON text. A body the Python server refuses with HTTP 400
+/// (see [`Request::from_json`]) gets "up" as well: some move has to be sent.
+pub fn safe_move_json(text: &str) -> Move {
+    Request::from_json(text).map_or(Move::Up, |req| safe_move(&req))
+}
+
+/// `s["body"][:-1]` for a body whose items are then subscripted.
+fn all_but_last(body: &PyValue) -> PyResult<&[PyValue]> {
+    match body {
+        PyValue::List(a) => Ok(&a[..a.len().saturating_sub(1)]),
+        // A str slice is a str; its characters cannot be subscripted with "x".
+        PyValue::Str(s) if s.chars().count() <= 1 => Ok(&[]),
+        other => Err(crate::py::PyErr(format!(
+            "TypeError: cannot take the segments of a {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// `needle in haystack` for the ruleset name (`"wrapped" in name`).
+fn contains(haystack: &PyValue, needle: &str) -> PyResult<bool> {
+    match haystack {
+        PyValue::Str(s) => Ok(s.contains(needle)),
+        PyValue::List(items) => {
+            let n = PyValue::Str(needle.to_string());
+            for item in items {
+                if py_eq(item, &n)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        PyValue::Dict(_) => Ok(haystack.get(needle).is_some()),
+        other => Err(crate::py::PyErr(format!(
+            "TypeError: argument of type '{}' is not iterable",
+            other.type_name()
+        ))),
+    }
+}
+
+/// A point's key in the server's sets; `None` when a NaN makes it unequal to every member.
+fn point_key(x: Key, y: Key) -> Option<(Key, Key)> {
+    (x != Key::NaN && y != Key::NaN).then_some((x, y))
+}
+
+/// `n < bound` for a computed coordinate and a request value.
+fn less(n: &Num, bound: &PyValue) -> PyResult<bool> {
+    let n = match n {
+        Num::Int(i) => PyValue::Int(*i),
+        Num::Float(f) => PyValue::Float(*f),
+        Num::Big { negative, digits } => PyValue::BigInt {
+            negative: *negative,
+            digits: digits.clone(),
+        },
+    };
+    Ok(py_cmp(&n, bound)? == Some(Ordering::Less))
+}
+
+/// `server.safe_move` (server.py:277-309), statement by statement.
+fn python_safe_move(req: &PyValue) -> PyResult<Move> {
+    let (board, you) = (req.item("board")?, req.item("you")?);
+    let (w, h) = (board.item("width")?, board.item("height")?);
+    let snakes = board.item("snakes")?.subscripted_items()?;
+    // blocked = {(p["x"], p["y"]) for s in board["snakes"] for p in s["body"][:-1]}
+    let mut blocked: HashSet<(Key, Key)> = HashSet::new();
+    for s in snakes {
+        for p in all_but_last(s.item("body")?)? {
+            let (x, y) = (p.item("x")?.key()?, p.item("y")?.key()?);
+            blocked.extend(point_key(x, y));
+        }
+    }
+    // danger = {(head.x + dx, head.y + dy) for s in snakes if s["id"] != you["id"] and
+    //           s["length"] >= you["length"] for dx, dy in ACTION_DELTAS}
+    let mut danger: HashSet<(Key, Key)> = HashSet::new();
+    for s in snakes {
+        if !py_eq(s.item("id")?, you.item("id")?)? && py_ge(s.item("length")?, you.item("length")?)?
+        {
             for (dx, dy) in DELTAS {
-                danger.insert((hx + i64::from(dx), hy + i64::from(dy)));
+                let head = s.item("head")?;
+                let x = number(head.item("x")?)?.add(&Num::Int(dx.into()))?;
+                let y = number(head.item("y")?)?.add(&Num::Int(dy.into()))?;
+                danger.extend(point_key(x.key(), y.key()));
             }
         }
     }
+    let head = you.item("head")?;
+    let (hx, hy) = (head.item("x")?, head.item("y")?);
+    // "wrapped" in req.get("game", {}).get("ruleset", {}).get("name", "")
+    let empty = PyValue::Dict(Vec::new());
+    let ruleset = req
+        .get("game")
+        .unwrap_or(&empty)
+        .dict_get("ruleset")?
+        .unwrap_or(&empty);
+    let wrapped = match ruleset.dict_get("name")? {
+        None => false,
+        Some(name) => contains(name, "wrapped")?,
+    };
     let mut best = Move::Up;
     let mut best_score = -1;
     for (mv, (dx, dy)) in Move::ALL.into_iter().zip(DELTAS) {
-        let mut p = (v.head.0 + i64::from(dx), v.head.1 + i64::from(dy));
-        if v.wrapped {
-            if v.width <= 0 || v.height <= 0 {
+        let mut px = number(hx)?.add(&Num::Int(dx.into()))?;
+        let mut py = number(hy)?.add(&Num::Int(dy.into()))?;
+        if wrapped {
+            px = px.rem(&number(w)?)?;
+            py = py.rem(&number(h)?)?;
+        } else {
+            let ge0 = |n: &Num| {
+                matches!(
+                    n.compare(&Num::Int(0)),
+                    Some(Ordering::Greater | Ordering::Equal)
+                )
+            };
+            let inside = ge0(&px) && less(&px, w)? && ge0(&py) && less(&py, h)?;
+            if !inside {
                 continue;
             }
-            p = (p.0.rem_euclid(v.width), p.1.rem_euclid(v.height));
-        } else if !(0..v.width).contains(&p.0) || !(0..v.height).contains(&p.1) {
-            continue;
         }
-        let score = if v.blocked.contains(&p) {
-            0
-        } else {
-            1 + i32::from(!danger.contains(&p))
+        let key = point_key(px.key(), py.key());
+        let score = match &key {
+            Some(k) if blocked.contains(k) => 0,
+            Some(k) if danger.contains(k) => 1,
+            _ => 2,
         };
         if score > best_score {
             best = mv;
             best_score = score;
         }
     }
-    best
-}
-
-/// A move that stays on the board and avoids body segments that stay put, preferring cells that
-/// bigger-or-equal snakes cannot reach next turn. For requests that parsed.
-pub fn safe_move(req: &Request) -> Move {
-    let name = req
-        .game
-        .as_ref()
-        .and_then(|g| g.get("ruleset")?.get("name")?.as_str());
-    let snake_view = |s: &crate::Snake| {
-        let head = s.head.or_else(|| s.body.first().copied());
-        (
-            head.map_or((0, 0), |c| (i64::from(c.x), i64::from(c.y))),
-            s.length.unwrap_or(s.body.len() as i64),
-        )
-    };
-    let mut blocked = HashSet::new();
-    let mut snakes = Vec::new();
-    for s in &req.board.snakes {
-        let n = s.body.len().saturating_sub(1);
-        blocked.extend(s.body[..n].iter().map(|c| (i64::from(c.x), i64::from(c.y))));
-        let (head, len) = snake_view(s);
-        snakes.push((head, len, s.id == req.you.id));
-    }
-    let (head, length) = snake_view(&req.you);
-    choose(&View {
-        width: req.board.width,
-        height: req.board.height,
-        wrapped: name.is_some_and(|n| n.contains("wrapped")),
-        blocked,
-        snakes,
-        head,
-        length,
-    })
-}
-
-fn int(v: Option<&Value>) -> Option<i64> {
-    v.and_then(Value::as_i64)
-}
-
-fn point(v: Option<&Value>) -> Option<(i64, i64)> {
-    let v = v?;
-    Some((int(v.get("x"))?, int(v.get("y"))?))
-}
-
-/// [`safe_move`] on raw JSON, tolerant of anything: a missing or malformed field reads as
-/// "nothing there" (no bodies, a head at the origin, a 0x0 board leaves only `Up`).
-pub fn safe_move_json(text: &str) -> Move {
-    let Ok(req) = serde_json::from_str::<Value>(text) else {
-        return Move::Up;
-    };
-    let board = req.get("board");
-    let you = req.get("you");
-    let you_id = you.and_then(|y| y.get("id"));
-    let mut blocked = HashSet::new();
-    let mut snakes = Vec::new();
-    let empty = Vec::new();
-    for s in board
-        .and_then(|b| b.get("snakes"))
-        .and_then(Value::as_array)
-        .unwrap_or(&empty)
-    {
-        let body: Vec<(i64, i64)> = s
-            .get("body")
-            .and_then(Value::as_array)
-            .unwrap_or(&empty)
-            .iter()
-            .filter_map(|c| point(Some(c)))
-            .collect();
-        blocked.extend(body[..body.len().saturating_sub(1)].iter().copied());
-        let head = point(s.get("head"))
-            .or(body.first().copied())
-            .unwrap_or((0, 0));
-        let len = int(s.get("length")).unwrap_or(body.len() as i64);
-        snakes.push((head, len, s.get("id") == you_id && you_id.is_some()));
-    }
-    let head = point(you.and_then(|y| y.get("head")))
-        .or_else(|| point(you.and_then(|y| y.get("body")?.get(0))))
-        .unwrap_or((0, 0));
-    let length = int(you.and_then(|y| y.get("length"))).unwrap_or(0);
-    let name = req
-        .get("game")
-        .and_then(|g| g.get("ruleset")?.get("name")?.as_str());
-    choose(&View {
-        width: int(board.and_then(|b| b.get("width"))).unwrap_or(0),
-        height: int(board.and_then(|b| b.get("height"))).unwrap_or(0),
-        wrapped: name.is_some_and(|n| n.contains("wrapped")),
-        blocked,
-        snakes,
-        head,
-        length,
-    })
+    Ok(best)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn req(head: (i64, i64), body: Vec<(i64, i64)>, other: Value, name: &str) -> String {
         let seg = |(x, y): (i64, i64)| json!({"x": x, "y": y});

@@ -15,9 +15,9 @@
 //! * where Python does not run the agent, Rust does not give an agent-playable game;
 //! * where Python answers `safe_move`, Rust's `safe_move_json` gives the same move.
 //!
-//! There is one test per group of cases. Cases that expose a known parity bug are listed in
-//! [`KNOWN`] with the bug's name; the group tests skip them and the `#[ignore]`d `bug_*` tests
-//! check them, so the suite stays green until the fix stage removes the entries. Skips (with a
+//! There is one test per group of cases. Cases that exposed a parity bug are listed in
+//! [`KNOWN`] with the bug's name; all of those bugs are fixed, so the group tests run every
+//! case and each `bug_*` test reruns its bug's cases as a regression test. Skips (with a
 //! message) when the golden file is missing.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -27,8 +27,8 @@ use serde_json::Value;
 use slinky_api::{Game, Request, game_from_request, safe_move_json};
 use slinky_rules::{Mode, Ruleset};
 
-/// Cases that fail because of a known parity bug: (case name, bug name). Each bug has an
-/// `#[ignore]`d test `bug_<name>` below that says what is wrong and where.
+/// Cases that exposed a parity bug, now fixed: (case name, bug name). Each bug has a test
+/// `bug_<name>` below that says what was wrong and where.
 const KNOWN: &[(&str, &str)] = &[
     (
         "you_object/you-only-id",
@@ -396,8 +396,8 @@ fn check_case(case: &Value) -> Vec<String> {
     problems
 }
 
-/// Runs the cases of `group` (all groups when empty) that are not known bugs, or only the cases
-/// of `bug` when given, and fails on any problem.
+/// Runs the cases of `group` (all groups when empty), only those of `bug` when given, and
+/// fails on any problem.
 fn run(group: &str, bug: Option<&str>) {
     let Some(cases) = load() else { return };
     let mut problems = Vec::new();
@@ -405,7 +405,7 @@ fn run(group: &str, bug: Option<&str>) {
     for case in &cases {
         let name = case["name"].as_str().unwrap_or("?");
         let in_group = group.is_empty() || case["group"].as_str() == Some(group);
-        if !in_group || known_bug(name) != bug {
+        if !in_group || bug.is_some_and(|b| known_bug(name) != Some(b)) {
             continue;
         }
         count += 1;
@@ -489,7 +489,16 @@ fn safe_moves() {
     run("safe_moves", None);
 }
 
-// --- Known parity bugs (found by this review; the fix stage removes the KNOWN entries) --------
+/// Random hostile edits of realistic requests (`fuzz` in the golden script): the whole
+/// conversion and `safe_move` against the Python server.
+#[test]
+fn fuzz() {
+    run("fuzz", None);
+}
+
+// --- Regression tests of the parity bugs this review found (all fixed) -----------------------
+//
+// The descriptions say what the code did before the fix.
 
 /// `types.rs`: `Request.you` is a full `Snake` (required `health` and `body`, typed `name`,
 /// `head`, `length`) and board snakes type-check `name`, `head` and `length`, but the Python
@@ -497,7 +506,6 @@ fn safe_moves() {
 /// (server.py:120-146). A `you` of just `{"id": ...}`, a `"length": "4"`, a `head` without `y`,
 /// a numeric `name` or numeric ids make Rust refuse a request Python plays.
 #[test]
-#[ignore = "bug typed_parse_rejects_unread_fields: Request/Snake parse fields the conversion never reads"]
 fn bug_typed_parse_rejects_unread_fields() {
     run("", Some("typed_parse_rejects_unread_fields"));
 }
@@ -506,7 +514,6 @@ fn bug_typed_parse_rejects_unread_fields() {
 /// stores them through numpy/jnp int32 (engine_json.py:113, 146), which truncates floats
 /// (`89.7` -> 89), parses numeric strings (`"90"`) and reads booleans as 0/1, then plays.
 #[test]
-#[ignore = "bug strict_integer_fields: health/turn as float, numeric string or bool are refused"]
 fn bug_strict_integer_fields() {
     run("", Some("strict_integer_fields"));
 }
@@ -515,7 +522,6 @@ fn bug_strict_integer_fields() {
 /// +-2^31 fails the whole parse. Python drops off-board segments and hazards whatever their
 /// magnitude (`body_to_countdown`, engine_json.py:35-42 and 129-135) and plays.
 #[test]
-#[ignore = "bug i32_coordinates_off_board: off-board coordinates beyond i32 fail the parse"]
 fn bug_i32_coordinates_off_board() {
     run("", Some("i32_coordinates_off_board"));
 }
@@ -526,7 +532,6 @@ fn bug_i32_coordinates_off_board() {
 /// `game` is unread by Python but overflows serde_json's `Value`) and nests 500 deep (serde_json
 /// stops at 128 inside the `game` `Value`). Rust refuses each.
 #[test]
-#[ignore = "bug json_dialect: NaN/Infinity, duplicate keys, BOM and huge ints are refused"]
 fn bug_json_dialect() {
     run("", Some("json_dialect"));
 }
@@ -535,7 +540,6 @@ fn bug_json_dialect() {
 /// handler answers 400 to any body over `MAX_BODY` = 64 KB (server.py:104, 652-654) before
 /// parsing it. Whoever owns the HTTP layer (the Lambda) has to apply the limit, or the crate.
 #[test]
-#[ignore = "bug no_body_size_limit: bodies over 64 KB are played, python answers 400"]
 fn bug_no_body_size_limit() {
     run("", Some("no_body_size_limit"));
 }
@@ -545,7 +549,6 @@ fn bug_no_body_size_limit() {
 /// plays. The Python HTTP handler answers 400 to any non-dict `game` (server.py:661-663), so
 /// no move is sent at all.
 #[test]
-#[ignore = "bug falsy_game_object_plays: a non-object game is played as standard"]
 fn bug_falsy_game_object_plays() {
     run("", Some("falsy_game_object_plays"));
 }
@@ -555,7 +558,6 @@ fn bug_falsy_game_object_plays() {
 /// opposite edge (x = W-1) and Python plays with that food. Documented in the module docs as a
 /// deliberate deviation.
 #[test]
-#[ignore = "bug negative_food_wraps_in_python: documented deviation, food at -1 wraps in numpy"]
 fn bug_negative_food_wraps_in_python() {
     run("", Some("negative_food_wraps_in_python"));
 }
@@ -564,7 +566,6 @@ fn bug_negative_food_wraps_in_python() {
 /// (server.py:149-158) also reads other Unicode decimal digits (Arabic-Indic, full-width), so a
 /// setting of `"\u{661}\u{662}"` is 12 in Python and the default in Rust. Documented deviation.
 #[test]
-#[ignore = "bug unicode_digit_settings: documented deviation, non-ASCII digits in settings"]
 fn bug_unicode_digit_settings() {
     run("", Some("unicode_digit_settings"));
 }
@@ -573,7 +574,6 @@ fn bug_unicode_digit_settings() {
 /// array too: a body segment `[1, 2]` reads as `{"x": 1, "y": 2}` and the agent plays. Python
 /// raises `TypeError` on `p["x"]` (server.py:139) and answers "up" (safe_move raises too).
 #[test]
-#[ignore = "bug coord_accepts_json_array: [x, y] arrays parse as coordinates"]
 fn bug_coord_accepts_json_array() {
     run("", Some("coord_accepts_json_array"));
 }
@@ -583,7 +583,6 @@ fn bug_coord_accepts_json_array() {
 /// overflow-checks). Release builds wrap and happen to give Python's answer, but
 /// `safe_move_json` is documented never to fail and the release profile has `panic = "abort"`.
 #[test]
-#[ignore = "bug safe_move_overflow_panic: safe_move_json panics on a head at i64::MAX in debug"]
 fn bug_safe_move_overflow_panic() {
     run("", Some("safe_move_overflow_panic"));
 }
@@ -592,7 +591,6 @@ fn bug_safe_move_overflow_panic() {
 /// is missing or mistyped, Python's `safe_move` raises and the HTTP handler answers 0 ("up",
 /// server.py:672-677); Rust fills defaults (`length` 0, head = body[0]) and computes a move.
 #[test]
-#[ignore = "bug safe_move_answers_where_python_raises: python answers up when safe_move raises"]
 fn bug_safe_move_answers_where_python_raises() {
     run("", Some("safe_move_answers_where_python_raises"));
 }
@@ -601,7 +599,6 @@ fn bug_safe_move_answers_where_python_raises() {
 /// equal to 5 in Python's sets) is dropped from the blocked cells and a width beyond `i64`
 /// (`2^63`, `2^64`) reads as 0, leaving only "up". Python compares numbers by value.
 #[test]
-#[ignore = "bug safe_move_number_reading: float coordinates and widths beyond i64 are dropped"]
 fn bug_safe_move_number_reading() {
     run("", Some("safe_move_number_reading"));
 }

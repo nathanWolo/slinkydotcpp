@@ -1,83 +1,96 @@
-//! The Battlesnake API (version 1) as serde types: the `/start`, `/move` and `/end` request body
-//! (all three have the same shape), the `/move` response and the `GET /` info response.
+//! The Battlesnake API (version 1): the `/start`, `/move` and `/end` request body (all three
+//! have the same shape), the `/move` response and the `GET /` info response.
 //!
-//! Parsing is defensive: unknown fields are ignored (the API grows them), fields the conversion
-//! needs must be present with the right type, and anything else is a [`ApiError::Json`]. The
-//! `game` object is kept as raw JSON because its settings are read leniently (see
-//! `convert::game_config`, ported from `server._setting`, server.py:149-158).
+//! A request is kept as the dynamically typed value the Python server works on
+//! ([`PyValue`], see `py.rs`): the server reads only the fields it needs, with Python's
+//! semantics, so a typed schema would refuse requests Python plays (a `you` without `health`,
+//! a numeric-string health) and accept ones it refuses (a coordinate written `[x, y]`).
+//! [`Request::from_json`] applies the HTTP handler's own checks (server.py:649-663).
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::ApiError;
+use crate::py::{self, PyValue};
+
+/// Largest body the Python handler reads (`server.MAX_BODY`, server.py:104): it answers 400
+/// to an empty body or a longer one.
+pub const MAX_BODY: usize = 1 << 16;
 
 /// A board position. `(0, 0)` is the bottom-left cell and `y` grows upwards, the same convention
 /// as the engine's `grid[y][x]` with row 0 at the bottom (types.py:1-16), so nothing is flipped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Coord {
     pub x: i32,
     pub y: i32,
 }
 
-/// A snake as listed in `board.snakes` and in `you`.
+/// The body of `POST /start`, `/move` and `/end`, parsed as the Python server parses it.
 ///
-/// Only `id`, `health` and `body` are needed to build a state. `head` and `length` are used by
-/// [`safe_move`](crate::safe_move) when present (the API always sends them).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Snake {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub health: i32,
-    /// Head first. At turn 0 all segments share one cell; a snake that just ate repeats its tail.
-    pub body: Vec<Coord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<Coord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub length: Option<i64>,
-}
-
-/// The `board` object.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Board {
-    pub width: i64,
-    pub height: i64,
-    pub food: Vec<Coord>,
-    /// Absent in rulesets without hazards. Duplicates stack.
-    #[serde(default)]
-    pub hazards: Vec<Coord>,
-    /// The living snakes only.
-    pub snakes: Vec<Snake>,
-}
-
-/// The body of `POST /start`, `/move` and `/end`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// It is a JSON object (a dict) whose `game`, if present, is an object too; everything else is
+/// read when the request is converted ([`crate::game_from_request`]) or answered with the
+/// fallback move ([`crate::safe_move`]).
 pub struct Request {
-    /// The `game` object (id, ruleset with settings, map, timeout, source); `None` when absent,
-    /// which reads as a standard game on the standard map, like the Python `req.get("game", {})`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub game: Option<Value>,
-    pub turn: i64,
-    pub board: Board,
-    pub you: Snake,
+    root: PyValue,
+}
+
+impl std::fmt::Debug for Request {
+    /// A summary: the body may nest thousands of levels, too deep to print recursively.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("game_id", &self.game_id())
+            .field("snakes", &self.snake_count())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Request {
-    /// Parses a request body.
+    /// Parses a request body as the Python handler does (server.py:649-663): an empty body or
+    /// one over [`MAX_BODY`] bytes, a body `json.loads` refuses (Python's dialect: `NaN` and
+    /// `Infinity` are accepted, the last of duplicate keys wins, a UTF-8 byte order mark is
+    /// skipped), a body that is not an object, and an object whose `game` is not an object
+    /// are all [`ApiError::Json`] (the Python server answers 400 and sends no move).
     pub fn from_json(text: &str) -> Result<Request, ApiError> {
-        Ok(serde_json::from_str(text)?)
+        if text.is_empty() || text.len() > MAX_BODY {
+            return Err(ApiError::Json(format!(
+                "body of {} bytes (1 to {MAX_BODY} accepted)",
+                text.len()
+            )));
+        }
+        // json.loads on bytes detects the encoding: a UTF-8 BOM selects utf-8-sig.
+        let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+        let root = py::parse(text).map_err(ApiError::Json)?;
+        if !root.is_dict() || root.get("game").is_some_and(|g| !g.is_dict()) {
+            return Err(ApiError::Json("not a Battlesnake request".into()));
+        }
+        Ok(Request { root })
     }
 
-    /// `game.id`, the key of the caller's `/start` cache (`Mover._games`, server.py:459-470).
+    /// [`Request::from_json`] of a `serde_json` value (handy for building requests in code).
+    pub fn from_value(value: &serde_json::Value) -> Result<Request, ApiError> {
+        Request::from_json(&value.to_string())
+    }
+
+    /// The parsed body.
+    pub fn root(&self) -> &PyValue {
+        &self.root
+    }
+
+    /// `game.id` when it is a string: the key of the caller's `/start` cache
+    /// (`Mover._games`, server.py:459-470).
     pub fn game_id(&self) -> Option<&str> {
-        self.game.as_ref()?.get("id")?.as_str()
+        self.root.get("game")?.get("id")?.as_str()
     }
 
-    /// The number of snakes listed. At `/start` this is the game's starting snake count, which
-    /// the caller should remember (`Mover.start`, server.py:459-470) and pass as
-    /// `starting_snakes` to [`game_from_request`](crate::game_from_request) on every `/move`.
-    pub fn snake_count(&self) -> usize {
-        self.board.snakes.len()
+    /// The number of snakes listed (`len(req["board"]["snakes"])`), `None` when Python's `len`
+    /// would raise. At `/start` this is the game's starting snake count, which the caller
+    /// should remember (`Mover.start`, server.py:459-470) and pass as `starting_snakes` to
+    /// [`game_from_request`](crate::game_from_request) on every `/move`.
+    pub fn snake_count(&self) -> Option<usize> {
+        self.root
+            .item("board")
+            .and_then(|b| b.item("snakes"))
+            .and_then(PyValue::len)
+            .ok()
     }
 }
 
@@ -150,12 +163,31 @@ mod tests {
     fn bad_bodies_are_errors() {
         for text in [
             "",
-            "{}",
             "[1]",
-            r#"{"turn":"x"}"#,
-            r#"{"turn":1,"board":{},"you":{}}"#,
+            "null",
+            r#"{"game": []}"#,
+            r#"{"game": null}"#,
+            "{\"a\": 1,}",
         ] {
-            assert!(Request::from_json(text).is_err(), "{text}");
+            assert!(
+                matches!(Request::from_json(text), Err(ApiError::Json(_))),
+                "{text}"
+            );
         }
+        let long = format!(r#"{{"x": "{}"}}"#, "a".repeat(MAX_BODY));
+        assert!(Request::from_json(&long).is_err());
+        // Accepted by the handler (the conversion may still refuse them).
+        for text in [
+            "{}",
+            "\u{FEFF}{}",
+            r#"{"game": {}, "turn": NaN}"#,
+            r#"{"a": 1, "a": 2}"#,
+        ] {
+            assert!(Request::from_json(text).is_ok(), "{text}");
+        }
+        let r =
+            Request::from_json(r#"{"game": {"id": "g"}, "board": {"snakes": [1, 2]}}"#).unwrap();
+        assert_eq!(r.game_id(), Some("g"));
+        assert_eq!(r.snake_count(), Some(2));
     }
 }

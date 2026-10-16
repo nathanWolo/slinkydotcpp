@@ -24,6 +24,8 @@ committed), one JSON object per line:
          # "safe"     -> server.safe_move answers (no config, more than 4 seats, or an exception
          #               in check_sizes / game_config / request_state)
          # "http400"  -> the HTTP layer answers 400 (not a JSON object, or a non-dict "game")
+         # "unmodeled"-> request_state built a state of the wrong shape (a list "turn"); the
+         #               agent's reaction is not modeled, so nothing is checked but no panic
      "why": str,                       # the reason (informational)
      "answer": int | null,             # the action the server sends for "safe": safe_move, or 0
                                        # ("up") when safe_move itself raised; null otherwise
@@ -63,6 +65,7 @@ def outcome(req, starting):
     # Mover.move
     try:
         server.check_sizes(req)
+        hash(req.get("game", {}).get("id"))  # the /start cache lookup, self._games.get(id)
         config = server.game_config(req, starting, False)
     except Exception as e:  # noqa: BLE001
         return safe(f"raised {e!r}"[:200])
@@ -83,9 +86,13 @@ def outcome(req, starting):
     else:
         kind, why = "agent", mode
     try:
-        server.request_state(req, config)
+        state = server.request_state(req, config)
     except Exception as e:  # noqa: BLE001
         return safe(f"request_state raised {e!r}"[:200])
+    if getattr(state.turn, "ndim", 0) != 0:
+        # A list "turn" (jnp.asarray([...])) makes a state of the wrong shape; what the jitted
+        # agent then does is not modeled here (the Rust conversion refuses it).
+        return "unmodeled", "non-scalar turn", None
     return kind, why, None
 
 
@@ -98,6 +105,14 @@ def parse(text, starting):
     except ValueError:
         return None, ("http400", "not JSON", None)
     return req, outcome(req, starting)
+
+
+def _hashable_id(req):
+    try:
+        hash(req.get("game", {}).get("id"))
+        return True
+    except TypeError:
+        return False
 
 
 class Writer:
@@ -122,6 +137,8 @@ class Writer:
             exp = {"ok": False, "why": "not an object", "safe": None}
         if kind == "http400":
             exp["ok"] = False
+        if isinstance(req, dict) and exp["ok"] and not _hashable_id(req):
+            exp.update(ok=False, why="unhashable game id: Mover.move raises on the cache lookup")
         self.f.write(json.dumps({"name": name, "group": group, "text": text, "starting": starting,
                                  "outcome": kind, "why": why, "answer": answer,
                                  "expect": exp}) + "\n")
@@ -549,6 +566,57 @@ def safe_moves(w):
     w.add(g, "name-list", r)
 
 
+FUZZ_POOL = [None, True, False, 0, 1, -1, 2, 3, 5, 9, 10, 11, 12, 25, 26, 100, 1.0, 5.0, 10.0, 11.0,
+             1.5, -0.5, -0.0, float("nan"), float("inf"), float("-inf"), 2**31, 2**40, 2**63, 2**64,
+             -(2**63), 10**40, "", "5", "11", " 7 ", "x", "a", "b", "wrapped", "standard", "royale",
+             "constrictor", "empty", [], [1], [1, 2], ["wrapped"], {}, {"x": 1}, {"x": 1, "y": 2},
+             {"x": 5.0, "y": 5}, {"x": -1, "y": 0}, {"x": 5, "y": 6}]
+
+
+def fuzz(w, count=4000, seed=20261015):
+    """Random hostile edits of realistic requests (added by the fix stage): 1 to 3 values
+    anywhere in the body replaced by a value of another type or size (FUZZ_POOL) or deleted,
+    in every ruleset, with and without the /start count. A differential test of the whole
+    conversion and of safe_move against the Python server."""
+    import random
+
+    rng = random.Random(seed)
+    rulesets = [("standard", "standard"), ("royale", "royale"), ("constrictor", "standard"),
+                ("constrictor", "empty"), ("wrapped", "standard"), ("solo", "standard"),
+                ("standard", "royale")]
+
+    def paths(obj, prefix=()):
+        if prefix:
+            yield prefix
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                yield from paths(v, prefix + (k,))
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj[:3]):  # the first few items of long lists only
+                yield from paths(v, prefix + (i,))
+
+    for k in range(count):
+        rs, gm = rng.choice(rulesets)
+        ids = rng.choice([("a", "b", "c", "d"), ("a", "b"), ("a", "c"), ("b", "a", "d")])
+        royale = "royale" in (rs, gm)
+        hz = hazards_except(1, 10, 0, 10) if royale and rng.random() < 0.7 else ()
+        r = request(ids=ids, ruleset=rs, game_map=gm, hazards=hz, turn=rng.choice([0, 37, 60, 99]))
+        if rs in ("wrapped", "solo"):
+            r["board"]["snakes"][1]["body"] = [seg(5, 6), seg(6, 6), seg(7, 6)]
+            r["board"]["snakes"][1]["head"] = seg(5, 6)
+            r["board"]["snakes"][1]["length"] = 6
+        for _ in range(rng.choice([1, 1, 2, 3])):
+            path = rng.choice(list(paths(r)))
+            parent = r
+            for key in path[:-1]:
+                parent = parent[key]
+            if isinstance(parent, dict) and rng.random() < 0.2:
+                del parent[path[-1]]
+            else:
+                parent[path[-1]] = copy(rng.choice(FUZZ_POOL))
+        w.add("fuzz", f"case-{k}", r, rng.choice([None, 2, 4]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/dev/shm/naz-golden")
@@ -556,7 +624,7 @@ def main():
     os.makedirs(os.path.join(args.out, "api"), exist_ok=True)
     w = Writer(os.path.join(args.out, "api", "review_cases.jsonl"))
     for part in (game_object, you_object, board_snakes, bodies, food, hazards, turns, raw_text,
-                 seats, royale_zones, settings, boards, safe_moves):
+                 seats, royale_zones, settings, boards, safe_moves, fuzz):
         before = w.n
         part(w)
         print(f"{part.__name__}: {w.n - before} cases", flush=True)
