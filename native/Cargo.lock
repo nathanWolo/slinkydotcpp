@@ -756,6 +756,8 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "slinky-obs",
+ "slinky-rules",
 ]
 
 [[package]]
