@@ -508,5 +508,4 @@ deploy/lambda/    the search-free networks in NumPy as an AWS Lambda snake
 docs/research/    literature notes (simultaneous-move MCTS, Battlesnake heuristics) and
                   the multi-mode constrictor investigation
 docs/battlesnake/ official rules/API docs (MIT) + ENGINE_RULES.md
-legacy/           the original C++ prototype
 ```

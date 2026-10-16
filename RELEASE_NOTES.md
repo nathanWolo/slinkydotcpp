@@ -11,7 +11,7 @@ agents: one network that plays the four leaderboard modes (duel, standard,
 royale and constrictor) and is told which mode it is playing.
 
 The repository's first two commits (2023) are a small C++ prototype, kept in
-`legacy/`. Everything else was written in October 2026 and reached `main`
+`legacy/` in v0.1.0 and removed after it (it stays in the history). Everything else was written in October 2026 and reached `main`
 through this release.
 
 ## What is in the release
