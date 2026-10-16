@@ -8,13 +8,14 @@
 //! game is the same whatever the thread count, the order games run in, or which other games
 //! are played, as long as both agents have deterministic budgets.
 //!
-//! Searches per turn: by default an agent searches once per turn and plays the moves of all
-//! its seats from that one tree (slinky's line-up). With `per_seat` each seat is searched
-//! separately with its own noise, as independent ladder snakes are. This matters with 4
-//! snakes: B's three seats taken from one tree move consistently with each other's predicted
-//! moves, which A's separate tree does not share, and that biases a self-match against A
-//! (measured: share 0.20 instead of 0.25 in royale and constrictor at 256 simulations).
-//! [`View::Request`] is always per seat.
+//! Searches per turn: with `per_seat` (the CLI default) each seat is searched separately with
+//! its own noise, as independent ladder snakes are. Without it an agent searches once per turn
+//! and plays all its seats from that one tree, as slinky's `run_match` does. That matters with
+//! 4 snakes: B's three seats taken from one tree move consistently with each other's predicted
+//! moves, which A's separate tree does not share, and it biases a self-match against A
+//! (measured, M at 256 simulations, constrictor, 512 games: share 0.187 +- 0.028 per agent,
+//! 0.255 +- 0.034 per seat; parity 0.25). An agent with one seat searches the same way either
+//! way, so duel games do not depend on it. [`View::Request`] is always per seat.
 //!
 //! Views: with [`View::State`] (the default, as slinky's strength tests) an agent searches the
 //! true game state, which includes the royale shrink sides drawn at reset. With
@@ -77,7 +78,8 @@ pub struct Setup<'a> {
     pub view: View,
     /// End a game once it is decided between the agents (A dead, or A alone).
     pub early_stop: bool,
-    /// [`View::State`]: search once per seat (each with its own noise), not once per agent.
+    /// [`View::State`]: search each seat of a multi-seat agent separately (its own noise), not
+    /// once per agent.
     pub per_seat: bool,
 }
 
@@ -221,7 +223,10 @@ pub fn play_game(
                         mode: env.mode(),
                     };
                     // One search for all the agent's seats, or one per seat with its own noise.
-                    let groups: Vec<(u64, Vec<usize>)> = if setup.per_seat {
+                    // An agent holding one seat (A, or B in the duel) searches the same way
+                    // in both modes, so duel games do not depend on the option.
+                    let multi_seat = p == 1 && n > 2;
+                    let groups: Vec<(u64, Vec<usize>)> = if setup.per_seat && multi_seat {
                         seats.iter().map(|&s| (1 + s as u64, vec![s])).collect()
                     } else {
                         vec![(0, seats.clone())]

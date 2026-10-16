@@ -34,8 +34,9 @@ Options:
   --view state|request
                       state: search the true state (default, as slinky's strength.py);
                       request: each seat gets the ladder's /move request (one search per seat)
-  --per-seat          search once per seat, each with its own noise (default: once per agent
-                      for all its seats, as slinky; biased against A in 4-snake self-matches)
+  --per-agent         4 snakes: B searches once per turn for its three seats, as slinky's
+                      run_match (biased against A: a self-match scores below parity). The
+                      default (--per-seat) searches each seat separately with its own noise
   --full-games        play 4-snake games to the end (default: stop once A is dead or alone;
                       the statistics are the same)
   --out FILE          summary JSONL (default naz-match.jsonl); also FILE.games.jsonl and
@@ -109,7 +110,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         max_turns: 500,
         view: View::State,
         full_games: false,
-        per_seat: false,
+        per_seat: true,
         out: PathBuf::from("naz-match.jsonl"),
         rerun: false,
         sequential: false,
@@ -150,6 +151,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             "--full-games" => a.full_games = true,
             "--per-seat" => a.per_seat = true,
+            "--per-agent" => a.per_seat = false,
             "--out" => a.out = PathBuf::from(value("--out")?),
             "--rerun" => a.rerun = true,
             "--sequential" => a.sequential = true,

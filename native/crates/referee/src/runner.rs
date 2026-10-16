@@ -123,6 +123,11 @@ fn player_json(p: &Player) -> Value {
     json!({"name": p.name(), "weights": p.weights_hash, "deterministic": p.spec.is_deterministic()})
 }
 
+/// Whether `per_seat` changes any game: the state view with more than two seats.
+fn per_seat_matters(cfg: &MatchConfig) -> bool {
+    cfg.per_seat && cfg.view == View::State && cfg.env.rules().num_snakes() > 2
+}
+
 /// The matchup identity: the agents, their weights, the game, the cut-off, the seed, the view
 /// and early stopping. Games of the same matchup are the same games.
 pub fn matchup_id(cfg: &MatchConfig, players: [&Player; 2]) -> String {
@@ -136,7 +141,7 @@ pub fn matchup_id(cfg: &MatchConfig, players: [&Player; 2]) -> String {
         "view": cfg.view.name(),
         "early_stop": cfg.early_stop,
     });
-    if cfg.per_seat && cfg.view == View::State {
+    if per_seat_matters(cfg) {
         desc["per_seat"] = json!(true); // (absent otherwise: ids of earlier runs stay valid)
     }
     hash_hex(&desc.to_string())
@@ -675,7 +680,7 @@ pub fn run_matchup(cfg: &MatchConfig, players: [&Player; 2]) -> Result<Value, St
         "game": env_json(&cfg.env),
         "view": cfg.view.name(),
         "early_stop": cfg.early_stop,
-        "per_seat": cfg.per_seat || cfg.view == View::Request,
+        "per_seat": cfg.per_seat || cfg.view == View::Request || n_seats == 2,
         "max_turns": cfg.max_turns,
         "seed": cfg.seed,
         "games_requested": cfg.games,

@@ -33,7 +33,7 @@ fn config(mode: Mode, games: u64, threads: usize, out: PathBuf) -> MatchConfig {
         max_turns: 500,
         view: View::State,
         early_stop: true,
-        per_seat: false,
+        per_seat: true,
         threads,
         target_ci: None,
         target_ci_draws: false,
@@ -265,6 +265,48 @@ fn request_view_plays_every_mode_without_errors() {
         if n > 2 {
             let moves = |p: &str| r["timing"][p]["moves"].as_u64().unwrap();
             assert!(moves("b") > moves("a"), "{r}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn per_seat_searches_only_change_multi_seat_agents() {
+    let Some(run) = run_dir() else { return };
+    let dir = scratch("perseat");
+    let spec = PlayerSpec::parse(&format!("az_modes:{}:simulations=4", run.display())).unwrap();
+    let a = Player::load(spec.clone()).unwrap();
+    let b = Player::load(spec).unwrap();
+    for (mode, same) in [(Mode::Duel, true), (Mode::Royale, false)] {
+        let mut seat = config(mode, 8, 4, dir.join(format!("{}-seat.jsonl", mode.name())));
+        seat.max_turns = 80;
+        let mut agent = config(mode, 8, 4, dir.join(format!("{}-agent.jsonl", mode.name())));
+        agent.max_turns = 80;
+        agent.per_seat = false;
+        let rs = run_matchup(&seat, [&a, &b]).unwrap();
+        let ra = run_matchup(&agent, [&a, &b]).unwrap();
+        assert_eq!(
+            rs["matchup_id"] == ra["matchup_id"],
+            same,
+            "{}",
+            mode.name()
+        );
+        let gs = games_without_timing(&games_file(&seat.out));
+        let ga = games_without_timing(&games_file(&agent.out));
+        let strip = |v: &[Value]| -> Vec<Value> {
+            v.iter()
+                .map(|g| {
+                    let mut g = g.clone();
+                    g.as_object_mut().unwrap().remove("matchup_id");
+                    g
+                })
+                .collect()
+        };
+        assert_eq!(strip(&gs) == strip(&ga), same, "{}", mode.name());
+        // B's searches: one per turn per agent, one per living seat per seat.
+        let moves = |r: &Value| r["timing"]["b"]["moves"].as_u64().unwrap();
+        if !same {
+            assert!(moves(&rs) > moves(&ra));
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
