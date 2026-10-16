@@ -11,7 +11,8 @@
 # function), MEMORY_MB (1769: one full vCPU), and the function's environment: SNAKES
 # (az-256=az-modes:simulations=256,az-t200=az-modes:budget_ms=200), SNAKE_AUTHOR (slinky),
 # SNAKE_HEAD / SNAKE_TAIL (default), DEADLINE_MARGIN_MS (150), THREADS, and every
-# SNAKE_COLOR_*, SNAKE_HEAD_*, SNAKE_TAIL_* (az-256 and az-t200: #ef4444, cosmic-horror).
+# SNAKE_COLOR_*, SNAKE_HEAD_*, SNAKE_TAIL_* (az-t200: #ef4444, cosmic-horror; az-256:
+# #166534, bendr, hook). A deployed value wins over these defaults: to change one, set it here.
 # The AWS CLI is $AWS, else `aws` on the PATH, else ~/.local/bin/aws.
 set -euo pipefail
 
@@ -57,9 +58,9 @@ merged = {
     "SNAKE_TAIL": "default",
     "DEADLINE_MARGIN_MS": "150",
 }
-for name in ("AZ_256", "AZ_T200"):
-    merged |= {f"SNAKE_COLOR_{name}": "#ef4444", f"SNAKE_HEAD_{name}": "cosmic-horror",
-               f"SNAKE_TAIL_{name}": "cosmic-horror"}
+merged |= {"SNAKE_COLOR_AZ_T200": "#ef4444", "SNAKE_HEAD_AZ_T200": "cosmic-horror",
+           "SNAKE_TAIL_AZ_T200": "cosmic-horror",
+           "SNAKE_COLOR_AZ_256": "#166534", "SNAKE_HEAD_AZ_256": "bendr", "SNAKE_TAIL_AZ_256": "hook"}
 merged.update(json.loads(os.environ["DEPLOYED"] or "null") or {})
 for k, v in os.environ.items():
     if k in ("SNAKES", "SNAKE_AUTHOR", "SNAKE_HEAD", "SNAKE_TAIL", "DEADLINE_MARGIN_MS", "THREADS") or (

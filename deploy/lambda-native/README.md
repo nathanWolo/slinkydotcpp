@@ -6,8 +6,8 @@ with the az_modes weights. One Function URL, one path per snake:
 
 | path | search |
 |---|---|
-| `/az-256` | 256 simulations (the faithful port of the ladder agent) |
-| `/az-t200` | as many simulations as fit in 200 ms from the request's arrival at the handler (cap 16,384) |
+| `/az-256` | 256 simulations (the faithful port of the ladder agent); arena name AlphaSlinky-256 |
+| `/az-t200` | as many simulations as fit in 200 ms from the Function URL's receipt of the request (cap 16,384); arena name AlphaSlinky |
 
 Why a function of its own: the Python function `slinky-snake` (`deploy/lambda`) takes ~410 ms
 to start a container (Python and numpy), and every container it starts in the middle of a game
