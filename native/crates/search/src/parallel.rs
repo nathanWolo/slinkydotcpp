@@ -117,6 +117,7 @@ where
                     for a in 0..slinky_rules::NUM_ACTIONS {
                         acc.visits[p][a] = acc.visits[p][a].saturating_add(r.visits[p][a]);
                         acc.value_sum[p][a] += r.value_sum[p][a];
+                        acc.value_sum_wide[p][a] += r.value_sum_wide[p][a];
                     }
                 }
             }

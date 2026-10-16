@@ -97,7 +97,8 @@
 //! * [`Search`]: `with_memory_limit(bytes)` / `set_memory_limit` / `memory_limit()` (default
 //!   [`DEFAULT_MEMORY_LIMIT`], 256 MiB per workspace; the search stops before a simulation once
 //!   the tree is full), `stats() -> `[`SearchStats`] (simulations, nodes, depth, elapsed,
-//!   [`StopReason`] `Simulations | Deadline | MemoryLimit`, `tree_bytes`, `allocated_bytes`),
+//!   [`StopReason`] `Simulations | Deadline | MemoryLimit | Solved`, `tree_bytes`,
+//!   `allocated_bytes`),
 //!   `subtree_simulations(&moves)` (the part of the tree under a root child). [`node_bytes`]`(N)`
 //!   is the tree memory per node; [`MAX_SIMULATIONS`] (2^24) caps any budget.
 //! * [`run_root_parallel`]`(&mut [Search], config, state, settings, budget, &mut [E], &mut [N])`
@@ -181,6 +182,6 @@ pub use eval::{
 pub use noise::{JaxKey, JaxNoise, NoiseSource, NoiseTable, SimBits, depth_noise, threefry2x32};
 pub use parallel::{run_root_parallel, thread_noise};
 pub use search::{
-    Budget, DEFAULT_MEMORY_LIMIT, MAX_DEPTH, MAX_SIMULATIONS, Search, SearchConfig, SearchOutput,
-    SearchStats, StopReason, node_bytes,
+    Budget, DEFAULT_MEMORY_LIMIT, F32_SUM_VISITS, MAX_DEPTH, MAX_SIMULATIONS, SOLVED_SIMULATIONS,
+    Search, SearchConfig, SearchOutput, SearchStats, StopReason, node_bytes,
 };

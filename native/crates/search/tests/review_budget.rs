@@ -13,7 +13,7 @@
 //!   constrictor2), with plain and root-parallel searches; `NAZ_REVIEW_LOAD=1` runs the heavy
 //!   version (2x the cores, more rounds).
 //! * Memory per move and the memory limit, node counts at large simulation counts.
-//! * Confirmed bugs are `#[ignore]`d tests that name the bug.
+//! * Confirmed bugs were `#[ignore]`d tests that name the bug; all are fixed now.
 //!
 //! Run in release: `cargo test --release -p slinky-search --test review_budget -- --nocapture`
 //! (`--include-ignored` to see the bugs).
@@ -819,14 +819,14 @@ fn deep_settings_do_not_break_the_tree() {
 
 // --- Confirmed bugs --------------------------------------------------------------------------------
 
-/// BUG (memory limit after workspace reuse): `Search::run` clears the node pool but keeps its
+/// Fixed (`run` now shrinks a reused pool to the limit). Was BUG (memory limit after workspace reuse): `Search::run` clears the node pool but keeps its
 /// capacity, and `push` only checks the limit when `nodes.len() == nodes.capacity()`. A
 /// workspace reused after a bigger tree (the server's pool and the Lambda reuse one per thread)
 /// therefore holds more than `memory_limit` bytes: here a duel tree followed by a 4-seat search
 /// under the same limit. `allocated_bytes` exceeds the limit although the docs say the pool
 /// "never grows beyond the limit".
 #[test]
-#[ignore = "bug: memory limit not enforced on a reused workspace (capacity kept from an earlier tree)"]
+
 fn memory_limit_holds_after_workspace_reuse() {
     let limit = node_bytes(2) * 4000;
     let mut ws = Search::with_memory_limit(limit);
@@ -842,13 +842,13 @@ fn memory_limit_holds_after_workspace_reuse() {
     );
 }
 
-/// BUG (children table grows by doubling past the limit): when the node pool has spare capacity
+/// Fixed (`push` reserves exactly the node pool's slots). Was BUG (children table grows by doubling past the limit): when the node pool has spare capacity
 /// left from an earlier run, `push` never reserves, and `children.resize` grows the children
 /// table by Vec's amortised doubling. A reused workspace that first ran a large duel and then a
 /// 4-seat search whose deadline estimate reserved few nodes ends with a children table up to
 /// twice what the 4-seat tree needs.
 #[test]
-#[ignore = "bug: children table grows by doubling, past the memory limit, on a reused workspace"]
+
 fn children_table_stays_within_the_limit() {
     let limit = node_bytes(4) * 2000;
     let mut ws = Search::with_memory_limit(limit);
@@ -889,7 +889,7 @@ impl Evaluator for Constant {
     }
 }
 
-/// BUG (f32 value sums in long searches): the per-move value sums are f32, so once a move has
+/// Fixed (f64 sums past `F32_SUM_VISITS` visits per move). Was BUG (f32 value sums in long searches): the per-move value sums are f32, so once a move has
 /// about a million visits each added leaf value is rounded to the sum's ulp (0.125 at 2^20). The
 /// docs say budgets up to `MAX_SIMULATIONS` (2^24) are exact, but only the visit counts are: with
 /// every leaf worth exactly 1/3 the reported mean values drift far from 1/3. Positions near the
@@ -899,7 +899,7 @@ impl Evaluator for Constant {
 /// 400 ms budget on a tree of 5 to 13 nodes, and report q -0.6596 and 0.3325 for seats whose
 /// every line is worth exactly -2/3 and 1/3.
 #[test]
-#[ignore = "bug: f32 value_sum loses precision past ~1e6 visits per move (q drifts); MAX_SIMULATIONS 2^24 is not safe"]
+
 fn value_sums_stay_accurate_up_to_max_simulations() {
     let d = duel();
     // Depth 1: every simulation after the 16 root children are expanded only revisits them,
@@ -933,11 +933,11 @@ fn value_sums_stay_accurate_up_to_max_simulations() {
     }
 }
 
-/// BUG (a time budget with a zero cap runs no simulation): `MoveBudget::Time` documents "at
+/// Fixed (a deadline budget runs at least one). Was BUG (a time budget with a zero cap runs no simulation): `MoveBudget::Time` documents "at
 /// least one simulation always runs", but `max_simulations: 0` (or `Budget::until(0, ..)`) gives
 /// `sims_cap` 0 and the loop never starts: the move is the first legal move with no search.
 #[test]
-#[ignore = "bug: MoveBudget::Time with max_simulations 0 runs zero simulations despite the docs"]
+
 fn time_budget_always_runs_one_simulation() {
     let out = run_uniform(
         &mut Search::new(),
@@ -952,13 +952,13 @@ fn time_budget_always_runs_one_simulation() {
     assert!(out.simulations >= 1, "{} simulations", out.simulations);
 }
 
-/// BUG (perf: a finished root burns the whole time budget): with a time budget and a root whose
+/// Fixed (`StopReason::Solved`). Was BUG (perf: a finished root burns the whole time budget): with a time budget and a root whose
 /// game is over, every "simulation" is a no-op (`continue`), but the loop still draws noise and
 /// runs until the deadline or 2^24 iterations. A request listing only our snake with a /start
 /// count of 2 is such a root: the agent answers only when the deadline passes (on Lambda that is
 /// billed time). A fixed count of 256 answers at once.
 #[test]
-#[ignore = "perf bug: a finished root spins until the deadline under a time budget"]
+
 fn finished_root_answers_at_once_under_a_time_budget() {
     let (cfg, mut s) = duel();
     s.alive[1] = false;
@@ -988,7 +988,7 @@ fn finished_root_answers_at_once_under_a_time_budget() {
 
 /// The same through the API: a request with only our snake and a /start count of 2.
 #[test]
-#[ignore = "perf bug: a finished root spins until the deadline under a time budget"]
+
 fn lone_snake_request_answers_at_once_under_a_time_budget() {
     let Some(net) = load_net() else {
         return;

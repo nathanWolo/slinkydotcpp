@@ -118,7 +118,15 @@ fn deadline_respected_all_modes() {
             sims.push(m.search.simulations);
             let st = ws.stats();
             assert_eq!(st.simulations, m.search.simulations);
-            assert_eq!(st.stop, StopReason::Deadline, "{mode:?} case {k}");
+            // A solved endgame tree may stop before the deadline (StopReason::Solved).
+            assert!(
+                matches!(st.stop, StopReason::Deadline | StopReason::Solved),
+                "{mode:?} case {k}: {:?}",
+                st.stop
+            );
+            if st.stop == StopReason::Solved {
+                assert!(st.simulations >= slinky_search::SOLVED_SIMULATIONS);
+            }
             assert!(st.depth <= MAX_DEPTH);
             assert_eq!(
                 st.tree_bytes,

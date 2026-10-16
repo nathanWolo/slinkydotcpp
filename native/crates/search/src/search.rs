@@ -36,11 +36,21 @@
 //!
 //! * the simulation count is capped at [`MAX_SIMULATIONS`] (2^24), where the f32 visit totals of
 //!   the PUCT formula stop being exact and an i32 visit count is still far from overflowing;
+//!   the value sums are exact enough up to there too: each move's sum is kept both in f32, in
+//!   Python's order (used while the move has at most [`F32_SUM_VISITS`] visits, so every search
+//!   of up to that many simulations is bit-identical to Python), and in f64 (used beyond, where
+//!   an f32 sum would round each added value to its ulp and the mean values would drift);
 //! * the tree's memory is capped by [`Search::set_memory_limit`] (default
 //!   [`DEFAULT_MEMORY_LIMIT`], 256 MiB): before each simulation the search stops when the tree
 //!   holds `limit / node_bytes(N)` nodes ([`node_bytes`]: about 1.6 KB per node plus 4^N child
 //!   slots of 4 bytes). The node pool grows in place, never beyond the limit; with a deadline it
-//!   is preallocated (address space only) for the expansions the remaining time allows.
+//!   is preallocated (address space only) for the expansions the remaining time allows. A
+//!   reused workspace first gives back what an earlier, bigger tree left beyond the limit.
+//!
+//! Under a deadline the search also stops early when more simulations cannot change anything
+//! or teach anything ([`StopReason::Solved`]): at once when the root's game is over, and once a
+//! root whose whole tree is solved (every line expanded down to a finished game) has run
+//! [`SOLVED_SIMULATIONS`] simulations. A fixed simulation count always runs in full.
 //!
 //! A deadline is checked before every simulation (a monotonic [`Instant::now`] read, about 20 ns
 //! against 20 to 100 us per simulation), so a search ends at most one simulation after its
@@ -62,6 +72,14 @@ const NONE: u32 = u32::MAX;
 /// The most simulations one search runs (2^24); larger budgets are clamped. Up to here the
 /// f32 visit totals in the PUCT formula are exact.
 pub const MAX_SIMULATIONS: usize = 1 << 24;
+
+/// Visits of a move up to which its mean value is computed from the f32 sum, in Python's order
+/// (bit-exact with Python); beyond, from the f64 sum.
+pub const F32_SUM_VISITS: i32 = 1 << 12;
+
+/// Under a deadline, a search whose root is solved (see the module docs) stops once it has run
+/// this many simulations: enough for the visit shares of a finished tree to settle.
+pub const SOLVED_SIMULATIONS: usize = 4096;
 
 /// The default cap on a workspace's tree memory (256 MiB, about 100k nodes in a 4-seat game and
 /// 160k in a duel; a 500 ms search on one core of the PC builds at most about 19k).
@@ -88,6 +106,8 @@ pub enum StopReason {
     Deadline,
     /// The tree reached the workspace's memory limit ([`Search::set_memory_limit`]).
     MemoryLimit,
+    /// Under a deadline, the root's game is over or its whole tree is solved (module docs).
+    Solved,
 }
 
 /// Statistics of the last [`Search::run`] of a workspace.
@@ -230,8 +250,33 @@ struct Node {
     /// Leaf value at expansion (exact for dead seats and finished games).
     value: [f32; MAX_SNAKES],
     visits: [[i32; NUM_ACTIONS]; MAX_SNAKES],
+    /// Value sums in f32, added in Python's order.
     value_sum: [[f32; NUM_ACTIONS]; MAX_SNAKES],
+    /// The same sums in f64 (for moves past [`F32_SUM_VISITS`] visits).
+    value_sum_wide: [[f64; NUM_ACTIONS]; MAX_SNAKES],
     terminal: bool,
+    /// The parent node ([`NONE`] for the root).
+    parent: u32,
+    /// Joint moves (of the legal ones each seat can pick) whose child is not solved yet; the node
+    /// is solved when it is terminal or this reaches 0.
+    open: u16,
+}
+
+impl Node {
+    fn solved(&self) -> bool {
+        self.terminal || self.open == 0
+    }
+}
+
+/// The mean value of a move from its sums and visits (`visits > 0`): the f32 sum in Python's
+/// order up to [`F32_SUM_VISITS`] visits, the f64 sum beyond.
+#[inline]
+fn mean_value(sum: f32, wide: f64, visits: i32) -> f32 {
+    if visits <= F32_SUM_VISITS {
+        sum / visits as f32
+    } else {
+        (wide / f64::from(visits)) as f32
+    }
 }
 
 /// The root statistics a result is computed from (one tree's, or the sum of several).
@@ -242,6 +287,7 @@ pub(crate) struct RootStats {
     pub value: [f32; MAX_SNAKES],
     pub visits: [[i32; NUM_ACTIONS]; MAX_SNAKES],
     pub value_sum: [[f32; NUM_ACTIONS]; MAX_SNAKES],
+    pub value_sum_wide: [[f64; NUM_ACTIONS]; MAX_SNAKES],
 }
 
 /// A reusable search workspace: the tree's nodes and children table. Keep one per thread to
@@ -338,6 +384,7 @@ impl Search {
             value: r.value,
             visits: r.visits,
             value_sum: r.value_sum,
+            value_sum_wide: r.value_sum_wide,
         })
     }
 
@@ -359,7 +406,10 @@ impl Search {
         }
         let t0 = Instant::now();
         let joints = NUM_ACTIONS.pow(n as u32);
-        let sims_cap = budget.simulations.min(MAX_SIMULATIONS);
+        let mut sims_cap = budget.simulations.min(MAX_SIMULATIONS);
+        if budget.deadline.is_some() {
+            sims_cap = sims_cap.max(1); // at least one simulation always runs
+        }
         let max_depth = settings.max_depth.min(sims_cap);
         let per_node = node_bytes(n);
         self.node_limit = (self.memory_limit / per_node).max(1);
@@ -367,6 +417,15 @@ impl Search {
         self.stats = SearchStats::default();
         self.nodes.clear();
         self.children.clear();
+        // A reused workspace keeps the capacity of its biggest tree: give back what this game's
+        // limit does not allow (`push` keeps both within it from here on).
+        let max_nodes = self.node_limit.max(2);
+        if self.nodes.capacity() > max_nodes {
+            self.nodes.shrink_to(max_nodes);
+        }
+        if self.children.capacity() > max_nodes.saturating_mul(joints) {
+            self.children.shrink_to(max_nodes.saturating_mul(joints));
+        }
         // Room for every node the budget can expand (address space only: pages are touched as
         // nodes are made). With a deadline, the expansions the remaining time allows.
         let mut expect = sims_cap.saturating_add(1);
@@ -379,7 +438,7 @@ impl Search {
         self.nodes.reserve_exact(expect);
         self.children.reserve_exact(expect.saturating_mul(joints));
 
-        let root = self.make_node(0, *state, config, settings, evaluator)?;
+        let root = self.make_node(0, NONE, *state, config, settings, evaluator)?;
         self.push(root, joints);
 
         let mut deepest = 0usize;
@@ -389,6 +448,13 @@ impl Search {
             if sim > 0 {
                 if budget.deadline.is_some_and(|d| Instant::now() >= d) {
                     stop = StopReason::Deadline;
+                    break;
+                }
+                if budget.deadline.is_some()
+                    && (self.nodes[0].terminal
+                        || (self.nodes[0].open == 0 && sims >= SOLVED_SIMULATIONS))
+                {
+                    stop = StopReason::Solved;
                     break;
                 }
                 if self.nodes.len() >= self.node_limit {
@@ -416,9 +482,12 @@ impl Search {
                     let actions: Actions = moves;
                     let next = self.nodes[node].state.child(config, &actions);
                     let id = self.nodes.len();
-                    let new = self.make_node(id, next, config, settings, evaluator)?;
+                    let new = self.make_node(id, node as u32, next, config, settings, evaluator)?;
                     self.push(new, joints);
                     self.children[node * joints + joint] = id as u32;
+                    if new.solved() {
+                        self.close(node);
+                    }
                     deepest = deepest.max(depth);
                     break new.value;
                 }
@@ -435,6 +504,7 @@ impl Search {
                     let a = moves[p] as usize;
                     nd.visits[p][a] += 1;
                     nd.value_sum[p][a] += leaf_value[p];
+                    nd.value_sum_wide[p][a] += f64::from(leaf_value[p]);
                 }
             }
         }
@@ -458,16 +528,39 @@ impl Search {
             let len = self.nodes.len();
             let extra = len.max(16).min(self.node_limit.saturating_sub(len)).max(1);
             self.nodes.reserve_exact(extra);
-            self.children.reserve_exact(extra.saturating_mul(joints));
         }
         self.nodes.push(node);
-        self.children.resize(self.children.len() + joints, NONE);
+        // The children table holds exactly the slots of the node pool's capacity (not Vec's
+        // amortised doubling, which could pass the memory limit).
+        let need = self.children.len() + joints;
+        if self.children.capacity() < need {
+            let slots = self.nodes.capacity().saturating_mul(joints).max(need);
+            self.children.reserve_exact(slots - self.children.len());
+        }
+        self.children.resize(need, NONE);
+    }
+
+    /// One more joint move of `node` leads to a solved child: count it down, and when `node`
+    /// becomes solved, pass it on to its parent (and so on up the tree).
+    fn close(&mut self, mut node: usize) {
+        loop {
+            let nd = &mut self.nodes[node];
+            if nd.solved() {
+                return; // a terminal node is never descended from
+            }
+            nd.open -= 1;
+            if nd.open > 0 || nd.parent == NONE {
+                return;
+            }
+            node = nd.parent as usize;
+        }
     }
 
     /// A new node for `state` (`_init_tree` / `_record`): legal moves, priors and values.
     fn make_node(
         &self,
         id: usize,
+        parent: u32,
         state: GameState,
         config: &GameConfig,
         settings: &SearchConfig,
@@ -507,6 +600,10 @@ impl Search {
                 Some(Prior::Uniform) | None => uniform_prior(&legal[p]),
             };
         }
+        // `select` picks one of a seat's legal moves, or move 0 when it has none.
+        let open = (0..n)
+            .map(|p| legal[p].iter().filter(|&&l| l).count().max(1))
+            .product::<usize>();
         Ok(Node {
             state,
             legal,
@@ -514,7 +611,10 @@ impl Search {
             value,
             visits: [[0; NUM_ACTIONS]; MAX_SNAKES],
             value_sum: [[0.0; NUM_ACTIONS]; MAX_SNAKES],
+            value_sum_wide: [[0.0; NUM_ACTIONS]; MAX_SNAKES],
             terminal,
+            parent,
+            open: open as u16,
         })
     }
 
@@ -542,7 +642,7 @@ impl Search {
                 }
                 let nf = visits[a] as f32;
                 let q = if visits[a] > 0 {
-                    nd.value_sum[p][a] / nf.max(1.0)
+                    mean_value(nd.value_sum[p][a], nd.value_sum_wide[p][a], visits[a])
                 } else {
                     fpu
                 };
@@ -595,14 +695,15 @@ pub(crate) fn summarize(
         let total: i32 = visits.iter().sum();
         let q = std::array::from_fn::<f32, NUM_ACTIONS, _>(|a| {
             if visits[a] > 0 {
-                r.value_sum[p][a] / visits[a] as f32
+                mean_value(r.value_sum[p][a], r.value_sum_wide[p][a], visits[a])
             } else {
                 0.0
             }
         });
         let sum = ((r.value_sum[p][0] + r.value_sum[p][1]) + r.value_sum[p][2]) + r.value_sum[p][3];
+        let wide = r.value_sum_wide[p].iter().sum::<f64>();
         out.value[p] = if total > 0 {
-            sum / total as f32
+            mean_value(sum, wide, total)
         } else {
             r.value[p]
         };
@@ -839,5 +940,78 @@ mod tests {
         );
         // No snake alive: the root is finished, but the empty noise table still runs out.
         assert!(matches!(err, Err(SearchError::Noise { sim: 0 })));
+    }
+
+    /// Both snakes starve next turn whatever they do: every joint move leads to a finished
+    /// game, so once all are expanded the root is solved. Under a deadline the search stops
+    /// after `SOLVED_SIMULATIONS`; a fixed count runs in full.
+    #[test]
+    fn solved_tree_stops_under_a_deadline() {
+        let cfg = GameConfig::for_mode(Mode::Duel, None).unwrap();
+        let mut s = GameState::new(&cfg);
+        s.set_snake(&cfg, 0, &[(1, 1), (1, 1), (1, 1)], 1, None)
+            .unwrap();
+        s.set_snake(&cfg, 1, &[(9, 9), (9, 9), (9, 9)], 1, None)
+            .unwrap();
+        s.refresh_done(&cfg);
+        assert!(!s.done);
+        let mut ws = Search::new();
+        let t = Instant::now();
+        let run = |ws: &mut Search, budget| {
+            ws.run(
+                &cfg,
+                &s,
+                &SearchConfig::default(),
+                budget,
+                &mut UniformEvaluator,
+                &mut JaxNoise::from_seed(3),
+            )
+            .unwrap()
+        };
+        let out = run(&mut ws, Budget::millis_after(t, 60_000, usize::MAX));
+        assert_eq!(ws.stats().stop, StopReason::Solved);
+        assert_eq!(out.simulations, SOLVED_SIMULATIONS);
+        // The root and one finished child per joint move `select` can pick (move 0 for a seat
+        // with no legal move).
+        let picks = |p: usize| out.legal[p].iter().filter(|&&l| l).count().max(1);
+        assert_eq!(ws.stats().nodes, 1 + picks(0) * picks(1));
+        assert!(t.elapsed() < Duration::from_secs(5));
+        let fixed = run(&mut ws, Budget::simulations(SOLVED_SIMULATIONS + 10));
+        assert_eq!(fixed.simulations, SOLVED_SIMULATIONS + 10);
+        assert_eq!(ws.stats().stop, StopReason::Simulations);
+        // Two turns from starving: solved through a level of unfinished nodes.
+        let mut two = s;
+        two.health[..2].copy_from_slice(&[2, 2]);
+        let deep = ws
+            .run(
+                &cfg,
+                &two,
+                &SearchConfig::default(),
+                Budget::millis_after(Instant::now(), 60_000, usize::MAX),
+                &mut UniformEvaluator,
+                &mut JaxNoise::from_seed(4),
+            )
+            .unwrap();
+        assert_eq!(ws.stats().stop, StopReason::Solved);
+        assert_eq!(deep.simulations, SOLVED_SIMULATIONS);
+        assert!(
+            ws.stats().nodes > 2 && ws.stats().depth == 2,
+            "{:?}",
+            ws.stats()
+        );
+        // An unsolved tree (full health) does not stop early.
+        let mut u = s;
+        u.health[..2].copy_from_slice(&[100, 100]);
+        let out = ws
+            .run(
+                &cfg,
+                &u,
+                &SearchConfig::default(),
+                Budget::millis_after(Instant::now(), 60_000, SOLVED_SIMULATIONS + 10),
+                &mut UniformEvaluator,
+                &mut JaxNoise::from_seed(3),
+            )
+            .unwrap();
+        assert_eq!(out.simulations, SOLVED_SIMULATIONS + 10);
     }
 }
