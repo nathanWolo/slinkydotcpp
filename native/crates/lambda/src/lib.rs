@@ -12,7 +12,8 @@
 //! needs a `game.id` of any type; anything else is 400. A move request always gets a move: on
 //! any error the safe move. Every search stops at the request's deadline (see [`engine`]). Settings are environment variables
 //! (see [`engine`] for the engine's and the README for all of them); the info response reads
-//! `SNAKE_AUTHOR`, `SNAKE_HEAD`, `SNAKE_TAIL` and `SNAKE_COLOR_<NAME>`.
+//! `SNAKE_AUTHOR`, `SNAKE_HEAD`, `SNAKE_TAIL`, `SNAKE_COLOR_<NAME>` and `SNAKE_HEAD_<NAME>` /
+//! `SNAKE_TAIL_<NAME>` (one snake's head and tail, over the shared ones).
 
 pub mod engine;
 
@@ -99,16 +100,15 @@ fn reply(code: u16, body: Value) -> Reply {
 
 fn info(name: &str) -> Value {
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
-    let color_key = format!(
-        "SNAKE_COLOR_{}",
-        name.to_uppercase().replace(['-', '.'], "_")
-    );
+    let key = name.to_uppercase().replace(['-', '.'], "_");
+    // a snake's own head and tail, else the shared ones
+    let own = |k: &str| env(&format!("{k}_{key}"), &env(k, "default"));
     json!({
         "apiversion": "1",
         "author": env("SNAKE_AUTHOR", "slinky"),
-        "color": env(&color_key, DEFAULT_COLOR),
-        "head": env("SNAKE_HEAD", "default"),
-        "tail": env("SNAKE_TAIL", "default"),
+        "color": env(&format!("SNAKE_COLOR_{key}"), DEFAULT_COLOR),
+        "head": own("SNAKE_HEAD"),
+        "tail": own("SNAKE_TAIL"),
         "version": format!("slinky {name} (native)"),
     })
 }

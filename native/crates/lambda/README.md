@@ -8,8 +8,10 @@ The native AlphaZero snakes on AWS Lambda, two ways:
   talks to it in JSON lines (`src/bin/engine.rs`: one request line in, one answer line out,
   logs on stderr). One function, one URL and one bill for every snake. See
   `deploy/lambda/README.md`.
-* A standalone custom-runtime handler (`provided.al2023`, `src/main.rs`, binary
-  `slinky-lambda`), described below. Not deployed; kept tested.
+* **Deployed: a standalone custom-runtime handler** (`provided.al2023`, `src/main.rs`, binary
+  `slinky-lambda`), described below: function `slinky-native` (`/az-256` and the 200 ms
+  `/az-t200`), see `deploy/lambda-native/README.md`. Its containers start in tens of ms, where
+  the Python function's take ~410 ms.
 
 Both use the same handler (`App`) and engine (`SnakeEngine`). The standalone one routes like
 the Python deployment behind one Function URL:
