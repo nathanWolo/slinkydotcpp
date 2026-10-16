@@ -358,32 +358,32 @@ fn review_random_exact() {
 /// The crafted positions with the search constants a retrained run may use (`c_puct` 0.3 to
 /// 1.1, `fpu_reduction` 0 to 0.5, `draw_value` -0.7 to 0.25).
 ///
-/// Fails on the 4-seat draws: when every seat is dead and several died on the last turn, the
+/// Covers the 4-seat draws: when every seat is dead and several died on the last turn, the
 /// jitted `placement_values` computes the draw term `draw_value * tied / (n - 1)` as
-/// `tied * (f32(draw_value) * f32(1 / (n - 1)))` (XLA folds the two constants), while
-/// `slinky_rules::GameState::placement_values` computes `(draw_value * tied) * recip`; with
-/// `n - 1 = 3` the two round differently for some draw values (-0.45, -1/3 with 4 tied), so the
-/// terminal values and every q above them differ by an ulp. The deployed run's -0.5 is exact
-/// either way, so the ladder agent is not affected.
+/// `tied * (f32(draw_value) * f32(1 / (n - 1)))` (XLA folds the two constants);
+/// `slinky_rules::GameState::placement_values` used to compute `(draw_value * tied) * recip`,
+/// one ulp off for some draw values (-0.45, -1/3 with 4 tied). Fixed in the rules crate.
 #[test]
-#[ignore = "BUG (rules crate, retrained configs only): 4-seat draw term rounded as (draw*tied)*recip, \
-            XLA computes tied*(draw*recip)"]
 fn review_variants_exact() {
     report_exact("variants");
 }
 
-/// The root priors of a finished root: Python reports the masked softmax of the network's
-/// logits there (the evaluator runs on the root regardless, mcts.py:1226, 873-878), the Rust
-/// search reports the uniform prior because it skips the evaluator on finished nodes. Only the
-/// reported `root_prior` differs (a finished root is never searched, so no move changes).
+/// The root priors of a finished root: Python reports the masked softmax of the evaluator's
+/// logits there (the evaluator runs on the root regardless, mcts.py:1226, 873-878). The Rust
+/// search used to skip the evaluator on every finished node and report the uniform prior (a
+/// finished root is never searched, so only the reported `root_prior` differed); it now
+/// evaluates a finished root for its priors.
 #[test]
-#[ignore = "BUG (minor, reporting only): root_prior of a finished root is uniform in Rust, the \
-            network's masked softmax in Python"]
 fn root_prior_on_finished_root() {
-    let Some((_, _, prior_finished, _)) = exact_part("crafted") else {
-        return;
-    };
-    assert_eq!(prior_finished, 0, "root_prior differs on finished roots");
+    for part in ["crafted", "random"] {
+        let Some((_, _, prior_finished, _)) = exact_part(part) else {
+            return;
+        };
+        assert_eq!(
+            prior_finished, 0,
+            "{part}: root_prior differs on finished roots"
+        );
+    }
 }
 
 // --- The Rust network on the same positions ---------------------------------------------------

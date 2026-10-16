@@ -22,7 +22,8 @@
 //!
 //! Differences that do not change results: the tree grows a node per expansion (Python fills
 //! slot `sim + 1` and leaves it unused when nothing is expanded); the evaluator is not called on
-//! simulations that expand nothing, on finished nodes or for dead seats (SPEC ambiguity 8).
+//! simulations that expand nothing, on finished nodes other than the root, or for dead seats
+//! (SPEC ambiguity 8).
 //!
 //! The search can also stop at a deadline ([`Budget::deadline`]); without one it runs exactly
 //! [`Budget::simulations`] simulations, as Python does.
@@ -263,8 +264,11 @@ impl Search {
         let mut value = exact;
         let mut prior = [[0.0f32; NUM_ACTIONS]; MAX_SNAKES];
         let terminal = state.done;
+        // A finished node is never searched from, so only the root's priors matter there: they
+        // are reported as `root_prior`, which Python takes from the evaluator even when the game
+        // is over (`_init_tree` always calls it, mcts.py:873-878). Its values stay exact.
         let mut seats = [false; MAX_SNAKES];
-        if !terminal {
+        if !terminal || id == 0 {
             for (s, a) in seats.iter_mut().zip(&state.alive).take(n) {
                 *s = *a;
             }
@@ -277,6 +281,7 @@ impl Search {
         for p in 0..n {
             if let Some(e) = &eval
                 && seats[p]
+                && !terminal
             {
                 // `jnp.clip(net_value, -1, 1)`; NaN stays NaN as in Python.
                 value[p] = e.values[p].clamp(-1.0, 1.0);

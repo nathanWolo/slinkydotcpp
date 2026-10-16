@@ -49,8 +49,9 @@ impl Default for NodeEval {
 /// A leaf evaluator for [`crate::Search`].
 pub trait Evaluator {
     /// Evaluate `state`, the state of node `node` (numbered in creation order, the root is 0),
-    /// for the seats with `seats[i]` set: the living seats of a node whose game is not over.
-    /// The search does not call it for finished nodes.
+    /// for the seats with `seats[i]` set: the living seats of a node whose game is not over,
+    /// or of a finished root (only its priors are used there, for `root_prior`; its values are
+    /// the exact placement values). The search does not call it for other finished nodes.
     fn evaluate(
         &mut self,
         node: usize,
