@@ -913,6 +913,13 @@ dependencies = [
 [[package]]
 name = "slinky-referee"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "slinky-api",
+ "slinky-env",
+ "slinky-rules",
+ "slinky-search",
+]
 
 [[package]]
 name = "slinky-rules"
