@@ -1,0 +1,22 @@
+[package]
+name = "slinky-server-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Battlesnake HTTP server for the native az_modes engine: a drop-in replacement for python -m slinky.server"
+
+[[bin]]
+name = "slinky-native-server"
+path = "src/main.rs"
+
+[dependencies]
+slinky-api = { path = "../api" }
+slinky-rules = { path = "../rules" }
+slinky-search = { path = "../search" }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde_json = "1"
