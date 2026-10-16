@@ -5,25 +5,28 @@
 //! says why on stderr.
 //!
 //! ```text
-//! naz --run DIR [--sims N] [--seed S] [--starting N] [--time-ms T] [-v] < move.json
+//! naz --run DIR [--sims N] [--seed S] [--starting N] [--time-ms T] [--threads K] [-v] < move.json
 //! ```
 //!
 //! * `--run DIR` (or env `NAZ_RUN`): the run dir with `config.json` and `params.npz`.
-//! * `--sims N`: simulations (default 256, the ladder agent).
+//! * `--sims N`: simulations (default 256, the ladder agent); with `--time-ms`, a cap (default
+//!   none).
 //! * `--seed S`: the tie noise of `jax.random.key(S)` (default 0).
 //! * `--starting N`: snakes at the game's start (default: the living snakes in the request).
-//! * `--time-ms T`: also stop the search after T ms (not the faithful mode).
-//! * `-v`: print the root visits, mean values and timings on stderr.
+//! * `--time-ms T`: search until T ms after the request was read (not the faithful mode).
+//! * `--threads K`: K root-parallel trees (default 1, the plain search).
+//! * `-v`: print the root visits, mean values, timings and tree memory on stderr.
 
 use slinky_api::{MoveResponse, Request, game_from_request, safe_move_json};
-use slinky_search::{Agent, Budget, JaxNoise, Search};
+use slinky_search::{Agent, MAX_SIMULATIONS, MoveBudget, Search};
 use std::io::Read;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 struct Args {
     run: Option<String>,
-    sims: usize,
+    sims: Option<usize>,
+    threads: usize,
     seed: u32,
     starting: Option<usize>,
     time_ms: Option<u64>,
@@ -33,7 +36,8 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         run: std::env::var("NAZ_RUN").ok(),
-        sims: 256,
+        sims: None,
+        threads: 1,
         seed: 0,
         starting: None,
         time_ms: None,
@@ -45,9 +49,16 @@ fn parse_args() -> Result<Args, String> {
         match flag.as_str() {
             "--run" => a.run = Some(value("--run")?),
             "--sims" => {
-                a.sims = value("--sims")?
+                a.sims = Some(
+                    value("--sims")?
+                        .parse()
+                        .map_err(|e| format!("--sims: {e}"))?,
+                )
+            }
+            "--threads" => {
+                a.threads = value("--threads")?
                     .parse()
-                    .map_err(|e| format!("--sims: {e}"))?
+                    .map_err(|e| format!("--threads: {e}"))?
             }
             "--seed" => {
                 a.seed = value("--seed")?
@@ -71,7 +82,7 @@ fn parse_args() -> Result<Args, String> {
             "-v" | "--verbose" => a.verbose = true,
             "-h" | "--help" => {
                 return Err("usage: naz --run DIR [--sims N] [--seed S] [--starting N] \
-                            [--time-ms T] [-v] < move.json"
+                            [--time-ms T] [--threads K] [-v] < move.json"
                     .into());
             }
             other => return Err(format!("unknown argument {other}")),
@@ -97,28 +108,34 @@ fn main() -> ExitCode {
         eprintln!("naz: reading stdin: {e}");
         return ExitCode::from(2);
     }
+    let budget = match args.time_ms {
+        Some(ms) => MoveBudget::Time {
+            ms,
+            max_simulations: args.sims.unwrap_or(MAX_SIMULATIONS),
+        },
+        None => MoveBudget::Simulations(args.sims.unwrap_or(256)),
+    };
     let t_load = Instant::now();
     let agent = match Agent::load(&run) {
-        Ok(a) => a.with_simulations(args.sims),
+        Ok(a) => a.with_budget(budget).with_threads(args.threads),
         Err(e) => {
             eprintln!("naz: {e}");
             return ExitCode::from(1);
         }
     };
     let load = t_load.elapsed();
+    // The request "arrives" once read and the weights are loaded (a server loads them once).
+    let arrival = Instant::now();
+    let mut workspaces: Vec<Search> = (0..agent.threads()).map(|_| Search::new()).collect();
     let result = Request::from_json(&body)
         .map_err(slinky_search::SearchError::from)
         .and_then(|req| {
             let game = game_from_request(&req, args.starting)?;
-            let budget = match args.time_ms {
-                Some(ms) => Budget::until(args.sims, Instant::now() + Duration::from_millis(ms)),
-                None => Budget::simulations(args.sims),
-            };
-            agent.search_game(
-                &mut Search::new(),
+            agent.search_game_threads(
+                &mut workspaces,
                 &game,
-                budget,
-                &mut JaxNoise::from_seed(args.seed),
+                agent.budget().budget_from(arrival),
+                args.seed,
             )
         });
     let mv = match &result {
@@ -139,6 +156,18 @@ fn main() -> ExitCode {
             s.depth,
             m.elapsed.as_secs_f64() * 1e3,
             load.as_secs_f64() * 1e3
+        );
+        let (mut alloc, mut tree) = (0, 0);
+        for ws in &workspaces {
+            alloc += ws.stats().allocated_bytes;
+            tree += ws.stats().tree_bytes;
+        }
+        eprintln!(
+            "answered {:.1} ms after arrival; tree {:.2} MB in use, {:.2} MB allocated, {} thread(s)",
+            arrival.elapsed().as_secs_f64() * 1e3,
+            tree as f64 / 1048576.0,
+            alloc as f64 / 1048576.0,
+            workspaces.len()
         );
         for p in 0..m.num_snakes {
             eprintln!(

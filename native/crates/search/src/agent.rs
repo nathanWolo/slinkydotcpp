@@ -27,6 +27,16 @@
 //! (flood fills, Voronoi races, a duel joint search, random tie-breaks) on boards up to 25x25
 //! that the 121-cell rules crate does not represent. Porting it is follow-up work.
 //!
+//! # Budgets beyond the faithful 256 simulations
+//!
+//! [`Agent::with_budget`] sets how much each move searches ([`MoveBudget`]): a fixed simulation
+//! count (deterministic: 256 is the faithful ladder agent, 1024 or 4096 for reproducible
+//! strength tests) or a time budget measured from the request's arrival
+//! ([`MoveBudget::Time`]: search until `ms` after `arrival`, at most `max_simulations`).
+//! The `*_from` methods take the arrival [`Instant`]; the older methods use the time of the
+//! call. [`Agent::with_threads`] searches with several root-parallel trees (see
+//! [`crate::run_root_parallel`]); one thread, the default, is the plain search.
+//!
 //! A body the Python handler refuses with HTTP 400 ([`slinky_api::ApiError::Json`]: not JSON,
 //! over 64 KB, a non-object `game`) gets no move from Python; [`Agent::respond`] answers "up"
 //! (the caller may answer 400 instead).
@@ -34,7 +44,10 @@
 use crate::SearchError;
 use crate::eval::NetEvaluator;
 use crate::noise::{JaxNoise, NoiseSource};
-use crate::search::{Budget, Search, SearchConfig, SearchOutput};
+use crate::parallel::{run_root_parallel, thread_noise};
+use crate::search::{
+    Budget, DEFAULT_MEMORY_LIMIT, MAX_SIMULATIONS, Search, SearchConfig, SearchOutput,
+};
 use slinky_api::{Game, MoveResponse, Request, game_from_request, safe_move_json};
 use slinky_net::Network;
 use slinky_rules::{MAX_SNAKES, Mode, Move};
@@ -44,12 +57,64 @@ use std::time::{Duration, Instant};
 /// The play-time simulation count of the ladder agent (`az_modes:...:simulations=256`).
 pub const LADDER_SIMULATIONS: usize = 256;
 
+/// How much an agent searches per move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveBudget {
+    /// Exactly this many simulations (deterministic). 256 ([`LADDER_SIMULATIONS`]) is the
+    /// faithful ladder agent.
+    Simulations(usize),
+    /// Search until `ms` milliseconds after the request's arrival, at most `max_simulations`
+    /// (at least one simulation always runs). Not deterministic.
+    Time {
+        /// Milliseconds from the arrival to the end of the search.
+        ms: u64,
+        /// Simulation cap ([`MAX_SIMULATIONS`] for none).
+        max_simulations: usize,
+    },
+}
+
+impl MoveBudget {
+    /// The faithful ladder agent: 256 simulations.
+    pub const LADDER: MoveBudget = MoveBudget::Simulations(LADDER_SIMULATIONS);
+
+    /// A time budget of `ms` milliseconds from the arrival, with no simulation cap.
+    pub fn time_ms(ms: u64) -> MoveBudget {
+        MoveBudget::Time {
+            ms,
+            max_simulations: MAX_SIMULATIONS,
+        }
+    }
+
+    /// The search budget of a request that arrived at `arrival`.
+    pub fn budget_from(self, arrival: Instant) -> Budget {
+        match self {
+            MoveBudget::Simulations(n) => Budget::simulations(n),
+            MoveBudget::Time {
+                ms,
+                max_simulations,
+            } => Budget::millis_after(arrival, ms, max_simulations),
+        }
+    }
+
+    /// The simulation count, or the cap of a time budget.
+    pub fn max_simulations(self) -> usize {
+        match self {
+            MoveBudget::Simulations(n) => n,
+            MoveBudget::Time {
+                max_simulations, ..
+            } => max_simulations,
+        }
+    }
+}
+
 /// A loaded az_modes agent: the network and its search settings. Immutable, so one value can
 /// serve many threads (each with its own [`Search`] workspace).
 pub struct Agent {
     net: Network,
     settings: SearchConfig,
-    simulations: usize,
+    budget: MoveBudget,
+    threads: usize,
+    memory_limit: usize,
 }
 
 /// One move of the agent, with the root statistics of its search.
@@ -78,19 +143,56 @@ impl Agent {
         Agent {
             settings: SearchConfig::from_net(net.config()),
             net,
-            simulations: LADDER_SIMULATIONS,
+            budget: MoveBudget::LADDER,
+            threads: 1,
+            memory_limit: DEFAULT_MEMORY_LIMIT,
         }
     }
 
-    /// The same agent with another simulation count.
+    /// The same agent with another simulation count (a deterministic [`MoveBudget::Simulations`]).
     pub fn with_simulations(mut self, simulations: usize) -> Agent {
-        self.simulations = simulations;
+        self.budget = MoveBudget::Simulations(simulations);
         self
     }
 
-    /// The simulations per move.
+    /// The simulations per move (the cap of a time budget).
     pub fn simulations(&self) -> usize {
-        self.simulations
+        self.budget.max_simulations()
+    }
+
+    /// The same agent with another per-move budget.
+    pub fn with_budget(mut self, budget: MoveBudget) -> Agent {
+        self.budget = budget;
+        self
+    }
+
+    /// The per-move budget.
+    pub fn budget(&self) -> MoveBudget {
+        self.budget
+    }
+
+    /// The same agent searching with `threads` root-parallel trees (at least 1; 1, the
+    /// default, is the plain search). A simulation budget is split between the trees.
+    pub fn with_threads(mut self, threads: usize) -> Agent {
+        self.threads = threads.max(1);
+        self
+    }
+
+    /// The search threads per move.
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// The same agent with a tree memory cap per search thread (default
+    /// [`DEFAULT_MEMORY_LIMIT`]; see [`Search::set_memory_limit`]).
+    pub fn with_memory_limit(mut self, bytes: usize) -> Agent {
+        self.memory_limit = bytes;
+        self
+    }
+
+    /// The tree memory cap per search thread.
+    pub fn memory_limit(&self) -> usize {
+        self.memory_limit
     }
 
     /// The network.
@@ -159,22 +261,113 @@ impl Agent {
         })
     }
 
-    /// The agent's move for a parsed request: the faithful search with the noise of
+    /// Search `game` with `workspaces.len()` root-parallel trees (see
+    /// [`crate::run_root_parallel`]), tree `t` drawing the noise of
+    /// [`crate::thread_noise`]`(seed, t)`. One workspace is [`Agent::search_game`] with
+    /// [`JaxNoise::from_seed`]`(seed)`.
+    pub fn search_game_threads(
+        &self,
+        workspaces: &mut [Search],
+        game: &Game,
+        budget: Budget,
+        seed: u32,
+    ) -> Result<AgentMove, SearchError> {
+        self.check_game(game)?;
+        let t0 = Instant::now();
+        let k = workspaces.len();
+        let mut evals = (0..k)
+            .map(|_| NetEvaluator::for_game(&self.net, game.config))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut noises: Vec<JaxNoise> = (0..k).map(|t| thread_noise(seed, t)).collect();
+        let out = run_root_parallel(
+            workspaces,
+            &game.config,
+            &game.state,
+            &self.settings,
+            budget,
+            &mut evals,
+            &mut noises,
+        )?;
+        let mv = Move::from_index(out.action[0] as usize).unwrap_or(Move::Up);
+        Ok(AgentMove {
+            mv,
+            mode: game.mode,
+            num_snakes: game.config.num_snakes(),
+            search: out,
+            elapsed: t0.elapsed(),
+        })
+    }
+
+    /// The agent's move for a parsed request with the agent's budget, threads and the noise of
     /// `jax.random.key(seed)`. `starting_snakes` is the snake count at the game's `/start`
-    /// (see [`slinky_api::game_from_request`]; `None` uses the living snakes).
+    /// (see [`slinky_api::game_from_request`]; `None` uses the living snakes). With the default
+    /// budget (256 simulations, one thread) this is the faithful search.
     pub fn play_request(
         &self,
         req: &Request,
         starting_snakes: Option<usize>,
         seed: u32,
     ) -> Result<AgentMove, SearchError> {
+        self.play_request_from(req, starting_snakes, seed, Instant::now())
+    }
+
+    /// [`Agent::play_request`] for a request that arrived at `arrival` (a time budget runs
+    /// until `arrival + ms`).
+    pub fn play_request_from(
+        &self,
+        req: &Request,
+        starting_snakes: Option<usize>,
+        seed: u32,
+        arrival: Instant,
+    ) -> Result<AgentMove, SearchError> {
         let game = game_from_request(req, starting_snakes)?;
-        self.search_game(
-            &mut Search::new(),
-            &game,
-            Budget::simulations(self.simulations),
-            &mut JaxNoise::from_seed(seed),
+        let budget = self.budget.budget_from(arrival);
+        if self.threads <= 1 {
+            self.search_game(
+                &mut Search::with_memory_limit(self.memory_limit),
+                &game,
+                budget,
+                &mut JaxNoise::from_seed(seed),
+            )
+        } else {
+            let mut ws: Vec<Search> = (0..self.threads)
+                .map(|_| Search::with_memory_limit(self.memory_limit))
+                .collect();
+            self.search_game_threads(&mut ws, &game, budget, seed)
+        }
+    }
+
+    /// [`Agent::play`] for a request that arrived at `arrival`.
+    pub fn play_from(
+        &self,
+        request_json: &str,
+        starting_snakes: Option<usize>,
+        seed: u32,
+        arrival: Instant,
+    ) -> Result<AgentMove, SearchError> {
+        self.play_request_from(
+            &Request::from_json(request_json)?,
+            starting_snakes,
+            seed,
+            arrival,
         )
+    }
+
+    /// [`Agent::respond`] for a request that arrived at `arrival`: the server and the Lambda
+    /// call this with the instant the request came in, so a time budget covers the parsing.
+    pub fn respond_from(
+        &self,
+        request_json: &str,
+        starting_snakes: Option<usize>,
+        seed: u32,
+        arrival: Instant,
+    ) -> (MoveResponse, Result<AgentMove, SearchError>) {
+        let res = self.play_from(request_json, starting_snakes, seed, arrival);
+        let mv = match &res {
+            Ok(m) => m.mv,
+            Err(_) => safe_move_json(request_json),
+        };
+        (MoveResponse::new(mv), res)
     }
 
     /// [`Agent::play_request`] from the request's JSON text.
@@ -184,7 +377,7 @@ impl Agent {
         starting_snakes: Option<usize>,
         seed: u32,
     ) -> Result<AgentMove, SearchError> {
-        self.play_request(&Request::from_json(request_json)?, starting_snakes, seed)
+        self.play_from(request_json, starting_snakes, seed, Instant::now())
     }
 
     /// The `/move` response: the agent's move, or the safe move when the request cannot be
@@ -195,12 +388,7 @@ impl Agent {
         starting_snakes: Option<usize>,
         seed: u32,
     ) -> (MoveResponse, Result<AgentMove, SearchError>) {
-        let res = self.play(request_json, starting_snakes, seed);
-        let mv = match &res {
-            Ok(m) => m.mv,
-            Err(_) => safe_move_json(request_json),
-        };
-        (MoveResponse::new(mv), res)
+        self.respond_from(request_json, starting_snakes, seed, Instant::now())
     }
 }
 
