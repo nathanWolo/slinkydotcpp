@@ -7,8 +7,10 @@
 //! POST /<snake>/end      (logged)
 //! ```
 //!
-//! The routes and bodies are those of `deploy/lambda/lambda_function.py`. A move request
-//! always gets a move: on any error the safe move. Settings are environment variables
+//! The routes and bodies are those of `deploy/lambda/lambda_function.py`, and so is what is
+//! accepted: a body is read with Python's `json.loads` dialect (`slinky_api::Request`) and
+//! needs a `game.id` of any type; anything else is 400. A move request always gets a move: on
+//! any error the safe move. Every search stops at the request's deadline (see [`engine`]). Settings are environment variables
 //! (see [`engine`] for the engine's and the README for all of them); the info response reads
 //! `SNAKE_AUTHOR`, `SNAKE_HEAD`, `SNAKE_TAIL` and `SNAKE_COLOR_<NAME>`.
 
@@ -16,6 +18,7 @@ pub mod engine;
 
 use engine::{By, Settings, SnakeEngine};
 use serde_json::{Value, json};
+use slinky_api::{PyValue, Request};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -39,6 +42,34 @@ struct StartCache {
 pub struct App {
     snakes: Vec<SnakeEngine>,
     cache: Mutex<StartCache>,
+    debug_panic: Option<String>,
+}
+
+/// A scalar as JSON for the logs; a list or dict as its type name (a body may nest
+/// thousands of levels: nothing here recurses).
+pub fn log_value(v: Option<&PyValue>) -> Value {
+    match v {
+        None | Some(PyValue::None) => Value::Null,
+        Some(PyValue::Bool(b)) => json!(b),
+        Some(PyValue::Int(i)) => {
+            i64::try_from(*i).map_or_else(|_| json!(i.to_string()), |i| json!(i))
+        }
+        Some(PyValue::BigInt { negative, digits }) => {
+            json!(format!("{}{digits}", if *negative { "-" } else { "" }))
+        }
+        Some(PyValue::Float(f)) => json!(f),
+        Some(PyValue::Str(s)) => json!(s),
+        Some(v) => json!(format!("<{}>", v.type_name())),
+    }
+}
+
+/// The text a value enters the tie-break seed with: a string as itself for the game id
+/// (`raw`), anything else as its JSON text (`5`, `null`, `"5"` for a string turn).
+pub fn seed_text(v: Option<&PyValue>, raw: bool) -> String {
+    match (v, raw) {
+        (Some(PyValue::Str(s)), true) => s.clone(),
+        (v, _) => log_value(v).to_string(),
+    }
 }
 
 /// An HTTP answer: status code and JSON text.
@@ -89,6 +120,11 @@ impl App {
         App {
             snakes,
             cache: Mutex::new(StartCache::default()),
+            debug_panic: settings
+                .debug_panic
+                .as_ref()
+                .filter(|(w, _)| w == "handler")
+                .map(|(_, id)| id.clone()),
         }
     }
 
@@ -112,6 +148,19 @@ impl App {
     /// Answers one request. `arrival` is when it reached the handler (a time budget counts
     /// from there).
     pub fn handle(&self, method: &str, path: &str, body: &str, arrival: Instant) -> Reply {
+        self.handle_within(method, path, body, arrival, None)
+    }
+
+    /// [`App::handle`] with an outside deadline (the Lambda invocation's end): a search
+    /// stops before it, less the deadline margin.
+    pub fn handle_within(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+        arrival: Instant,
+        limit: Option<Instant>,
+    ) -> Reply {
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
         let Some(snake) = parts
             .first()
@@ -133,53 +182,70 @@ impl App {
         if body.len() > MAX_BODY {
             return reply(400, json!({"error": "request too large"}));
         }
-        let req: Value = match serde_json::from_str(body) {
-            Ok(v) => v,
-            Err(_) => return reply(400, json!({"error": "not a Battlesnake request"})),
-        };
-        let Some(game) = req["game"]["id"].as_str().map(str::to_string) else {
+        // json.loads(raw); game = req["game"]["id"]; turn = req.get("turn")
+        let Ok(req) = Request::from_json(body) else {
             return reply(400, json!({"error": "not a Battlesnake request"}));
         };
-        let turn = req["turn"].clone();
+        let root = req.root();
+        let Some(game) = root.get("game").and_then(|g| g.get("id")) else {
+            return reply(400, json!({"error": "not a Battlesnake request"}));
+        };
+        let game_log = log_value(Some(game));
+        let game_seed = seed_text(Some(game), true);
+        let turn = root.get("turn");
+        let turn_log = log_value(turn);
 
         match action {
             "move" => {
-                let c = snake.choose(
-                    body,
-                    &game,
-                    &turn.to_string(),
-                    self.cache_get(&game),
+                if self.debug_panic.as_deref() == Some(game_seed.as_str()) {
+                    panic!("DEBUG_PANIC: a panic in the handler, game {game_seed}");
+                }
+                let starting = req.game_id().and_then(|id| self.cache_get(id));
+                let c = snake.choose_request(
+                    &req,
+                    &game_seed,
+                    &seed_text(turn, false),
+                    starting,
                     arrival,
+                    limit,
                 );
                 let ms = (arrival.elapsed().as_secs_f64() * 1e5).round() / 100.0;
                 log(json!({
-                    "snake": name, "game": game, "turn": turn, "move": c.mv.name(),
+                    "snake": name, "game": game_log, "turn": turn_log, "move": c.mv.name(),
                     "by": if c.by == By::Engine { "engine" } else { "fallback" },
                     "sims": c.simulations, "mode": c.mode, "seed": c.seed, "ms": ms,
+                    "deadline_ms": c.deadline_ms, "cut": c.cut,
                     "error": c.error.map(|e| e.chars().take(300).collect::<String>()),
                 }));
                 reply(200, json!({"move": c.mv.name()}))
             }
             "start" => {
-                let snakes = req["board"]["snakes"].as_array().map_or(0, Vec::len);
-                self.cache_put(&game, snakes);
+                let snakes = req.snake_count().unwrap_or(0);
+                if let Some(id) = req.game_id() {
+                    self.cache_put(id, snakes);
+                }
+                let board = root.get("board");
+                let g = root.get("game");
                 log(json!({
-                    "snake": name, "game": game, "event": "start",
-                    "ruleset": req["game"]["ruleset"]["name"],
-                    "size": format!("{}x{}", req["board"]["width"], req["board"]["height"]),
-                    "snakes": snakes, "source": req["game"]["source"],
+                    "snake": name, "game": game_log, "event": "start",
+                    "ruleset": log_value(g.and_then(|g| g.get("ruleset")).and_then(|r| r.get("name"))),
+                    "size": format!("{}x{}",
+                        log_value(board.and_then(|b| b.get("width"))),
+                        log_value(board.and_then(|b| b.get("height")))),
+                    "snakes": snakes, "source": log_value(g.and_then(|g| g.get("source"))),
                 }));
                 reply(200, json!({}))
             }
             _ => {
-                let me = &req["you"]["id"];
-                let left = req["board"]["snakes"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                let won = left.len() == 1 && &left[0]["id"] == me;
+                let me = log_value(root.get("you").and_then(|y| y.get("id")));
+                let won = match root.get("board").and_then(|b| b.get("snakes")) {
+                    Some(PyValue::List(left)) => {
+                        left.len() == 1 && log_value(left[0].get("id")) == me
+                    }
+                    _ => false,
+                };
                 log(
-                    json!({"snake": name, "game": game, "event": "end", "turn": turn,
+                    json!({"snake": name, "game": game_log, "event": "end", "turn": turn_log,
                            "result": if won { "won" } else { "lost or drew" }}),
                 );
                 reply(200, json!({}))

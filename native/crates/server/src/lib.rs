@@ -22,8 +22,11 @@
 //!
 //! What is new: the searches run on a pool of threads (one per core by default), each request's
 //! search on one thread; a snake can search for a time budget (`:budget_ms=T`) instead of a
-//! fixed simulation count; and a `/move` still searching after `--answer-by-ms` (400 ms by
-//! default) is answered with the safe move. The HTTP stack is hyper 1 (HTTP/1.1 only) on a
+//! fixed simulation count; every search stops at the request's deadline (`game.timeout`
+//! less `--margin-ms`, so 400 ms by default; a time budget also before `--answer-by-ms`) and
+//! plays its best move so far; and a `/move` whose search has not answered `--answer-by-ms`
+//! (400 ms by default) after its arrival, or by the request's deadline, is answered with the
+//! safe move. The HTTP stack is hyper 1 (HTTP/1.1 only) on a
 //! two-thread tokio runtime: header and body timeouts are built in, so a slow client never
 //! holds a search thread.
 
@@ -70,7 +73,10 @@ pub async fn serve(
                         builder
                             .timer(TokioTimer::new())
                             .header_read_timeout(http::BODY_TIMEOUT)
-                            .keep_alive(false);
+                            .keep_alive(false)
+                            // Answer a client that shut its write side after the request
+                            // (`nc -N`, some proxies and health checks), as Python does.
+                            .half_close(true);
                         let _ = builder.serve_connection(TokioIo::new(stream), svc).await;
                     });
                 }

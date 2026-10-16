@@ -9,11 +9,17 @@
 //! * `/move` always answers 200 with a move: the agent's, or the safe move when the request
 //!   cannot be searched, when the search is not done `answer_by` after the request arrived
 //!   (the search threads are all busy, say), or when it fails.
+//! * Deadlines: a request is due `game.timeout` (500 ms when missing) less the margin
+//!   ([`DEFAULT_MARGIN`], `--margin-ms`) after it arrived. Every search stops
+//!   [`SEARCH_SLACK`] before that and plays its best move so far (a fixed-count search that
+//!   ends sooner is unchanged); a time-budget search also stops [`SEARCH_SLACK`] before
+//!   `answer_by`, so a `budget_ms` past `--answer-by-ms` still plays the agent. The safe move
+//!   is sent at the earlier of `answer_by` and the request's due time when no answer came.
 //! * Response bodies are byte for byte what Python's `json.dumps` sends.
 //! * Connections are closed after each response, as Python's HTTP/1.0 handler does (no idle
 //!   keep-alive connection that a proxy could reuse just as the server closes it).
 
-use crate::engine::{Choice, Snake, Source};
+use crate::engine::{Choice, Snake, Source, game_timeout_ms};
 use crate::info;
 use crate::ledger::MoveLedger;
 use crate::pool::{Job, Pool};
@@ -30,6 +36,10 @@ use std::time::{Duration, Instant};
 
 /// How long a client may take to send its request (Python's `Handler.timeout`).
 pub const BODY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default time kept back from `game.timeout` for the network (`--margin-ms`).
+pub const DEFAULT_MARGIN: Duration = Duration::from_millis(100);
+/// A search stops this long before its answer is due, so its answer is ready in time.
+pub const SEARCH_SLACK: Duration = Duration::from_millis(20);
 
 /// Everything the handler serves.
 pub struct App {
@@ -37,6 +47,7 @@ pub struct App {
     ledger: Arc<MoveLedger>,
     pool: Pool,
     answer_by: Option<Duration>,
+    margin: Duration,
     list_body: Bytes,
     info_bodies: Vec<Bytes>,
 }
@@ -83,9 +94,43 @@ impl App {
             ledger,
             pool: Pool::new(threads)?,
             answer_by,
+            margin: DEFAULT_MARGIN,
             list_body,
             info_bodies,
         })
+    }
+
+    /// Keeps `margin` of each request's `game.timeout` for the network (default
+    /// [`DEFAULT_MARGIN`]).
+    pub fn with_margin(mut self, margin: Duration) -> App {
+        self.margin = margin;
+        self
+    }
+
+    /// `(search deadline, answer deadline)` of a `/move` to `snake` that arrived at `t_in`
+    /// (module docs).
+    pub fn deadlines(
+        &self,
+        snake: &Snake,
+        req: &Request,
+        t_in: Instant,
+    ) -> (Instant, Option<Instant>) {
+        let due_in = Duration::from_millis(game_timeout_ms(req)).saturating_sub(self.margin);
+        let due = t_in + due_in;
+        let answer_at = self
+            .answer_by
+            .map(|d| t_in.checked_add(d).map_or(due, |a| a.min(due)));
+        let mut search_end = due;
+        if snake.has_budget()
+            && let Some(a) = answer_at
+        {
+            search_end = search_end.min(a);
+        }
+        let search_end = search_end
+            .checked_sub(SEARCH_SLACK)
+            .unwrap_or(search_end)
+            .max(t_in);
+        (search_end, answer_at)
     }
 
     /// The served snakes.
@@ -315,11 +360,13 @@ async fn play(
     ray: Option<String>,
 ) -> Choice {
     let req = Arc::new(request);
+    let (search_end, answer_at) = app.deadlines(snake, &req, t_in);
     let (tx, rx) = tokio::sync::oneshot::channel();
     let job = Job {
         snake: Arc::clone(snake),
         req: Arc::clone(&req),
         t_in,
+        deadline: Some(search_end),
         reply: tx,
     };
     let fallback = |why: String| Choice {
@@ -332,15 +379,18 @@ async fn play(
     let choice = if app.pool.submit(job).is_err() {
         fallback("the search threads have stopped".into())
     } else {
-        let answer = match app.answer_by {
-            Some(d) => match tokio::time::timeout_at((t_in + d).into(), rx).await {
+        let answer = match answer_at {
+            Some(at) => match tokio::time::timeout_at(at.into(), rx).await {
                 Ok(r) => r.ok(),
                 Err(_) => {
                     return finish(
                         app,
                         snake,
                         &req,
-                        fallback(format!("no move after {} ms", d.as_millis())),
+                        fallback(format!(
+                            "no move after {} ms",
+                            at.saturating_duration_since(t_in).as_millis()
+                        )),
                         t_in,
                         game,
                         turn,

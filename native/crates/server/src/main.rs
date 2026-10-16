@@ -4,7 +4,7 @@
 //! slinky-native-server --snake NAME=RUN_DIR[:simulations=N][:budget_ms=T] [--snake ...]
 //!     [--host 127.0.0.1] [--port 8000] [--author slinky] [--color "#3b82f6"]
 //!     [--head default] [--tail default] [--move-log FILE] [--threads N]
-//!     [--answer-by-ms 400] [--no-benchmark]
+//!     [--answer-by-ms 400] [--margin-ms 100] [--no-benchmark]
 //! ```
 //!
 //! `--agent NAME=az_modes:RUN_DIR[:simulations=N]` (the Python server's form) is read as
@@ -13,7 +13,7 @@
 use slinky_api::InfoResponse;
 use slinky_search::Search;
 use slinky_server_native::engine::{Snake, SnakeSpec};
-use slinky_server_native::http::App;
+use slinky_server_native::http::{App, SEARCH_SLACK};
 use slinky_server_native::ledger::MoveLedger;
 use slinky_server_native::{info, serve};
 use std::path::PathBuf;
@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 const USAGE: &str = "\
 usage: slinky-native-server --snake NAME=RUN_DIR[:simulations=N][:budget_ms=T] [--snake ...]
        [--host HOST] [--port PORT] [--author A] [--color C] [--head H] [--tail T]
-       [--move-log FILE] [--threads N] [--answer-by-ms MS] [--no-benchmark]
+       [--move-log FILE] [--threads N] [--answer-by-ms MS] [--margin-ms MS]
+       [--no-benchmark]
 
 A Battlesnake API server for the native multi-mode AlphaZero engine (az_modes run dirs).
 
@@ -41,7 +42,11 @@ A Battlesnake API server for the native multi-mode AlphaZero engine (az_modes ru
                                the game's previous answer (the Python server's MoveLedger)
   --threads N                  search threads (default: the number of cores)
   --answer-by-ms MS            answer the safe move if a search is not done MS ms after its
-                               request arrived (default 400; 0: always wait)
+                               request arrived (default 400; 0: always wait). A
+                               budget_ms search stops 20 ms before it.
+  --margin-ms MS               every search stops by the request's game.timeout (500 if
+                               missing) less MS, less 20 ms, and plays its best move so far;
+                               the safe move is sent then at the latest (default 100)
   --no-benchmark               skip the startup self-benchmark (it also advances the move
                                counter that seeds the tie noise, as in the Python server)";
 
@@ -56,8 +61,11 @@ struct Options {
     move_log: Option<PathBuf>,
     threads: usize,
     answer_by_ms: u64,
+    margin_ms: u64,
     benchmark: bool,
 }
+
+const MAX_MARGIN_MS: u64 = 10_000;
 
 fn parse_args(args: Vec<String>) -> Result<Options, String> {
     let mut o = Options {
@@ -71,6 +79,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
         move_log: None,
         threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
         answer_by_ms: 400,
+        margin_ms: 100,
         benchmark: true,
     };
     let mut it = args.into_iter();
@@ -107,6 +116,12 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
                 o.threads = number(value()?, "--threads")?.clamp(1, 1024) as usize;
             }
             "--answer-by-ms" => o.answer_by_ms = number(value()?, "--answer-by-ms")?,
+            "--margin-ms" => {
+                o.margin_ms = number(value()?, "--margin-ms")?;
+                if o.margin_ms > MAX_MARGIN_MS {
+                    return Err(format!("--margin-ms: at most {MAX_MARGIN_MS}"));
+                }
+            }
             "--no-benchmark" => o.benchmark = false,
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other:?}")),
@@ -174,6 +189,22 @@ fn main() -> ExitCode {
         let budget = spec
             .budget_ms
             .map_or(String::new(), |b| format!(", stop after {b} ms"));
+        if let Some(b) = spec.budget_ms {
+            let cap = o
+                .answer_by_ms
+                .saturating_sub(SEARCH_SLACK.as_millis() as u64);
+            if o.answer_by_ms > 0 && b > cap {
+                info!(
+                    "/{}: budget_ms={} is past --answer-by-ms {} less {} ms: its searches \
+                     stop {} ms after the request",
+                    spec.name,
+                    b,
+                    o.answer_by_ms,
+                    SEARCH_SLACK.as_millis(),
+                    cap
+                );
+            }
+        }
         info!(
             "/{}: loaded {} ({} simulations per move{}) in {:.1} ms",
             spec.name,
@@ -191,7 +222,7 @@ fn main() -> ExitCode {
     let ledger = Arc::new(MoveLedger::new(o.move_log.clone()));
     let answer_by = (o.answer_by_ms > 0).then(|| Duration::from_millis(o.answer_by_ms));
     let app = match App::new(snakes, Arc::clone(&ledger), o.threads, answer_by) {
-        Ok(a) => Arc::new(a),
+        Ok(a) => Arc::new(a.with_margin(Duration::from_millis(o.margin_ms))),
         Err(e) => {
             eprintln!("slinky-native-server: cannot start the search threads: {e}");
             return ExitCode::FAILURE;
@@ -268,6 +299,8 @@ mod tests {
             "3",
             "--answer-by-ms",
             "0",
+            "--margin-ms",
+            "120",
             "--no-benchmark",
         ]))
         .unwrap();
@@ -275,6 +308,7 @@ mod tests {
         assert_eq!(o.snakes.len(), 2);
         assert_eq!(o.snakes[1].budget_ms, Some(300));
         assert_eq!((o.threads, o.answer_by_ms, o.benchmark), (3, 0, false));
+        assert_eq!(o.margin_ms, 120);
         assert_eq!(o.color, "#ef4444");
         assert_eq!(o.host, "127.0.0.1");
         for bad in [
@@ -283,6 +317,7 @@ mod tests {
             &[],
             &["--snake"],
             &["--bogus"],
+            &["--snake", "a=/r", "--margin-ms", "99999"],
         ] {
             assert!(parse_args(args(bad)).is_err(), "{bad:?}");
         }

@@ -19,6 +19,8 @@ pub struct Job {
     pub req: Arc<Request>,
     /// When the request reached the handler (a time budget counts from here).
     pub t_in: Instant,
+    /// When the search must stop (the request's deadline, see `http`).
+    pub deadline: Option<Instant>,
     /// Where the answer goes. A job whose receiver is gone (the handler already answered with
     /// the safe move) is skipped.
     pub reply: oneshot::Sender<Choice>,
@@ -75,7 +77,8 @@ fn work(rx: &Mutex<mpsc::Receiver<Job>>) {
             continue;
         }
         let res = catch_unwind(AssertUnwindSafe(|| {
-            job.snake.choose(&mut workspace, &job.req, job.t_in)
+            job.snake
+                .choose_until(&mut workspace, &job.req, job.t_in, job.deadline)
         }));
         match res {
             Ok(choice) => {

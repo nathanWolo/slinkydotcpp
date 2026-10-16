@@ -42,6 +42,25 @@ pub const BUDGET_SIMULATIONS: usize = 16384;
 pub const MAX_SIMULATIONS: usize = 1 << 20;
 /// The largest time budget accepted, in ms.
 pub const MAX_BUDGET_MS: u64 = 10_000;
+/// `game.timeout` of a request that has none (Battlesnake's default).
+pub const DEFAULT_GAME_TIMEOUT_MS: u64 = 500;
+/// Largest `game.timeout` taken from a request (a larger one counts as this).
+pub const MAX_GAME_TIMEOUT_MS: u64 = 60_000;
+
+/// The `game.timeout` of a request in ms: [`DEFAULT_GAME_TIMEOUT_MS`] when it is missing or
+/// not a positive number, at most [`MAX_GAME_TIMEOUT_MS`].
+pub fn game_timeout_ms(req: &Request) -> u64 {
+    let t = req.root().get("game").and_then(|g| g.get("timeout"));
+    let ms = match t {
+        Some(PyValue::Int(i)) if *i >= 1 => u64::try_from(*i).unwrap_or(u64::MAX),
+        Some(PyValue::BigInt {
+            negative: false, ..
+        }) => u64::MAX,
+        Some(PyValue::Float(f)) if f.is_finite() && *f >= 1.0 => f.min(u64::MAX as f64) as u64,
+        _ => DEFAULT_GAME_TIMEOUT_MS,
+    };
+    ms.min(MAX_GAME_TIMEOUT_MS)
+}
 
 /// The `name=<run dir>[:simulations=N][:budget_ms=T]` value of `--snake`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,10 +311,32 @@ impl Snake {
         lock(&self.state).games.get(&key).copied()
     }
 
+    /// [`Snake::budget`], stopped at `deadline` too (the request's, see `http`).
+    pub fn budget_until(&self, t_in: Instant, deadline: Option<Instant>) -> Budget {
+        let mut b = self.budget(t_in);
+        if let Some(d) = deadline {
+            b.deadline = Some(b.deadline.map_or(d, |own| own.min(d)));
+        }
+        b
+    }
+
     /// `/move`: the agent's move, or the safe move (`Mover.move` plus the handler's fallback).
     /// `t_in` is when the request arrived (a time budget counts from there); `workspace` is
-    /// the calling thread's search tree.
+    /// the calling thread's search tree. No deadline but the snake's own budget: see
+    /// [`Snake::choose_until`].
     pub fn choose(&self, workspace: &mut Search, req: &Request, t_in: Instant) -> Choice {
+        self.choose_until(workspace, req, t_in, None)
+    }
+
+    /// [`Snake::choose`] whose search also stops at `deadline` (the best move so far is
+    /// played; a search that ends before it is unchanged).
+    pub fn choose_until(
+        &self,
+        workspace: &mut Search,
+        req: &Request,
+        t_in: Instant,
+        deadline: Option<Instant>,
+    ) -> Choice {
         let t0 = Instant::now();
         let id = req.root().get("game").and_then(|g| g.get("id"));
         let key = id.map(PyValue::key);
@@ -317,8 +358,12 @@ impl Snake {
             .map_err(SearchError::from)
             .and_then(|game| {
                 let mut noise = JaxKey::new(0).fold_in(index as u32).search_noise();
-                self.agent
-                    .search_game(workspace, &game, self.budget(t_in), &mut noise)
+                self.agent.search_game(
+                    workspace,
+                    &game,
+                    self.budget_until(t_in, deadline),
+                    &mut noise,
+                )
             });
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
         match result {

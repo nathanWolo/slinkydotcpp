@@ -217,13 +217,12 @@ fn stalled_bodies_do_not_delay_moves() {
     }
 }
 
-/// BUG (lib.rs `serve`: hyper's `http1::Builder::half_close` is left at its default,
+/// Fixed (lib.rs `serve`: hyper's `http1::Builder::half_close` was left at its default,
 /// false): a client that half-closes its connection after sending the whole request
 /// (shutdown of its write side, as `nc -N`, `curl` through some proxies, or a load balancer
 /// health check do) gets no answer at all: hyper sees the read EOF and drops the connection
 /// while the handler runs. Python's `http.server` answers it.
 #[test]
-#[ignore = "bug: a half-closed client (write side shut after the request) gets no answer"]
 fn half_closed_client_gets_its_answer() {
     let Some(dir) = run_dir() else { return };
     let srv = server_with(&[format!("s={dir}:simulations=64")], None, 2, None);
@@ -704,14 +703,14 @@ fn answers_within_the_deadline_under_load() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// BUG (main.rs / engine.rs: no check between `budget_ms` and `--answer-by-ms`): a time
-/// budget past the answer-by deadline makes every move the safe move. The search runs until
+/// Fixed (main.rs / engine.rs: there was no check between `budget_ms` and `--answer-by-ms`):
+/// a time budget past the answer-by deadline made every move the safe move. Now a time-budget
+/// search stops 20 ms before `answer_by`. The search runs until
 /// `t_in + budget` and the handler gives up at `t_in + answer_by` first, so a snake started
 /// as `--snake x=RUN:budget_ms=450` (inside Battlesnake's 500 ms) with the default
 /// `--answer-by-ms 400`, or any `budget_ms` from about 400 up to the accepted 10,000, never
 /// plays an agent move, silently (each move logged as `safe_move`, `no move after 400 ms`).
 #[test]
-#[ignore = "bug: budget_ms > answer-by-ms makes every answer the safe move, unchecked"]
 fn budget_at_the_deadline_still_plays_the_agent() {
     let Some(dir) = run_dir() else { return };
     let path = temp("budget.jsonl");
@@ -732,6 +731,41 @@ fn budget_at_the_deadline_still_plays_the_agent() {
         .filter(|l| l["agent"] == json!("safe_move"))
         .count();
     assert_eq!(safe, 0, "{} of {} moves were safe_move", safe, lines.len());
+}
+
+/// Every search stops at the request's deadline, `game.timeout` less the margin (100 ms) less
+/// 20 ms, and plays the agent's best move so far: a 2^20-simulation snake answers a 200 ms game
+/// after about 80 ms and a game without a timeout after about 380 ms, with the agent's move.
+#[test]
+fn game_timeout_bounds_every_search() {
+    let Some(dir) = run_dir() else { return };
+    let path = temp("timeout.jsonl");
+    let srv = server_with(
+        &[format!("big={dir}:simulations=1048576")],
+        Some(path.clone()),
+        2,
+        Some(Duration::from_millis(400)),
+    );
+    let mut req = example("duel");
+    for (timeout, want_ms) in [(json!(200), 80u64), (json!(null), 380), (json!(150), 30)] {
+        req["game"]["timeout"] = timeout.clone();
+        let t = Instant::now();
+        let (code, body) = post(srv.addr, "/big/move", &req.to_string());
+        let took = t.elapsed().as_millis() as u64;
+        assert_eq!(code, 200);
+        assert!(MOVES.contains(&move_of(&body).as_str()), "{body}");
+        assert!(
+            took >= want_ms && took < want_ms + 40,
+            "timeout {timeout}: answered after {took} ms"
+        );
+    }
+    let lines = log_lines(&srv, &path);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(lines.len(), 3);
+    assert!(
+        lines.iter().all(|l| l["agent"] != json!("safe_move")),
+        "{lines:?}"
+    );
 }
 
 /// A huge `--answer-by-ms` (the parser accepts any u64) must not overflow the deadline

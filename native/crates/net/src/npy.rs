@@ -4,7 +4,9 @@
 //! `numpy.savez` writes a zip whose entries are STORED (method 0). `savez_compressed` uses
 //! DEFLATE, which is rejected with a clear error. Only little-endian `<f4` and `<f8` (converted
 //! to `f32`) C-order arrays are accepted, which is all `unified.save_params`
-//! (`src/slinky/unified.py:666`) writes.
+//! (`src/slinky/unified.py:666`) writes. Every entry's CRC-32 (from the central directory) is
+//! checked, so a corrupted file (a bit flip on a failing disk, a truncated copy) is refused
+//! with an error instead of loading wrong weights.
 
 use crate::error::NetError;
 use std::collections::HashMap;
@@ -20,6 +22,34 @@ pub struct Array {
 
 fn err<T>(m: impl Into<String>) -> Result<T, NetError> {
     Err(NetError::Npz(m.into()))
+}
+
+/// The CRC-32 of zip (IEEE 802.3, reflected, polynomial 0xEDB88320).
+pub fn crc32(data: &[u8]) -> u32 {
+    const TABLE: [u32; 256] = {
+        let mut t = [0u32; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut k = 0;
+            while k < 8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+                k += 1;
+            }
+            t[i] = c;
+            i += 1;
+        }
+        t
+    };
+    let mut c = 0xFFFF_FFFFu32;
+    for &b in data {
+        c = TABLE[((c ^ u32::from(b)) & 0xFF) as usize] ^ (c >> 8);
+    }
+    c ^ 0xFFFF_FFFF
 }
 
 fn u16_at(b: &[u8], o: usize) -> Result<usize, NetError> {
@@ -58,6 +88,7 @@ pub fn parse_npz(bytes: &[u8]) -> Result<HashMap<String, Array>, NetError> {
             return err("bad central directory entry");
         }
         let method = u16_at(bytes, p + 10)?;
+        let crc = u32_at(bytes, p + 16)? as u32;
         let csize = u32_at(bytes, p + 20)?;
         let usize_ = u32_at(bytes, p + 24)?;
         let nlen = u16_at(bytes, p + 28)?;
@@ -85,6 +116,18 @@ pub fn parse_npz(bytes: &[u8]) -> Result<HashMap<String, Array>, NetError> {
             .checked_add(csize)
             .and_then(|end| bytes.get(start..end))
             .ok_or_else(|| NetError::Npz(format!("entry {name} runs past the end of the file")))?;
+        if usize_ != csize {
+            return err(format!(
+                "entry {name}: stored size {csize} differs from its size {usize_}"
+            ));
+        }
+        let actual = crc32(data);
+        if actual != crc {
+            return err(format!(
+                "entry {name} is corrupted: CRC-32 {actual:08x}, the archive says {crc:08x} \
+                 (copy the weights again)"
+            ));
+        }
         let key = name.strip_suffix(".npy").unwrap_or(&name).to_string();
         let arr = parse_npy(data).map_err(|e| match e {
             NetError::Npz(m) => NetError::Npz(format!("{key}: {m}")),
@@ -193,7 +236,9 @@ mod tests {
     fn tiny_npz(name: &str, npy: &[u8]) -> Vec<u8> {
         let mut z = Vec::new();
         let fname = format!("{name}.npy");
-        z.extend_from_slice(&[0x50, 0x4b, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let crc = crc32(npy).to_le_bytes();
+        z.extend_from_slice(&[0x50, 0x4b, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        z.extend_from_slice(&crc);
         z.extend_from_slice(&(npy.len() as u32).to_le_bytes());
         z.extend_from_slice(&(npy.len() as u32).to_le_bytes());
         z.extend_from_slice(&(fname.len() as u16).to_le_bytes());
@@ -201,9 +246,8 @@ mod tests {
         z.extend_from_slice(fname.as_bytes());
         z.extend_from_slice(npy);
         let cd = z.len();
-        z.extend_from_slice(&[
-            0x50, 0x4b, 1, 2, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        z.extend_from_slice(&[0x50, 0x4b, 1, 2, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        z.extend_from_slice(&crc);
         z.extend_from_slice(&(npy.len() as u32).to_le_bytes());
         z.extend_from_slice(&(npy.len() as u32).to_le_bytes());
         z.extend_from_slice(&(fname.len() as u16).to_le_bytes());
@@ -254,5 +298,22 @@ mod tests {
         z.truncate(n - 5);
         assert!(parse_npz(&z).is_err());
         assert!(parse_npy(b"\x93NUMPY\x01\x00\xff\xff").is_err());
+    }
+
+    #[test]
+    fn crc_is_checked() {
+        // The check value of CRC-32/ISO-HDLC.
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        let good = tiny_npz("a", &npy("(3,)", &[1., 2., 3.]));
+        assert!(parse_npz(&good).is_ok());
+        // Flip one bit of the last float's data: same structure, wrong checksum.
+        let mut bad = good.clone();
+        let at = good
+            .windows(4)
+            .position(|w| w == 3f32.to_le_bytes())
+            .unwrap();
+        bad[at] ^= 0x01;
+        let e = parse_npz(&bad).unwrap_err().to_string();
+        assert!(e.contains("corrupted"), "{e}");
     }
 }

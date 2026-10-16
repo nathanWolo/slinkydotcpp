@@ -458,12 +458,11 @@ fn survives_non_http_events() {
     }
 }
 
-/// An event whose base64 body does not decode. Lambda itself never sends one, but a panic
-/// inside `lambda_http`'s event conversion (`Body::from_maybe_encoded` calls `expect`) aborts
-/// the process under the workspace's `panic = "abort"`: the invocation gets no answer and the
-/// container's next request is a cold start.
+/// An event whose base64 body does not decode. Lambda itself never sends one. (Fixed: a panic
+/// inside `lambda_http`'s event conversion, `Body::from_maybe_encoded` calls `expect`, aborted
+/// the process under `panic = "abort"`; the event is now read as plain JSON and such a body is
+/// a 400.)
 #[test]
-#[ignore = "BUG: invalid base64 body with isBase64Encoded=true aborts the process in the default panic=abort build (lambda_http expect); survives with CARGO_PROFILE_RELEASE_PANIC=unwind"]
 fn bad_base64_body_does_not_kill_the_process() {
     let Some(run) = run_dir() else { return };
     let mut rt = Runtime::start(&weights_env(&run));
@@ -480,7 +479,55 @@ fn bad_base64_body_does_not_kill_the_process() {
         "no answer: {:?}",
         rt.logs()
     );
+    match out {
+        Outcome::Response(r) => assert_eq!(r["statusCode"], 400, "{r}"),
+        other => panic!("{other:?}"),
+    }
     assert!(rt.alive(), "process died: {:?}", rt.logs());
+    let req = examples()["requests"]["duel"].to_string();
+    let (c, v, _) = rt.call("POST", "/m/move", "", Some(&req), false);
+    assert!(c == 200 && is_move(&v));
+}
+
+/// A panic while answering a request (`DEBUG_PANIC`, in the search or in the handler around
+/// it) answers a move and the process keeps serving. Needs the binary built with
+/// `panic = "unwind"`, as the deploy build is (`CARGO_PROFILE_RELEASE_PANIC=unwind`); an
+/// `abort` build (the workspace default) prints SKIP: there a panic ends the container.
+#[test]
+fn a_panic_in_a_request_does_not_kill_the_process() {
+    let Some(run) = run_dir() else { return };
+    for (hook, id) in [("search", "boom-s"), ("handler", "boom-h")] {
+        let mut env = weights_env(&run);
+        env.push(("DEBUG_PANIC", format!("{hook}:{id}")));
+        let mut rt = Runtime::start(&env);
+        let mut req = examples()["requests"]["royale"].clone();
+        let ok = req.to_string();
+        let (c, _, _) = rt.call("GET", "/m", "", None, false);
+        assert_eq!(c, 200);
+        thread::sleep(Duration::from_millis(100));
+        let init = rt.logs().join("\n");
+        if init.contains("\"panic\":\"abort\"") {
+            eprintln!(
+                "SKIP: the binary is built with panic = abort; run the tests with \
+                 CARGO_PROFILE_RELEASE_PANIC=unwind (the deploy build's setting)"
+            );
+            return;
+        }
+        assert!(init.contains("\"panic\":\"unwind\""), "{init}");
+        req["game"]["id"] = json!(id);
+        for _ in 0..2 {
+            let (c, v, _) = rt.call("POST", "/m/move", "", Some(&req.to_string()), false);
+            assert!(c == 200 && is_move(&v), "{hook}: {c} {v}");
+        }
+        let (c, v, _) = rt.call("POST", "/m/move", "", Some(&ok), false);
+        assert!(c == 200 && is_move(&v), "{hook} after the panic");
+        assert!(rt.alive(), "{hook}: process died");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            rt.logs().iter().any(|l| l.contains("DEBUG_PANIC")),
+            "{hook}: the panic did not happen"
+        );
+    }
 }
 
 /// Missing weights at cold start: the function still starts and every move is a legal-ish move.

@@ -255,10 +255,9 @@ fn fuzzed_positions_always_answer() {
 }
 
 /// Python's lambda handler takes any `game.id` that exists (`req["game"]["id"]`, then logs it);
-/// the ladder server even plays without one. The native handler answers 400 (no move) when the
-/// id is not a string.
+/// the ladder server even plays without one. (Fixed: the native handler answered 400, no move,
+/// when the id was not a string.)
 #[test]
-#[ignore = "BUG: a /move whose game.id is not a string (number, null) gets HTTP 400 and no move; Python's handler answers a move"]
 fn non_string_game_id_still_gets_a_move() {
     let Some(run) = run_dir() else { return };
     let app = App::load(&settings(&run, &[("SIMULATIONS", "8")]));
@@ -271,12 +270,11 @@ fn non_string_game_id_still_gets_a_move() {
     }
 }
 
-/// The handler pre-parses the body with `serde_json` to find the game id, and answers 400 when
-/// that fails. `slinky_api::Request::from_json` reads requests with Python's `json.loads`
+/// The handler used to pre-parse the body with `serde_json` to find the game id, and answered
+/// 400 when that failed (fixed: it now reads the body as `slinky_api::Request`). `slinky_api::Request::from_json` reads requests with Python's `json.loads`
 /// semantics, and Python's handlers answer these with a move: a request the engine itself would
 /// read must not be refused by the pre-parse.
 #[test]
-#[ignore = "BUG: the serde_json pre-parse answers 400 (no move) to bodies Python and slinky_api accept (NaN, lone surrogate escapes, a BOM, nesting deeper than 128)"]
 fn pre_parse_accepts_what_the_engine_reads() {
     let Some(run) = run_dir() else { return };
     let app = App::load(&settings(&run, &[("SIMULATIONS", "8")]));
@@ -470,12 +468,11 @@ fn budget_with_threads_holds_in_every_mode() {
     }
 }
 
-/// Any accepted setting must answer within Battlesnake's 500 ms on this (fast) machine. Without
-/// `BUDGET_MS` nothing bounds the time: `SIMULATIONS` accepts up to 2^20, and the game's own
-/// `timeout` field is not read, so the move only ends at the tree's memory cap many seconds later
-/// (the Lambda times out and the engine plays its default move).
+/// Any accepted setting must answer within Battlesnake's 500 ms on this (fast) machine. (Fixed:
+/// without `BUDGET_MS` nothing bounded the time: `SIMULATIONS` accepts up to 2^20 and the
+/// game's own `timeout` was not read, so the move only ended at the tree's memory cap many
+/// seconds later. Now every search stops at `game.timeout - DEADLINE_MARGIN_MS`.)
 #[test]
-#[ignore = "BUG: SIMULATIONS without BUDGET_MS has no wall-clock bound (accepts 2^20; game.timeout ignored): a move can take seconds"]
 fn accepted_simulations_answer_in_time() {
     let Some(run) = run_dir() else { return };
     let e = engine(&run, &[("SIMULATIONS", "1048576")]);
@@ -490,7 +487,6 @@ fn accepted_simulations_answer_in_time() {
 
 /// A game with a shorter `timeout` than `BUDGET_MS` should be answered within the game's timeout.
 #[test]
-#[ignore = "BUG: the request's game.timeout is ignored; BUDGET_MS=400 answers a 200 ms game after about 400 ms"]
 fn game_timeout_caps_the_budget() {
     let Some(run) = run_dir() else { return };
     let e = engine(&run, &[("BUDGET_MS", "400")]);
@@ -734,11 +730,10 @@ fn broken_weights_load_as_errors() {
     );
 }
 
-/// One flipped bit in the weights' data (a failing disk, a bad copy) loads without an error: the
-/// npz reader does not check the zip entries' CRC-32, so the snake plays a corrupted network and
-/// logs `"ok": true`. The zip already carries the checksum that would catch it.
+/// One flipped bit in the weights' data (a failing disk, a bad copy) must be a load error.
+/// (Fixed: the npz reader did not check the zip entries' CRC-32, so the snake played a
+/// corrupted network and logged `"ok": true`.)
 #[test]
-#[ignore = "BUG: params.npz entry CRC-32 is not verified; a bit flip in the weight data loads silently"]
 fn corrupted_weight_data_is_a_load_error() {
     let Some(run) = run_dir() else { return };
     let config = std::fs::read(run.join("config.json")).unwrap();
@@ -791,4 +786,126 @@ fn threads_with_simulations_are_deterministic() {
             assert_eq!((&m1, &m1), (&m2, &m3), "{mode} turn {turn}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deadlines (the fix of the two time-budget bugs above).
+
+/// The deadline is `game.timeout - DEADLINE_MARGIN_MS` from the arrival, 500 ms when the request
+/// has no usable timeout; `BUDGET_MS` beyond it is cut; a request that arrived after its deadline
+/// is answered at once with one simulation's move.
+#[test]
+fn deadline_follows_the_game_timeout() {
+    let Some(run) = run_dir() else { return };
+    let base = examples()["requests"]["duel"].clone();
+    let with = |t: Value| {
+        let mut r = base.clone();
+        r["game"]["timeout"] = t;
+        r.to_string()
+    };
+    let e = engine(
+        &run,
+        &[("SIMULATIONS", "1048576"), ("DEADLINE_MARGIN_MS", "100")],
+    );
+    for (t, want) in [
+        (json!(500), 400u64),
+        (json!(300), 200),
+        (json!(80), 0),
+        (json!(null), 400),
+        (json!("500"), 400),
+        (json!(-5), 400),
+        (json!(250.7), 150),
+    ] {
+        let a = Instant::now();
+        let c = e.choose(&with(t.clone()), "g", "0", None, a);
+        let ms = a.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(c.by, By::Engine, "timeout {t}: {:?}", c.error);
+        assert_eq!(c.deadline_ms, want, "timeout {t}");
+        assert!(
+            c.cut,
+            "timeout {t}: not cut ({} simulations)",
+            c.simulations
+        );
+        assert!(
+            ms >= want as f64 - 1.0 && ms < want as f64 + 40.0,
+            "timeout {t}: answered after {ms:.0} ms"
+        );
+    }
+    // BUDGET_MS past the deadline is cut to it; below it, it applies.
+    let b = engine(&run, &[("BUDGET_MS", "450")]);
+    let c = b.choose(&with(json!(500)), "g", "0", None, Instant::now());
+    assert_eq!(c.deadline_ms, 350);
+    let c = b.choose(&with(json!(1000)), "g", "0", None, Instant::now());
+    assert_eq!(c.deadline_ms, 450);
+    // Arrived after the deadline: one simulation, the engine's move.
+    let late = Instant::now() - Duration::from_secs(1);
+    let t = Instant::now();
+    let c = e.choose(&with(json!(500)), "g", "0", None, late);
+    assert_eq!((c.by, c.simulations), (By::Engine, 1));
+    assert!(t.elapsed() < Duration::from_millis(40));
+}
+
+/// A fixed simulation count that fits in the deadline plays exactly as the plain agent: the
+/// deadline never changes a faithful move (every mode, 256 and 1024 simulations, two threads).
+#[test]
+fn deadline_keeps_the_faithful_search() {
+    let Some(run) = run_dir() else { return };
+    let ex = examples();
+    for (extra, sims) in [
+        (&[][..], 256usize),
+        (&[("SIMULATIONS", "1024")][..], 1024),
+        (&[("THREADS", "2")][..], 256),
+    ] {
+        let e = engine(&run, extra);
+        for mode in ["standard", "duel", "royale", "constrictor"] {
+            for turn in [0u64, 3, 17] {
+                let mut req = ex["requests"][mode].clone();
+                req["turn"] = json!(turn);
+                let body = req.to_string();
+                let c = e.choose(&body, "gid", &turn.to_string(), None, Instant::now());
+                assert_eq!(
+                    (c.by, c.simulations, c.cut),
+                    (By::Engine, sims, false),
+                    "{mode}"
+                );
+                // No deadline at all: an agent with the same budget.
+                let s = settings(&run, extra);
+                let agent = e.agent().unwrap();
+                let game = slinky_api::game_from_request(
+                    &slinky_api::Request::from_json(&body).unwrap(),
+                    None,
+                )
+                .unwrap();
+                let seed = tie_seed("gid", &turn.to_string());
+                let mut ws: Vec<slinky_search::Search> = (0..s.threads)
+                    .map(|_| slinky_search::Search::new())
+                    .collect();
+                let m = agent
+                    .search_game_threads(
+                        &mut ws,
+                        &game,
+                        slinky_search::Budget::simulations(sims),
+                        seed,
+                    )
+                    .unwrap();
+                assert_eq!(m.mv, c.mv, "{mode} turn {turn} {extra:?}");
+            }
+        }
+    }
+}
+
+/// A panic in the search of one request answers the safe move and leaves the engine working
+/// (in process: the test harness always unwinds; `tests/runtime.rs` checks the binary).
+#[test]
+fn search_panic_answers_the_safe_move() {
+    let Some(run) = run_dir() else { return };
+    let app = App::load(&settings(&run, &[("DEBUG_PANIC", "search:boom")]));
+    let mut req = examples()["requests"]["duel"].clone();
+    let ok = req.to_string();
+    req["game"]["id"] = json!("boom");
+    let (c, v) = mv(&app, "/m/move", &req.to_string());
+    assert_eq!(c, 200);
+    assert!(is_move(&v));
+    let (c, v) = mv(&app, "/m/move", &ok);
+    assert!(c == 200 && is_move(&v));
 }
