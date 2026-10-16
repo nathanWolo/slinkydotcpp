@@ -776,6 +776,13 @@ version = "0.1.0"
 [[package]]
 name = "slinky-search"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "slinky-api",
+ "slinky-net",
+ "slinky-obs",
+ "slinky-rules",
+]
 
 [[package]]
 name = "smallvec"
