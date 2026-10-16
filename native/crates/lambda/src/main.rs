@@ -16,6 +16,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// A request that reached the handler this many ms after the front end received it is logged.
+const LATE_MS: u64 = 25;
+
 /// `(method, raw path, body)` of a Function URL / API Gateway event; `Err` is the reply for a
 /// body that does not decode.
 fn request_of(event: &Value) -> Result<(String, String, String), (u16, String)> {
@@ -72,13 +75,41 @@ fn invocation_limit(deadline_ms: u64, now: Instant) -> Option<Instant> {
     Some(now + Duration::from_millis(deadline_ms.saturating_sub(epoch_ms)))
 }
 
+/// How long ago the Function URL front end received the request (`requestContext.timeEpoch`,
+/// ms since the epoch); 0 when the event has no such time (an invoke without a URL) or one
+/// more than 3 s old (longer than the function's timeout: not a real receipt time). The clocks
+/// may differ by a few ms, so a receipt time in the future counts as 0.
+fn front_end_lag(event: &Value) -> Duration {
+    let Some(received) = event["requestContext"]["timeEpoch"].as_u64() else {
+        return Duration::ZERO;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    match now.saturating_sub(received) {
+        lag @ 0..=3000 => Duration::from_millis(lag),
+        _ => Duration::ZERO,
+    }
+}
+
 fn handle(app: &App, event: LambdaEvent<Value>) -> Value {
-    let arrival = Instant::now();
-    let limit = invocation_limit(event.context.deadline, arrival);
+    let entry = Instant::now();
+    // The time budget and the deadline count from the front end's receipt, so a request that
+    // waited inside Lambda (a container start, a busy front end) searches less instead of
+    // answering late.
+    let lag = front_end_lag(&event.payload);
+    let arrival = entry.checked_sub(lag).unwrap_or(entry);
+    let limit = invocation_limit(event.context.deadline, entry);
     let (method, path, body) = match request_of(&event.payload) {
         Ok(r) => r,
         Err((code, text)) => return response(code, text),
     };
+    if lag >= Duration::from_millis(LATE_MS) {
+        println!(
+            "{}",
+            json!({"event": "late", "path": path, "lag_ms": lag.as_millis() as u64})
+        );
+    }
     match catch_unwind(AssertUnwindSafe(|| {
         app.handle_within(&method, &path, &body, arrival, limit)
     })) {

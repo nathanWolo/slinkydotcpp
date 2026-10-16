@@ -612,3 +612,65 @@ fn odd_paths_do_not_kill_the_process() {
         assert!(c == 200 && is_move(&v), "after {p:?}");
     }
 }
+
+/// A request the Function URL front end received a while ago (its `requestContext.timeEpoch`)
+/// searches only for what is left of the snake's time budget, counted from that receipt, and
+/// is logged as late; a receipt time more than 3 s old is not believed (the old behaviour).
+#[test]
+fn time_budget_counts_from_the_front_end_receipt() {
+    let Some(run) = run_dir() else { return };
+    let subdir = run.file_name().unwrap().to_str().unwrap().to_string();
+    let mut env = weights_env(&run);
+    env.retain(|(k, _)| *k != "SNAKES");
+    env.push(("SNAKES", format!("t={subdir}:budget_ms=300")));
+    let mut rt = Runtime::start(&env);
+    let body = examples()["requests"]["duel"].to_string();
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    };
+    let timed = |rt: &mut Runtime, received: u64| {
+        let mut ev = url_event("POST", "/t/move", "", Some(&body), false);
+        ev["requestContext"]["timeEpoch"] = json!(received);
+        let t = Instant::now();
+        let out = rt.invoke_raw(&ev);
+        let ms = t.elapsed().as_millis();
+        let Outcome::Response(r) = out else {
+            panic!("no answer: {:?}", rt.logs())
+        };
+        assert!(is_move(
+            &serde_json::from_str(r["body"].as_str().unwrap()).unwrap()
+        ));
+        ms
+    };
+    timed(&mut rt, now_ms()); // the first move loads nothing more but warms the caches
+    let fresh = timed(&mut rt, now_ms());
+    let late = timed(&mut rt, now_ms() - 250);
+    let stale = timed(&mut rt, now_ms() - 10_000);
+    assert!((280..450).contains(&fresh), "fresh request took {fresh} ms");
+    assert!(
+        late < 150,
+        "a request received 250 ms ago took {late} ms more"
+    );
+    assert!(
+        (280..450).contains(&stale),
+        "a 10 s old receipt time was believed: {stale} ms"
+    );
+    thread::sleep(Duration::from_millis(200)); // let stdout drain
+    let late_lines: Vec<Value> = rt
+        .logs()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["event"] == "late")
+        .collect();
+    // the first request may also be late: it waited for the process to start
+    let long: Vec<u64> = late_lines
+        .iter()
+        .filter_map(|v| v["lag_ms"].as_u64())
+        .filter(|&l| l >= 200)
+        .collect();
+    assert_eq!(long.len(), 1, "{late_lines:?}");
+    assert!(long[0] >= 250, "{late_lines:?}");
+}
