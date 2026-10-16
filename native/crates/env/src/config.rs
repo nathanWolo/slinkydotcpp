@@ -82,7 +82,9 @@ impl From<ApiError> for EnvError {
 
 /// A whole game's static configuration (`types.GameConfig` with its map): the rules config
 /// (board, seats, ruleset, hazard damage, shrink period, `max_turns`), the map, and the standard
-/// map's food settings. Always valid: built only through [`EnvConfig::new`] and the mode helpers.
+/// map's food settings. Always valid: built only through [`EnvConfig::new`], the mode helpers
+/// and [`EnvConfig::for_position`] (which may leave no room for a reset, see
+/// [`EnvConfig::can_reset`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EnvConfig {
     rules: GameConfig,
@@ -98,16 +100,24 @@ impl EnvConfig {
     /// Errors on the royale map without the royale ruleset (normalise it as the server does), and
     /// on a board where the engine's random placement has no room for every snake.
     pub fn new(rules: GameConfig, map: MapKind) -> Result<EnvConfig, EnvError> {
+        let env = EnvConfig::for_position(rules, map)?;
+        if !env.can_reset() {
+            return Err(EnvError::Config("not enough room to place snakes".into()));
+        }
+        Ok(env)
+    }
+
+    /// A game of `rules` on `map` that continues from a given position (a request, a saved
+    /// state) rather than from a reset: as [`EnvConfig::new`] without the check that the
+    /// engine's random placement has room for every snake, which only a new game needs (slinky
+    /// raises it at setup). [`EnvConfig::reset`] of such a config leaves the seats it has no
+    /// room for dead; see [`EnvConfig::can_reset`].
+    pub fn for_position(rules: GameConfig, map: MapKind) -> Result<EnvConfig, EnvError> {
         if map == MapKind::Royale && rules.ruleset() != Ruleset::Royale {
             return Err(EnvError::Config(format!(
                 "the royale map is played with the royale ruleset, not {:?}",
                 rules.ruleset().name()
             )));
-        }
-        if Placement::of(&rules) == Placement::Random
-            && (random_start_cells(&rules).count_ones() as usize) < rules.num_snakes()
-        {
-            return Err(EnvError::Config("not enough room to place snakes".into()));
         }
         debug_assert!(rules.num_snakes() <= MAX_SNAKES);
         Ok(EnvConfig {
@@ -141,6 +151,14 @@ impl EnvConfig {
             Mode::Standard | Mode::Duel => MapKind::Standard,
         };
         EnvConfig::new(rules, map)
+    }
+
+    /// Whether a new game can place every snake (always on square boards of side 7 or more;
+    /// elsewhere the random placement needs one even-parity cell per seat, not the centre).
+    /// [`EnvConfig::new`] only builds configs that can; [`EnvConfig::for_position`] may not.
+    pub fn can_reset(&self) -> bool {
+        Placement::of(&self.rules) == Placement::Fixed
+            || random_start_cells(&self.rules).count_ones() as usize >= self.rules.num_snakes()
     }
 
     /// Set the food settings: the spawn chance in percent (the engine spawns with probability
@@ -225,6 +243,10 @@ mod tests {
         assert!(EnvConfig::new(tiny, MapKind::Standard).is_ok());
         let tinier = GameConfig::new(2, 2, 3, Ruleset::Standard).unwrap();
         assert!(EnvConfig::new(tinier, MapKind::Standard).is_err());
+        // A position on that board needs no placement.
+        let pos = EnvConfig::for_position(tinier, MapKind::Standard).unwrap();
+        assert!(!pos.can_reset());
+        assert!(EnvConfig::for_position(std4, MapKind::Royale).is_err());
         assert_eq!(MapKind::from_name("empty").unwrap(), MapKind::Empty);
         assert!(MapKind::from_name("arcade_maze").is_err());
     }

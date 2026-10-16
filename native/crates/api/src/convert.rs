@@ -94,11 +94,30 @@ impl Game {
 /// fewer than 2 seats), then [`request_state`]. Every request Python answers with
 /// `safe_move` is an error here.
 pub fn game_from_request(req: &Request, starting_snakes: Option<usize>) -> Result<Game, ApiError> {
+    game_from_request_maps(req, starting_snakes, true)
+}
+
+/// [`game_from_request`] for a simulator rather than the ladder: the same conversion, except
+/// that the `empty` map is accepted under every ruleset (slinky's environment plays the
+/// standard and royale rulesets there; the Python server refuses them). The map does not change
+/// the rules config: the royale ruleset is still read from the ruleset name or the royale map.
+pub fn game_from_request_any_map(
+    req: &Request,
+    starting_snakes: Option<usize>,
+) -> Result<Game, ApiError> {
+    game_from_request_maps(req, starting_snakes, false)
+}
+
+fn game_from_request_maps(
+    req: &Request,
+    starting_snakes: Option<usize>,
+    server_maps: bool,
+) -> Result<Game, ApiError> {
     check_sizes(req)?;
     if let Some(id) = req.root().get("game").and_then(|g| g.get("id")) {
         id.key()?; // `self._games.get(id)` needs a hashable id
     }
-    let config = game_config(req, starting_snakes)?;
+    let config = game_config_maps(req, starting_snakes, server_maps)?;
     let state = request_state(req, &config)?;
     Ok(Game {
         mode: config.mode(),
@@ -194,6 +213,15 @@ fn in_closed(x: &PyValue, lo: i128, hi: i128) -> Result<bool, ApiError> {
 /// than 4 seats; Python plays some of those with its heuristic agent). Errors with
 /// [`ApiError::BadRequest`] where Python raises.
 pub fn game_config(req: &Request, starting_snakes: Option<usize>) -> Result<GameConfig, ApiError> {
+    game_config_maps(req, starting_snakes, true)
+}
+
+/// [`game_config`]; `server_maps` false accepts the `empty` map under every ruleset.
+fn game_config_maps(
+    req: &Request,
+    starting_snakes: Option<usize>,
+    server_maps: bool,
+) -> Result<GameConfig, ApiError> {
     let root = req.root();
     let empty = PyValue::Dict(Vec::new());
     let game = root.get("game").unwrap_or(&empty);
@@ -218,7 +246,7 @@ pub fn game_config(req: &Request, starting_snakes: Option<usize>) -> Result<Game
         ) => (n, m),
         (n, m) => return unsupported(format!("ruleset {n:?} on map {m:?}")),
     };
-    if map == "empty" && name != "constrictor" {
+    if server_maps && map == "empty" && name != "constrictor" {
         return unsupported("the empty map is only played with constrictor".into());
     }
     let royale = name == "royale" || map == "royale";
@@ -671,6 +699,29 @@ mod tests {
         assert_eq!(s.length[..2], [3, 3]);
         assert!(s.food_at(c, 0, 1) && !s.done && s.alive[..2] == [true, true]);
         assert!(game.is_network_board());
+    }
+
+    #[test]
+    fn any_map_accepts_the_empty_map_under_every_ruleset() {
+        for name in ["standard", "royale"] {
+            let mut v = duel_json();
+            v["game"]["map"] = json!("empty");
+            v["game"]["ruleset"]["name"] = json!(name);
+            let req = Request::from_value(&v).unwrap();
+            assert!(matches!(
+                game_from_request(&req, None),
+                Err(ApiError::Unsupported(_))
+            ));
+            let game = game_from_request_any_map(&req, None).unwrap();
+            let mut on_standard = v.clone();
+            on_standard["game"]["map"] = json!("standard");
+            assert_eq!(Ok(game), game_of(&on_standard, None), "{name}");
+        }
+        // Everything else is the server's conversion.
+        let mut v = duel_json();
+        v["game"]["map"] = json!("arcade_maze");
+        let req = Request::from_value(&v).unwrap();
+        assert!(game_from_request_any_map(&req, None).is_err());
     }
 
     #[test]

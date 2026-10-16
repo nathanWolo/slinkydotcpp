@@ -925,9 +925,9 @@ fn snake_json(id: &str, body: &[(i32, i32)]) -> serde_json::Value {
 
 /// A request on a board where the env could not *reset* (random placement needs one even cell
 /// per seat) is still a valid position to continue from: `from_request` should accept it as the
-/// API crate does, since nothing is placed.
+/// API crate does, since nothing is placed. (Fixed: it builds the env with
+/// `EnvConfig::for_position`, which skips the reset-time placement check.)
 #[test]
-#[ignore = "BUG env-1: from_request refuses mid-game positions on small boards because EnvConfig::new applies the reset-time placement check"]
 fn from_request_accepts_small_boards_it_could_not_reset() {
     // 3x2 board, 3 snakes: even-parity cells other than the centre (1, 0) are (0, 0), (2, 0)
     // and (1, 1): 3 cells, enough. 2x2 with 3 snakes: (1, 1) only.
@@ -948,8 +948,9 @@ fn from_request_accepts_small_boards_it_could_not_reset() {
 }
 
 /// `to_request_json` then `from_request` keeps the environment for every env the crate builds.
+/// (Fixed: the map comes from the request's map name, and the `empty` map is read under every
+/// ruleset through `slinky_api::game_from_request_any_map`.)
 #[test]
-#[ignore = "BUG env-2: to_request_json/from_request do not round-trip the royale ruleset on the standard or empty map"]
 fn request_round_trip_keeps_the_env() {
     let base = GameConfig::new(11, 11, 4, Ruleset::Royale).unwrap();
     for map in [MapKind::Standard, MapKind::Empty] {
@@ -1348,12 +1349,11 @@ fn malformed_requests_never_panic() {
 
 /// A scripted [`EnvRandom`] (the trait invites overriding `below` to script choices) that breaks
 /// the `0..n` contract must not corrupt the state: no food outside the spawn mask, no panic.
-/// Today `pick_cell` turns `below(n) == n` into cell 128 (`nth_set_bit`), and `spawn_food` then
+/// (Fixed: every choice goes through range-checked helpers.) It used to be that `pick_cell` turned `below(n) == n` into cell 128 (`nth_set_bit`), and `spawn_food` then
 /// shifts `1u128 << 128`: a panic with overflow checks, food on cell 0 (under a snake here)
 /// without them. `place_initial_food` indexes `allowed[below(k)]`, which panics at 4 and picks
 /// the stale cell 0 for k..4.
 #[test]
-#[ignore = "BUG env-3: an out-of-contract EnvRandom::below makes spawn_food place food at cell 0 (release) or panic on 1u128 << 128 (debug)"]
 fn out_of_range_choices_do_not_corrupt_the_state() {
     struct OutOfRange;
     impl EnvRandom for OutOfRange {

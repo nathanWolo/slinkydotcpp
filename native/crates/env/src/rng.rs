@@ -38,7 +38,7 @@ pub trait EnvRandom {
     /// The standard map's spawn roll, uniform in `1..=100`. The engine spawns a food when
     /// `roll < food_spawn_chance` (`100 - rand.Intn(100) < chance`, maps.py:344-356).
     fn food_roll(&mut self) -> i32 {
-        100 - self.below(100) as i32
+        100 - uniform(self, 100) as i32
     }
 
     /// A uniformly random set bit of `mask` (a cell index), or `None` when `mask` is 0.
@@ -47,14 +47,41 @@ pub trait EnvRandom {
         if n == 0 {
             return None;
         }
-        Some(nth_set_bit(mask, self.below(n)))
+        Some(nth_set_bit(mask, uniform(self, n)))
     }
 
     /// A royale shrink side, uniform in `0..4` (0 left, 1 right, 2 bottom, 3 top;
     /// `maps._random_sides`, maps.py:379-381).
     fn side(&mut self) -> i8 {
-        self.below(4) as i8
+        uniform(self, 4) as i8
     }
+}
+
+/// [`EnvRandom::below`] kept inside `0..n` (0 when `n == 0`) even when an overriding
+/// implementation breaks the contract (a value `k >= n` becomes `k % n`), so a scripted
+/// generator can never make the env index or shift out of range.
+#[inline]
+pub(crate) fn uniform<R: EnvRandom + ?Sized>(rng: &mut R, n: u32) -> u32 {
+    let k = rng.below(n);
+    if k < n {
+        k
+    } else {
+        k.checked_rem(n).unwrap_or(0)
+    }
+}
+
+/// [`EnvRandom::pick_cell`] kept to the set bits of `mask`: `None` when the generator answers
+/// `None` (no more picks) or a cell that is not in `mask` (an out-of-contract override).
+#[inline]
+pub(crate) fn pick_in<R: EnvRandom + ?Sized>(rng: &mut R, mask: u128) -> Option<usize> {
+    rng.pick_cell(mask)
+        .filter(|&c| c < 128 && (mask >> c) & 1 == 1)
+}
+
+/// [`EnvRandom::side`] kept in `0..4` (an out-of-range side is reduced modulo 4).
+#[inline]
+pub(crate) fn side_of<R: EnvRandom + ?Sized>(rng: &mut R) -> i8 {
+    rng.side().rem_euclid(4)
 }
 
 /// The index of the `k`-th set bit of `mask` (0-based, from the least significant bit).

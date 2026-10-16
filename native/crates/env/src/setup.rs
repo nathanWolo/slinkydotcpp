@@ -14,7 +14,7 @@
 use slinky_rules::{GameConfig, GameState, MAX_SNAKES};
 
 use crate::EnvConfig;
-use crate::rng::EnvRandom;
+use crate::rng::{EnvRandom, pick_in, side_of, uniform};
 
 /// Body length of a new snake (types.py:36).
 pub const START_LENGTH: usize = 3;
@@ -75,19 +75,30 @@ pub fn random_start_cells(config: &GameConfig) -> u128 {
 
 fn shuffle<R: EnvRandom + ?Sized>(rng: &mut R, items: &mut [(i32, i32)]) {
     for i in (1..items.len()).rev() {
-        let j = rng.below(i as u32 + 1) as usize;
+        let j = uniform(rng, i as u32 + 1) as usize;
         items.swap(i, j);
     }
 }
 
 /// Start points of seats `0..num_snakes` (`maps.place_snakes`). Entries past the seat count are
-/// `(0, 0)`.
+/// `(0, 0)`, and so are the seats random placement has no room for (a board
+/// [`EnvConfig::new`] refuses, see [`EnvConfig::can_reset`]).
 pub fn place_snakes<R: EnvRandom + ?Sized>(
     config: &GameConfig,
     rng: &mut R,
 ) -> [(i32, i32); MAX_SNAKES] {
+    place_seats(config, rng).0
+}
+
+/// [`place_snakes`] and the number of seats placed (seats `0..placed`; fewer than the seat
+/// count only when random placement runs out of room).
+fn place_seats<R: EnvRandom + ?Sized>(
+    config: &GameConfig,
+    rng: &mut R,
+) -> ([(i32, i32); MAX_SNAKES], usize) {
     let n = config.num_snakes();
     let mut out = [(0, 0); MAX_SNAKES];
+    let mut placed = n;
     match Placement::of(config) {
         Placement::Fixed => {
             let (mut corners, mut cardinals) = fixed_start_points(config);
@@ -95,7 +106,7 @@ pub fn place_snakes<R: EnvRandom + ?Sized>(
             shuffle(rng, &mut cardinals);
             // Corners first or cardinals first, 50/50; with at most 4 seats only the first
             // group is used.
-            let first = if rng.below(2) == 1 {
+            let first = if uniform(rng, 2) == 1 {
                 corners
             } else {
                 cardinals
@@ -104,16 +115,19 @@ pub fn place_snakes<R: EnvRandom + ?Sized>(
         }
         Placement::Random => {
             let mut free = random_start_cells(config);
-            for slot in out.iter_mut().take(n) {
-                // EnvConfig::new checked there is room for every seat.
-                if let Some(c) = rng.pick_cell(free) {
-                    free &= !(1u128 << c);
-                    *slot = config.xy(c);
-                }
+            for (seat, slot) in out.iter_mut().enumerate().take(n) {
+                // EnvConfig::new checked there is room for every seat; a position's config
+                // (EnvConfig::for_position) may have less.
+                let Some(c) = pick_in(rng, free) else {
+                    placed = seat;
+                    break;
+                };
+                free &= !(1u128 << c);
+                *slot = config.xy(c);
             }
         }
     }
-    out
+    (out, placed)
 }
 
 /// The diagonal neighbours of `head` allowed for starting food (`_fixed_food_candidates`): on
@@ -191,7 +205,7 @@ fn place_initial_food<R: EnvRandom + ?Sized>(
                 }
             }
             if k > 0 {
-                let c = allowed[rng.below(k as u32) as usize];
+                let c = allowed[uniform(rng, k as u32) as usize];
                 state.food |= 1u128 << c;
             }
         }
@@ -202,7 +216,7 @@ fn place_initial_food<R: EnvRandom + ?Sized>(
     } else {
         let mut free = spawn_mask(config, state, true);
         for _ in 0..n.min(config.cells()) {
-            match rng.pick_cell(free) {
+            match pick_in(rng, free) {
                 Some(c) => {
                     state.food |= 1u128 << c;
                     free &= !(1u128 << c);
@@ -218,11 +232,14 @@ impl EnvConfig {
     /// length 3 stacked on their start cell and full health, starting food unless the map is
     /// `empty` (removed again under constrictor, which the engine runs once at setup), random
     /// shrink sides under the royale ruleset, no hazards, `done` if at most one snake is alive.
+    ///
+    /// On a config from [`EnvConfig::for_position`] whose board has no room for every seat
+    /// (see [`EnvConfig::can_reset`]), the seats that do not fit stay dead (slinky raises).
     pub fn reset<R: EnvRandom + ?Sized>(&self, rng: &mut R) -> GameState {
         let config = self.rules();
         let mut state = GameState::new(config);
-        let points = place_snakes(config, rng);
-        for (seat, &p) in points.iter().enumerate().take(config.num_snakes()) {
+        let (points, placed) = place_seats(config, rng);
+        for (seat, &p) in points.iter().enumerate().take(placed) {
             // Cannot fail: the seat is in range and the body is 3 segments.
             let _ = state.set_snake(
                 config,
@@ -240,7 +257,7 @@ impl EnvConfig {
         }
         if self.has_sides() {
             for s in state.sides[..config.num_sides()].iter_mut() {
-                *s = rng.side();
+                *s = side_of(rng);
             }
         }
         state.refresh_done(config);
@@ -294,6 +311,21 @@ mod tests {
             assert_ne!(s.head[0], s.head[1]);
             assert_eq!(s.hazard, [0; slinky_rules::MAX_CELLS]);
             assert_eq!(s.sides, [0; slinky_rules::MAX_SIDES]);
+        }
+    }
+
+    #[test]
+    fn reset_without_room_leaves_the_extra_seats_dead() {
+        // 2x2, 3 seats: random placement has one cell, (1, 1).
+        let cfg = GameConfig::new(2, 2, 3, Ruleset::Standard).unwrap();
+        let env = EnvConfig::for_position(cfg, MapKind::Standard).unwrap();
+        assert!(!env.can_reset());
+        let mut rng = Rng::new(1);
+        for _ in 0..20 {
+            let s = env.reset(&mut rng);
+            assert_eq!(s.alive[..3], [true, false, false]);
+            assert_eq!(s.head[0], [1, 1]);
+            assert!(s.done);
         }
     }
 

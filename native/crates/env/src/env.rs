@@ -8,7 +8,7 @@
 
 use slinky_rules::{Actions, GameState, MAX_SNAKES, royale_hazards};
 
-use crate::rng::{EnvRandom, Rng};
+use crate::rng::{EnvRandom, Rng, pick_in};
 use crate::setup::spawn_mask;
 use crate::{EnvConfig, MapKind};
 
@@ -117,7 +117,7 @@ impl EnvConfig {
         let mut free = self.spawn_mask(state);
         let mut placed = 0;
         for _ in 0..need {
-            match rng.pick_cell(free) {
+            match pick_in(rng, free) {
                 Some(c) => {
                     state.food |= 1u128 << c;
                     free &= !(1u128 << c);

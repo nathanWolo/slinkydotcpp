@@ -59,8 +59,8 @@ mod safe;
 mod types;
 
 pub use convert::{
-    Game, MAX_SETTING, check_sizes, game_config, game_from_request, request_state, royale_sides,
-    setting,
+    Game, MAX_SETTING, check_sizes, game_config, game_from_request, game_from_request_any_map,
+    request_state, royale_sides, setting,
 };
 pub use error::ApiError;
 pub use py::{PyErr, PyValue};

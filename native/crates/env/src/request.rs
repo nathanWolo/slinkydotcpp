@@ -1,41 +1,45 @@
 //! Games from real positions: a Battlesnake `/move` request to an environment and a state, and a
 //! state back to a request.
 //!
-//! [`from_request`] builds on `slinky_api::game_from_request` (the Python server's exact
-//! conversion: our snake in seat 0, dead seats padded in when the starting snake count is
+//! [`from_request`] builds on `slinky_api::game_from_request_any_map` (the Python server's exact
+//! conversion, plus the `empty` map under every ruleset: our snake in seat 0, dead seats padded in when the starting snake count is
 //! known) and adds what a simulator needs beyond the search: the map (`empty` for the official
 //! constrictor ladder), the food settings, and royale shrink sides for the shrinks the request
 //! has not shown yet (the server leaves them unknown; here they are drawn uniformly, as at reset).
 
 use serde_json::{Value, json};
-use slinky_api::{Request, game_from_request, setting};
-use slinky_rules::{GameState, Ruleset};
+use slinky_api::{Request, game_from_request_any_map, setting};
+use slinky_rules::GameState;
 
-use crate::rng::EnvRandom;
+use crate::rng::{EnvRandom, side_of};
 use crate::{EnvConfig, EnvError, MapKind};
 
 /// The environment and state of a request's game (`starting_snakes`: the snake count at
 /// `/start`, see `slinky_api::game_from_request`). Royale sides not yet shown are drawn from
 /// `rng`; everything else is deterministic.
 ///
-/// The map is royale for any royale game, `empty` for constrictor on the `empty` map, else
-/// standard. `foodSpawnChance` and `minimumFood` are read from the ruleset settings with the
+/// The map is the request's (`standard` when missing). Unlike the Python server, which plays
+/// the `empty` map only under constrictor, every ruleset is accepted on it, as the environment
+/// simulates them (so [`to_request_json`] round-trips every [`EnvConfig`]). The env is built
+/// with [`EnvConfig::for_position`]: a position on a board too small for a reset is accepted. `foodSpawnChance` and `minimumFood` are read from the ruleset settings with the
 /// server's leniency (defaults 15 and 1).
 pub fn from_request<R: EnvRandom + ?Sized>(
     req: &Request,
     starting_snakes: Option<usize>,
     rng: &mut R,
 ) -> Result<(EnvConfig, GameState), EnvError> {
-    let game = game_from_request(req, starting_snakes)?;
+    let game = game_from_request_any_map(req, starting_snakes)?;
     let rules = game.config;
     let g = req.root().get("game");
     let map_name = g
         .and_then(|g| g.get("map"))
         .and_then(|m| m.as_str())
         .unwrap_or("standard");
-    let map = match rules.ruleset() {
-        Ruleset::Royale => MapKind::Royale,
-        Ruleset::Constrictor if map_name == "empty" => MapKind::Empty,
+    // The conversion read the ruleset (the royale map implies the royale ruleset); the map name
+    // picks the map the env plays it on.
+    let map = match map_name {
+        "royale" => MapKind::Royale,
+        "empty" => MapKind::Empty,
         _ => MapKind::Standard,
     };
     let settings = g
@@ -44,12 +48,13 @@ pub fn from_request<R: EnvRandom + ?Sized>(
         .filter(|s| s.truthy());
     let chance = setting(settings, "foodSpawnChance", 15)?;
     let minimum = setting(settings, "minimumFood", 1)?;
-    let env = EnvConfig::new(rules, map)?.with_food(chance, minimum);
+    // A position needs no room for a reset's random placement.
+    let env = EnvConfig::for_position(rules, map)?.with_food(chance, minimum);
     let mut state = game.state;
     if env.has_sides() {
         for s in state.sides[..rules.num_sides()].iter_mut() {
             if !(0..4).contains(s) {
-                *s = rng.side();
+                *s = side_of(rng);
             }
         }
     }
