@@ -39,7 +39,10 @@ static START_SNAKES: Mutex<Option<StartCache>> = Mutex::new(None);
 
 fn cache_put(game: &str, snakes: usize) {
     let mut g = START_SNAKES.lock().unwrap_or_else(|e| e.into_inner());
-    let c = g.get_or_insert_with(|| StartCache { map: HashMap::new(), order: VecDeque::new() });
+    let c = g.get_or_insert_with(|| StartCache {
+        map: HashMap::new(),
+        order: VecDeque::new(),
+    });
     if c.map.insert(game.to_string(), snakes).is_none() {
         c.order.push_back(game.to_string());
         while c.order.len() > MAX_CACHED_GAMES {
@@ -101,7 +104,10 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     let method = event.method().as_str().to_string();
     let path = event.raw_http_path().to_string();
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let Some(&(name, color)) = parts.first().and_then(|p| SNAKES.iter().find(|(n, _)| n == p)) else {
+    let Some(&(name, color)) = parts
+        .first()
+        .and_then(|p| SNAKES.iter().find(|(n, _)| n == p))
+    else {
         return json_response(404, json!({"error": "not found"}));
     };
     if parts.len() > 2 {
@@ -142,7 +148,9 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
                     ("up".to_string(), "fallback")
                 }
                 Err(e) => {
-                    log(json!({"snake": name, "error": format!("{e}").chars().take(300).collect::<String>()}));
+                    log(
+                        json!({"snake": name, "error": format!("{e}").chars().take(300).collect::<String>()}),
+                    );
                     ("up".to_string(), "fallback")
                 }
             };
@@ -163,10 +171,15 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         }
         _ => {
             let me = &req["you"]["id"];
-            let left = req["board"]["snakes"].as_array().cloned().unwrap_or_default();
+            let left = req["board"]["snakes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             let won = left.len() == 1 && &left[0]["id"] == me;
-            log(json!({"snake": name, "game": game, "event": "end", "turn": turn,
-                       "result": if won { "won" } else { "lost or drew" }}));
+            log(
+                json!({"snake": name, "game": game, "event": "end", "turn": turn,
+                       "result": if won { "won" } else { "lost or drew" }}),
+            );
             json_response(200, json!({}))
         }
     }
