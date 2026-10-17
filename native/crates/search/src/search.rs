@@ -108,6 +108,9 @@ pub enum StopReason {
     MemoryLimit,
     /// Under a deadline, the root's game is over or its whole tree is solved (module docs).
     Solved,
+    /// The seat set by [`Search::set_stop_when_decided`] has a move that the simulations left
+    /// cannot overtake, so running them would not change that seat's move.
+    Decided,
 }
 
 /// Statistics of the last [`Search::run`] of a workspace.
@@ -266,6 +269,19 @@ impl Node {
     fn solved(&self) -> bool {
         self.terminal || self.open == 0
     }
+
+    /// This node's state and evaluation as a new node under `parent`, without statistics: the
+    /// node [`Search::make_node`] makes for the same state.
+    fn fresh(&self, parent: u32) -> Node {
+        Node {
+            visits: [[0; NUM_ACTIONS]; MAX_SNAKES],
+            value_sum: [[0.0; NUM_ACTIONS]; MAX_SNAKES],
+            value_sum_wide: [[0.0; NUM_ACTIONS]; MAX_SNAKES],
+            parent,
+            open: open_joints(&self.legal) as u16,
+            ..*self
+        }
+    }
 }
 
 /// The mean value of a move from its sums and visits (`visits > 0`): the f32 sum in Python's
@@ -307,6 +323,25 @@ pub struct Search {
     stats: SearchStats,
     /// Seats of the last run.
     seats: usize,
+    /// Stop once this seat's final move is decided ([`Search::set_stop_when_decided`]).
+    decide: Option<usize>,
+    /// Keep the last tree and reuse its evaluations ([`Search::set_reuse`]).
+    reuse: bool,
+    /// The previous run's tree (when reusing), and what it was searched with.
+    prev: Prev,
+    /// Per node of the current tree, the node of `prev` with the same state, or [`NONE`].
+    twin: Vec<u32>,
+}
+
+/// The tree of a workspace's previous run, kept for [`Search::set_reuse`].
+#[derive(Debug, Default)]
+struct Prev {
+    nodes: Vec<Node>,
+    children: Vec<u32>,
+    /// `(game config, search settings, evaluator key)` of the last *completed* run, whose tree
+    /// is in [`Search::nodes`] until the next run swaps it in here; `None` when there is none
+    /// to reuse.
+    key: Option<(GameConfig, SearchConfig, u64)>,
 }
 
 impl Default for Search {
@@ -319,6 +354,10 @@ impl Default for Search {
             node_limit: usize::MAX,
             stats: SearchStats::default(),
             seats: 0,
+            decide: None,
+            reuse: false,
+            prev: Prev::default(),
+            twin: Vec::new(),
         }
     }
 }
@@ -346,6 +385,78 @@ impl Search {
     /// The tree memory cap in bytes.
     pub fn memory_limit(&self) -> usize {
         self.memory_limit
+    }
+
+    /// Stop a run early once `seat`'s final move cannot change: its most visited root move leads
+    /// every other legal move by more than the simulations left, so the move is the one the
+    /// full run would choose (at once when the seat has at most one legal move). Only that seat's
+    /// move is kept: the other seats' moves, the visits and the policy are those of the shorter
+    /// run ([`StopReason::Decided`]). `None` (the default) runs the whole budget.
+    pub fn set_stop_when_decided(&mut self, seat: Option<usize>) {
+        self.decide = seat;
+    }
+
+    /// Keep each run's tree for the next run, which then copies the evaluation of every node
+    /// it creates with the state of a node of the kept tree instead of calling the evaluator
+    /// (the next position of a game is usually in the last tree: the root's child for the moves
+    /// played, unless food spawned). The results are bit-identical to a run without reuse: a
+    /// node is reused only along the kept tree's own edges from a node with the same state, with
+    /// the same game config, settings and [`Evaluator::reuse_key`] (an evaluator without a key
+    /// never reuses). The kept tree costs as much memory as the last tree. Off by default.
+    pub fn set_reuse(&mut self, on: bool) {
+        self.reuse = on;
+        if !on {
+            self.prev = Prev::default();
+        }
+    }
+
+    /// Whether runs reuse the previous tree's evaluations ([`Search::set_reuse`]).
+    pub fn reuse(&self) -> bool {
+        self.reuse
+    }
+
+    /// Nodes of the last run whose evaluation came from the previous tree.
+    pub fn reused_nodes(&self) -> usize {
+        self.twin.iter().filter(|&&t| t != NONE).count()
+    }
+
+    /// The seat set by [`Search::set_stop_when_decided`].
+    pub fn stop_when_decided(&self) -> Option<usize> {
+        self.decide
+    }
+
+    /// Whether `seat`'s final move is fixed whatever the `left` simulations do (see
+    /// [`Search::set_stop_when_decided`] and [`summarize`]). Each simulation adds one visit to one
+    /// of the seat's root moves. The final move is the most visited one, where moves within
+    /// `1e-6` of the top visit share tie and are split by mean value; the lead must therefore
+    /// also exceed that tolerance at the largest possible total.
+    fn decided(&self, seat: usize, left: usize) -> bool {
+        let root = &self.nodes[0];
+        let legal = &root.legal[seat];
+        let count = legal.iter().filter(|&&l| l).count();
+        if count <= 1 {
+            return true;
+        }
+        let visits = &root.visits[seat];
+        let mut top = 0i64;
+        let mut second = 0i64;
+        let mut total = 0i64;
+        for a in 0..NUM_ACTIONS {
+            if legal[a] {
+                let v = i64::from(visits[a]);
+                total += v;
+                if v > top {
+                    second = top;
+                    top = v;
+                } else if v > second {
+                    second = v;
+                }
+            }
+        }
+        let left = left as i64;
+        // 1 visit is a share of 1 / total; f32 rounding of the shares is far below 1e-6 here.
+        let tolerance = (total + left) / 250_000 + 1;
+        top > second + left + tolerance
     }
 
     /// Statistics of the last [`Search::run`] (zero before the first).
@@ -415,8 +526,29 @@ impl Search {
         self.node_limit = (self.memory_limit / per_node).max(1);
         self.seats = n;
         self.stats = SearchStats::default();
+        let key = evaluator
+            .reuse_key()
+            .filter(|_| self.reuse)
+            .map(|k| (*config, *settings, k));
+        if key.is_some() && self.prev.key == key {
+            std::mem::swap(&mut self.nodes, &mut self.prev.nodes);
+            std::mem::swap(&mut self.children, &mut self.prev.children);
+        } else {
+            self.prev = Prev::default();
+        }
+        // Describes the tree in `nodes` from here on: none until this run completes.
+        self.prev.key = None;
         self.nodes.clear();
         self.children.clear();
+        self.twin.clear();
+        // The previous tree's node with the root's state (the root's child for the moves played,
+        // or the root itself for a repeated position), cheapest test first.
+        let root_twin = self
+            .prev
+            .nodes
+            .iter()
+            .position(|nd| nd.state.turn == state.turn && nd.state == *state)
+            .map_or(NONE, |i| i as u32);
         // A reused workspace keeps the capacity of its biggest tree: give back what this game's
         // limit does not allow (`push` keeps both within it from here on).
         let max_nodes = self.node_limit.max(2);
@@ -438,8 +570,12 @@ impl Search {
         self.nodes.reserve_exact(expect);
         self.children.reserve_exact(expect.saturating_mul(joints));
 
-        let root = self.make_node(0, NONE, *state, config, settings, evaluator)?;
+        let root = match root_twin {
+            NONE => self.make_node(0, NONE, *state, config, settings, evaluator)?,
+            t => self.prev.nodes[t as usize].fresh(NONE),
+        };
         self.push(root, joints);
+        self.twin.push(root_twin);
 
         let mut deepest = 0usize;
         let mut sims = 0usize;
@@ -462,6 +598,14 @@ impl Search {
                     break;
                 }
             }
+            if let Some(seat) = self.decide
+                && seat < n
+                && !self.nodes[0].terminal
+                && self.decided(seat, sims_cap - sim)
+            {
+                stop = StopReason::Decided;
+                break;
+            }
             let bits = noise.bits(sim, n).ok_or(SearchError::Noise { sim })?;
             sims += 1;
             if self.nodes[0].terminal {
@@ -478,12 +622,21 @@ impl Search {
                 depth += 1;
                 let child = self.children[node * joints + joint];
                 if child == NONE {
-                    // (c) Expansion and (d) evaluation.
-                    let actions: Actions = moves;
-                    let next = self.nodes[node].state.child(config, &actions);
+                    // (c) Expansion and (d) evaluation, or the same node of the previous tree.
                     let id = self.nodes.len();
-                    let new = self.make_node(id, node as u32, next, config, settings, evaluator)?;
+                    let twin = match self.twin[node] {
+                        NONE => NONE,
+                        t => self.prev.children[t as usize * joints + joint],
+                    };
+                    let new = if twin == NONE {
+                        let actions: Actions = moves;
+                        let next = self.nodes[node].state.child(config, &actions);
+                        self.make_node(id, node as u32, next, config, settings, evaluator)?
+                    } else {
+                        self.prev.nodes[twin as usize].fresh(node as u32)
+                    };
                     self.push(new, joints);
+                    self.twin.push(twin);
                     self.children[node * joints + joint] = id as u32;
                     if new.solved() {
                         self.close(node);
@@ -509,6 +662,8 @@ impl Search {
             }
         }
         let out = self.output(n, deepest, sims);
+        // The next run may reuse this tree (it swaps it into `prev`).
+        self.prev.key = key;
         self.stats = SearchStats {
             simulations: sims,
             nodes: self.nodes.len(),
@@ -600,10 +755,7 @@ impl Search {
                 Some(Prior::Uniform) | None => uniform_prior(&legal[p]),
             };
         }
-        // `select` picks one of a seat's legal moves, or move 0 when it has none.
-        let open = (0..n)
-            .map(|p| legal[p].iter().filter(|&&l| l).count().max(1))
-            .product::<usize>();
+        let open = open_joints(&legal);
         Ok(Node {
             state,
             legal,
@@ -736,6 +888,15 @@ pub(crate) fn summarize(
         out.legal[p] = *legal;
     }
     out
+}
+
+/// The joint moves a node's seats can pick: `select` picks one of a seat's legal moves, or move
+/// 0 when it has none (seats beyond the game's have none).
+fn open_joints(legal: &MoveMask) -> usize {
+    legal
+        .iter()
+        .map(|l| l.iter().filter(|&&x| x).count().max(1))
+        .product()
 }
 
 /// `sum_p moves[p] * 4^p` (mcts.py:486-489).

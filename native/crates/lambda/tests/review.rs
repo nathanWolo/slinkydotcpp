@@ -851,23 +851,30 @@ fn deadline_follows_the_game_timeout() {
 fn deadline_keeps_the_faithful_search() {
     let Some(run) = run_dir() else { return };
     let ex = examples();
+    // EARLY_STOP=0 runs the whole count; the default (early stop and reuse) plays the same
+    // moves with fewer simulations.
     for (extra, sims) in [
-        (&[][..], 256usize),
-        (&[("SIMULATIONS", "1024")][..], 1024),
+        (&[("EARLY_STOP", "0")][..], 256usize),
+        (&[("EARLY_STOP", "0"), ("SIMULATIONS", "1024")][..], 1024),
         (&[("THREADS", "2")][..], 256),
+        (&[][..], 256),
+        (&[("SIMULATIONS", "1024")][..], 1024),
+        (&[("REUSE", "0")][..], 256),
     ] {
         let e = engine(&run, extra);
+        let early = !extra.contains(&("EARLY_STOP", "0")) && !extra.contains(&("THREADS", "2"));
         for mode in ["standard", "duel", "royale", "constrictor"] {
             for turn in [0u64, 3, 17] {
                 let mut req = ex["requests"][mode].clone();
                 req["turn"] = json!(turn);
                 let body = req.to_string();
                 let c = e.choose(&body, "gid", &turn.to_string(), None, Instant::now());
-                assert_eq!(
-                    (c.by, c.simulations, c.cut),
-                    (By::Engine, sims, false),
-                    "{mode}"
-                );
+                assert_eq!((c.by, c.cut), (By::Engine, false), "{mode}");
+                if early {
+                    assert!(c.simulations <= sims, "{mode}");
+                } else {
+                    assert_eq!(c.simulations, sims, "{mode}");
+                }
                 // No deadline at all: an agent with the same budget.
                 let s = settings(&run, extra);
                 let agent = e.agent().unwrap();

@@ -31,6 +31,10 @@ pub enum PlayerSpec {
         threads: usize,
         /// Tree memory cap per tree, in bytes.
         memory_limit: usize,
+        /// Stop each search once the searched seat's move is decided ([`Agent::with_early_stop`]).
+        early_stop: bool,
+        /// Reuse the evaluations of the agent's previous search ([`Agent::with_reuse`]).
+        reuse: bool,
     },
 }
 
@@ -52,6 +56,8 @@ impl PlayerSpec {
         let mut cap: Option<usize> = None;
         let mut threads = 1usize;
         let mut memory_limit = DEFAULT_MEMORY_LIMIT;
+        let mut early_stop = false;
+        let mut reuse = false;
         for p in parts {
             let (key, value) = p
                 .split_once('=')
@@ -66,6 +72,8 @@ impl PlayerSpec {
                 "max_simulations" => cap = Some(num(value)? as usize),
                 "threads" => threads = (num(value)? as usize).max(1),
                 "memory_mb" => memory_limit = (num(value)? as usize).saturating_mul(1 << 20),
+                "early_stop" => early_stop = num(value)? != 0,
+                "reuse" => reuse = num(value)? != 0,
                 _ => return Err(format!("{text:?}: unknown field {key:?}")),
             }
         }
@@ -100,6 +108,8 @@ impl PlayerSpec {
             budget,
             threads,
             memory_limit,
+            early_stop,
+            reuse,
         })
     }
 
@@ -112,6 +122,8 @@ impl PlayerSpec {
                 budget,
                 threads,
                 memory_limit,
+                early_stop,
+                reuse,
             } => {
                 let mut s = format!("az_modes:{}", dir.display());
                 match *budget {
@@ -132,6 +144,12 @@ impl PlayerSpec {
                 if *memory_limit != DEFAULT_MEMORY_LIMIT {
                     s += &format!(":memory_mb={}", memory_limit >> 20);
                 }
+                if *early_stop {
+                    s += ":early_stop=1";
+                }
+                if *reuse {
+                    s += ":reuse=1";
+                }
                 s
             }
         }
@@ -146,6 +164,8 @@ impl PlayerSpec {
                 dir,
                 budget,
                 threads,
+                early_stop,
+                reuse,
                 ..
             } => {
                 let base = dir
@@ -157,6 +177,12 @@ impl PlayerSpec {
                 };
                 if *threads > 1 {
                     s += &format!("x{threads}");
+                }
+                if *early_stop {
+                    s += "e";
+                }
+                if *reuse {
+                    s += "r";
                 }
                 s
             }
@@ -196,12 +222,16 @@ impl Player {
                 budget,
                 threads,
                 memory_limit,
+                early_stop,
+                reuse,
             } => {
                 let agent = Agent::load(dir)
                     .map_err(|e| format!("{}: {e}", dir.display()))?
                     .with_budget(*budget)
                     .with_threads(*threads)
-                    .with_memory_limit(*memory_limit);
+                    .with_memory_limit(*memory_limit)
+                    .with_early_stop(*early_stop)
+                    .with_reuse(*reuse);
                 let weights_hash = Some(weights_hash(dir)?);
                 Ok(Player {
                     spec,

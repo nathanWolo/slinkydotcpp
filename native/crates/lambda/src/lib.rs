@@ -228,7 +228,7 @@ impl App {
                     "snake": name, "game": game_log, "turn": turn_log, "move": c.mv.name(),
                     "by": if c.by == By::Engine { "engine" } else { "fallback" },
                     "sims": c.simulations, "mode": c.mode, "seed": c.seed, "ms": ms,
-                    "deadline_ms": c.deadline_ms, "cut": c.cut,
+                    "deadline_ms": c.deadline_ms, "cut": c.cut, "reused": c.reused,
                     "error": c.error.map(|e| e.chars().take(300).collect::<String>()),
                 }));
                 reply(200, json!({"move": c.mv.name()}))

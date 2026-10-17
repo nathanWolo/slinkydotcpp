@@ -15,3 +15,6 @@ serde_json = "1"
 [[bin]]
 name = "naz"
 path = "src/bin/naz.rs"
+
+[dev-dependencies]
+slinky-env = { path = "../env" }

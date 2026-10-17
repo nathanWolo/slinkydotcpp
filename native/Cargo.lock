@@ -618,6 +618,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "slinky-api",
+ "slinky-env",
  "slinky-net",
  "slinky-obs",
  "slinky-rules",

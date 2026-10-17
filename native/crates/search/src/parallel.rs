@@ -71,6 +71,11 @@ where
             &mut noises[0],
         );
     }
+    // A tree's own lead says nothing about the summed visits: run every tree's whole share.
+    let decide: Vec<Option<usize>> = workspaces.iter().map(Search::stop_when_decided).collect();
+    for ws in workspaces.iter_mut() {
+        ws.set_stop_when_decided(None);
+    }
     let share = |t: usize| budget.simulations / k + usize::from(t < budget.simulations % k);
     let mut results: Vec<Result<SearchOutput, SearchError>> = Vec::with_capacity(k);
     std::thread::scope(|scope| {
@@ -103,6 +108,9 @@ where
             }));
         }
     });
+    for (ws, d) in workspaces.iter_mut().zip(decide) {
+        ws.set_stop_when_decided(d);
+    }
     let mut outs = Vec::with_capacity(k);
     for r in results {
         outs.push(r?);

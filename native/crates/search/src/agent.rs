@@ -115,6 +115,8 @@ pub struct Agent {
     budget: MoveBudget,
     threads: usize,
     memory_limit: usize,
+    early_stop: bool,
+    reuse: bool,
 }
 
 /// One move of the agent, with the root statistics of its search.
@@ -146,6 +148,8 @@ impl Agent {
             budget: MoveBudget::LADDER,
             threads: 1,
             memory_limit: DEFAULT_MEMORY_LIMIT,
+            early_stop: false,
+            reuse: false,
         }
     }
 
@@ -193,6 +197,34 @@ impl Agent {
     /// The tree memory cap per search thread.
     pub fn memory_limit(&self) -> usize {
         self.memory_limit
+    }
+
+    /// The same agent stopping each one-tree search once our move is decided
+    /// ([`Search::set_stop_when_decided`] for seat 0): the same move as the full budget in less
+    /// time, but the reported visits are those of the shorter search. Off by default. The
+    /// methods that make their own workspace apply it; with a caller's workspace
+    /// ([`Agent::search_game`]) the caller sets it on the workspace.
+    pub fn with_early_stop(mut self, on: bool) -> Agent {
+        self.early_stop = on;
+        self
+    }
+
+    /// Whether searches stop once our move is decided ([`Agent::with_early_stop`]).
+    pub fn early_stop(&self) -> bool {
+        self.early_stop
+    }
+
+    /// The same agent asking callers that keep a workspace between moves to reuse the last
+    /// tree's evaluations ([`Search::set_reuse`]; the same results, fewer network calls). Off by
+    /// default. The methods that make a new workspace per move cannot reuse anything.
+    pub fn with_reuse(mut self, on: bool) -> Agent {
+        self.reuse = on;
+        self
+    }
+
+    /// Whether workspaces kept between moves reuse evaluations ([`Agent::with_reuse`]).
+    pub fn reuse(&self) -> bool {
+        self.reuse
     }
 
     /// The network.
@@ -323,18 +355,39 @@ impl Agent {
         let game = game_from_request(req, starting_snakes)?;
         let budget = self.budget.budget_from(arrival);
         if self.threads <= 1 {
-            self.search_game(
-                &mut Search::with_memory_limit(self.memory_limit),
-                &game,
-                budget,
-                &mut JaxNoise::from_seed(seed),
-            )
+            let mut ws = Search::with_memory_limit(self.memory_limit);
+            ws.set_stop_when_decided(self.early_stop.then_some(0));
+            self.search_game(&mut ws, &game, budget, &mut JaxNoise::from_seed(seed))
         } else {
             let mut ws: Vec<Search> = (0..self.threads)
                 .map(|_| Search::with_memory_limit(self.memory_limit))
                 .collect();
             self.search_game_threads(&mut ws, &game, budget, seed)
         }
+    }
+
+    /// [`Agent::play_request_from`] in a caller's workspace `ws` (one tree; the agent's thread
+    /// count is ignored), with the agent's early stop and reuse settings applied to it. Keep
+    /// one workspace per snake and game so that [`Agent::with_reuse`] finds the last tree.
+    pub fn play_request_in(
+        &self,
+        ws: &mut Search,
+        req: &Request,
+        starting_snakes: Option<usize>,
+        seed: u32,
+        arrival: Instant,
+    ) -> Result<AgentMove, SearchError> {
+        let game = game_from_request(req, starting_snakes)?;
+        ws.set_stop_when_decided(self.early_stop.then_some(0));
+        if ws.reuse() != self.reuse {
+            ws.set_reuse(self.reuse);
+        }
+        self.search_game(
+            ws,
+            &game,
+            self.budget.budget_from(arrival),
+            &mut JaxNoise::from_seed(seed),
+        )
     }
 
     /// [`Agent::play`] for a request that arrived at `arrival`.

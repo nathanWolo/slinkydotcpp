@@ -13,7 +13,7 @@ use slinky_rules::{GameConfig, GameState, Mode, Ruleset};
 
 /// Builds the network inputs of states of one game. Cheap to construct and `Copy`; holds the
 /// config, the mode the network is told and whether food is hidden.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Encoder {
     config: GameConfig,
     told: Mode,

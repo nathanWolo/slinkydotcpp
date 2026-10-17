@@ -439,8 +439,17 @@ impl Sparse {
     }
 }
 
+/// Source of [`Network::id`].
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_id() -> u64 {
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A loaded network. Immutable, so one value can serve many threads; use one [`Scratch`] each.
 pub struct Network {
+    /// Unique per network and per change of its outputs ([`Network::id`]).
+    id: u64,
     cfg: NetConfig,
     convs: Vec<Conv>,
     /// `hidden/w`, `[flat][hidden]`.
@@ -568,6 +577,7 @@ impl Network {
             hidden_add(&hidden_w, hid, idx, val, out);
         }
         Ok(Network {
+            id: next_id(),
             cfg,
             convs,
             hidden_w,
@@ -580,6 +590,13 @@ impl Network {
             value_w,
             value_b,
         })
+    }
+
+    /// An id no other network of this process has, renewed whenever this one's outputs change
+    /// ([`Network::quantize_hidden_int8`]): equal ids give bit-identical outputs, so a cache of
+    /// outputs can be keyed by it.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// The config this network was built from.
@@ -608,6 +625,7 @@ impl Network {
     /// layer's weight memory 4x (1.2 MB to 0.3 MB for M, so it fits a 1 MB L2) at the cost of
     /// exactness: outputs move by up to about 1e-1 instead of 1e-6. `on = false` restores `f32`.
     pub fn quantize_hidden_int8(&mut self, on: bool) {
+        self.id = next_id();
         if !on {
             self.hidden_q = None;
             return;

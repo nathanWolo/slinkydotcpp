@@ -86,6 +86,8 @@ pub struct Setup<'a> {
 /// One thread's search workspaces, per agent.
 pub struct Workspace {
     trees: [Vec<Search>; 2],
+    /// [`View::Request`] with reuse: one workspace per seat, as separate ladder snakes keep.
+    seat_trees: [Vec<Search>; MAX_SNAKES],
 }
 
 impl Workspace {
@@ -101,6 +103,7 @@ impl Workspace {
         };
         Workspace {
             trees: [make(setup.players[0]), make(setup.players[1])],
+            seat_trees: std::array::from_fn(|_| Vec::new()),
         }
     }
 }
@@ -239,6 +242,12 @@ pub fn play_game(
                         let res = if trees.len() > 1 {
                             agent.search_game_threads(trees, &g, budget, seed)
                         } else {
+                            // Only a search for one seat can stop when that seat is decided.
+                            let one = (agent.early_stop() && group.len() == 1).then(|| group[0]);
+                            trees[0].set_stop_when_decided(one);
+                            if trees[0].reuse() != agent.reuse() {
+                                trees[0].set_reuse(agent.reuse());
+                            }
                             agent.search_game(
                                 &mut trees[0],
                                 &g,
@@ -273,7 +282,20 @@ pub fn play_game(
                         };
                         let body = req.to_string();
                         let t = Instant::now();
-                        let res = agent.play_from(&body, Some(n), noise_seed(1 + s as u64), t);
+                        let seed = noise_seed(1 + s as u64);
+                        let res = if agent.reuse() && agent.threads() <= 1 {
+                            let seat_ws = &mut ws.seat_trees[s];
+                            if seat_ws.is_empty() {
+                                seat_ws.push(Search::with_memory_limit(agent.memory_limit()));
+                            }
+                            slinky_api::Request::from_json(&body)
+                                .map_err(slinky_search::SearchError::from)
+                                .and_then(|r| {
+                                    agent.play_request_in(&mut seat_ws[0], &r, Some(n), seed, t)
+                                })
+                        } else {
+                            agent.play_from(&body, Some(n), seed, t)
+                        };
                         let us = t.elapsed().as_micros().min(u32::MAX as u128) as u32;
                         match res {
                             Ok(m) => {

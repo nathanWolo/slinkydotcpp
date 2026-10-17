@@ -58,6 +58,14 @@ pub trait Evaluator {
         state: &GameState,
         seats: &[bool; MAX_SNAKES],
     ) -> Result<NodeEval, SearchError>;
+
+    /// A key such that two evaluators with the same key return bit-identical evaluations of
+    /// the same state and seats, whatever the node: then a search may reuse the evaluations of
+    /// its previous tree ([`crate::Search::set_reuse`]). `None` (the default) never reuses, for
+    /// evaluators whose answers depend on the node number or on earlier calls.
+    fn reuse_key(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The mechanics evaluator of SPEC.md 7.5 (`prior="uniform", leaf="none"`): uniform priors over
@@ -73,6 +81,10 @@ impl Evaluator for UniformEvaluator {
         _seats: &[bool; MAX_SNAKES],
     ) -> Result<NodeEval, SearchError> {
         Ok(NodeEval::default())
+    }
+
+    fn reuse_key(&self) -> Option<u64> {
+        Some(0x756e_6966_6f72_6d00) // any constant: the answers depend on nothing
     }
 }
 
@@ -128,6 +140,13 @@ impl<'a> NetEvaluator<'a> {
 }
 
 impl Evaluator for NetEvaluator<'_> {
+    fn reuse_key(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.net.id(), self.encoder).hash(&mut h);
+        Some(h.finish())
+    }
+
     fn evaluate(
         &mut self,
         _node: usize,

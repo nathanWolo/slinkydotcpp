@@ -13,6 +13,8 @@
 //! | `TIE_SEED` | fixed tie-break seed (testing only) | derived from game id and turn |
 //! | `MEMORY_LIMIT_MB` | cap on one search tree | 256 |
 //! | `DEADLINE_MARGIN_MS` | time kept for the network and Lambda's overhead (see below) | 150 |
+//! | `EARLY_STOP` | `0`: always run the whole simulation count (see below) | `1` |
+//! | `REUSE` | `0`: do not keep each game's last tree for its next move (see below) | `1` |
 //!
 //! Without `BUDGET_MS` the search is the faithful 256-simulation search of the Python agent
 //! (or `SIMULATIONS` of them): deterministic given the seed. With `BUDGET_MS` the number of
@@ -27,6 +29,17 @@
 //! the answer is the best move of the simulations run so far (at least one always runs). A
 //! `BUDGET_MS` beyond the deadline is cut to it. A fixed `SIMULATIONS` search that finishes
 //! before its deadline is unchanged: the same move as without a deadline.
+//!
+//! # Early stop and reuse
+//!
+//! Two speed-ups that never change a move. With `EARLY_STOP`, a search stops once our move
+//! leads every other root move by more than the simulations left
+//! (`Search::set_stop_when_decided`): the full count would choose the same move. With `REUSE`,
+//! the engine keeps the last tree of each of the [`GAME_TREES`] most recent games, and the
+//! next move's search copies the network evaluation of every node it shares with that tree
+//! (`Search::set_reuse`). The tree and the move are bit-identical to a search without it; only
+//! the time differs. Both apply to a one-tree search (`THREADS=1`); the move's log line has the
+//! simulations run (`sims`) and the nodes reused (`reused`).
 //!
 //! # Seed policy
 //!
@@ -46,7 +59,7 @@
 
 use slinky_api::{PyValue, Request, game_from_request, safe_move, safe_move_json};
 use slinky_rules::Move;
-use slinky_search::{Agent, Budget, MoveBudget, Search, SearchError};
+use slinky_search::{Agent, Budget, MoveBudget, Search, SearchError, StopReason};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -70,6 +83,9 @@ pub const DEFAULT_SNAKES: &str = "slinky=az-modes";
 pub const DEFAULT_GAME_TIMEOUT_MS: u64 = 500;
 /// Largest `game.timeout` taken from a request (a larger one counts as this).
 pub const MAX_GAME_TIMEOUT_MS: u64 = 60_000;
+/// Games whose last search tree a snake keeps for reuse (`REUSE`): a container serves one
+/// request at a time, but the moves of concurrent games interleave.
+pub const GAME_TREES: usize = 4;
 /// Default `DEADLINE_MARGIN_MS`: the round trip between Battlesnake's engine and the Function
 /// URL, plus Lambda's own overhead per invocation.
 pub const DEFAULT_DEADLINE_MARGIN_MS: u64 = 150;
@@ -106,6 +122,10 @@ pub struct Settings {
     pub memory_limit: usize,
     /// Time kept back from the game's timeout for the network and Lambda (ms).
     pub deadline_margin_ms: u64,
+    /// `EARLY_STOP`: stop a search once our move is decided.
+    pub early_stop: bool,
+    /// `REUSE`: keep each game's last tree and reuse its evaluations.
+    pub reuse: bool,
     /// `DEBUG_PANIC=search:<game id>` or `handler:<game id>`: panic on a `/move` of that game
     /// (tests of the panic handling only; never set it in a deployment).
     pub debug_panic: Option<(String, String)>,
@@ -209,6 +229,14 @@ impl Settings {
                 .map(|v| number("DEADLINE_MARGIN_MS", &v, 0, MAX_BUDGET_MS))
                 .transpose()?
                 .unwrap_or(DEFAULT_DEADLINE_MARGIN_MS),
+            early_stop: nonempty("EARLY_STOP")
+                .map(|v| number("EARLY_STOP", &v, 0u8, 1).map(|x| x == 1))
+                .transpose()?
+                .unwrap_or(true),
+            reuse: nonempty("REUSE")
+                .map(|v| number("REUSE", &v, 0u8, 1).map(|x| x == 1))
+                .transpose()?
+                .unwrap_or(true),
             debug_panic: match nonempty("DEBUG_PANIC") {
                 None => None,
                 Some(v) => match v.split_once(':') {
@@ -289,6 +317,8 @@ pub struct Choice {
     pub mode: Option<&'static str>,
     /// The seed used.
     pub seed: u32,
+    /// Nodes whose evaluation came from the game's last tree (`REUSE`).
+    pub reused: usize,
     /// Why the fallback was used.
     pub error: Option<String>,
     /// Milliseconds from the arrival to the search's deadline.
@@ -296,6 +326,15 @@ pub struct Choice {
     /// Whether the deadline (or the memory cap) stopped the search before its simulation
     /// count.
     pub cut: bool,
+}
+
+/// What a search reports besides its move.
+struct Searched {
+    mv: Move,
+    simulations: usize,
+    mode: &'static str,
+    reused: usize,
+    cut: bool,
 }
 
 /// One served snake.
@@ -308,9 +347,12 @@ pub struct SnakeEngine {
     fixed_seed: Option<u32>,
     margin: Duration,
     debug_panic: Option<String>,
-    /// Reusable search trees (one per thread). A Lambda container serves one request at a
-    /// time; a second concurrent caller just allocates its own.
-    workspaces: Mutex<Vec<Search>>,
+    /// Reusable search trees (one per thread), with the game whose last move they searched,
+    /// the most recent first: at most [`GAME_TREES`] games with `REUSE`, else one. A Lambda
+    /// container serves one request at a time; a second concurrent caller just allocates its
+    /// own.
+    workspaces: Mutex<Vec<(String, Vec<Search>)>>,
+    reuse: bool,
 }
 
 impl SnakeEngine {
@@ -323,6 +365,8 @@ impl SnakeEngine {
                 a.with_budget(settings.budget_of(spec))
                     .with_threads(settings.threads)
                     .with_memory_limit(settings.memory_limit)
+                    .with_early_stop(settings.early_stop)
+                    .with_reuse(settings.reuse)
             })
             .map_err(|e| format!("loading {}: {e}", dir.display()));
         SnakeEngine {
@@ -338,6 +382,7 @@ impl SnakeEngine {
                 .filter(|(w, _)| w == "search")
                 .map(|(_, id)| id.clone()),
             workspaces: Mutex::new(Vec::new()),
+            reuse: settings.reuse && settings.threads <= 1,
         }
     }
 
@@ -376,21 +421,31 @@ impl SnakeEngine {
         starting: Option<usize>,
         seed: u32,
         budget: Budget,
-    ) -> Result<(Move, usize, &'static str), SearchError> {
+        game_id: &str,
+    ) -> Result<Searched, SearchError> {
         if let Some(id) = &self.debug_panic
             && req.game_id() == Some(id.as_str())
         {
             panic!("DEBUG_PANIC: a panic in the search of game {id}");
         }
         let game = game_from_request(req, starting)?;
+        // This game's trees, else the least recently used ones (or new ones).
         let mut ws = match self.workspaces.try_lock() {
-            Ok(mut g) => std::mem::take(&mut *g),
+            Ok(mut g) => match g.iter().position(|(id, _)| id == game_id) {
+                Some(i) => g.remove(i).1,
+                None if g.len() >= self.kept_games() => g.pop().map(|e| e.1).unwrap_or_default(),
+                None => Vec::new(),
+            },
             Err(_) => Vec::new(),
         };
         while ws.len() < self.threads {
             ws.push(Search::with_memory_limit(self.memory_limit));
         }
         let res = if self.threads <= 1 {
+            ws[0].set_stop_when_decided(agent.early_stop().then_some(0));
+            if ws[0].reuse() != self.reuse {
+                ws[0].set_reuse(self.reuse);
+            }
             agent.search_game(
                 &mut ws[0],
                 &game,
@@ -400,11 +455,30 @@ impl SnakeEngine {
         } else {
             agent.search_game_threads(&mut ws, &game, budget, seed)
         };
+        let (reused, stop) = (ws[0].reused_nodes(), ws[0].stats().stop);
         if let Ok(mut g) = self.workspaces.try_lock() {
-            *g = ws;
+            g.insert(0, (game_id.to_string(), ws));
+            g.truncate(self.kept_games());
         }
         let m = res?;
-        Ok((m.mv, m.search.simulations, m.mode.name()))
+        let simulations = m.search.simulations;
+        let cut = if self.threads <= 1 {
+            matches!(stop, StopReason::Deadline | StopReason::MemoryLimit)
+        } else {
+            simulations < budget.simulations
+        };
+        Ok(Searched {
+            mv: m.mv,
+            simulations,
+            mode: m.mode.name(),
+            reused,
+            cut,
+        })
+    }
+
+    /// Games whose trees are kept.
+    fn kept_games(&self) -> usize {
+        if self.reuse { GAME_TREES } else { 1 }
     }
 
     /// Chooses a move for the request `body` (`game_id` is the raw id, `turn` the turn's JSON
@@ -428,6 +502,7 @@ impl SnakeEngine {
                     simulations: 0,
                     mode: None,
                     seed,
+                    reused: 0,
                     error: Some(e.to_string()),
                     deadline_ms: 0,
                     cut: false,
@@ -458,6 +533,7 @@ impl SnakeEngine {
             simulations: 0,
             mode: None,
             seed,
+            reused: 0,
             error: Some(error),
             deadline_ms,
             cut: false,
@@ -467,17 +543,18 @@ impl SnakeEngine {
             Err(e) => return fallback(e.clone()),
         };
         match catch_unwind(AssertUnwindSafe(|| {
-            self.search(agent, req, starting, seed, budget)
+            self.search(agent, req, starting, seed, budget, game_id)
         })) {
-            Ok(Ok((mv, simulations, mode))) => Choice {
-                mv,
+            Ok(Ok(r)) => Choice {
+                mv: r.mv,
                 by: By::Engine,
-                simulations,
-                mode: Some(mode),
+                simulations: r.simulations,
+                mode: Some(r.mode),
                 seed,
+                reused: r.reused,
                 error: None,
                 deadline_ms,
-                cut: simulations < budget.simulations,
+                cut: r.cut,
             },
             Ok(Err(e)) => fallback(e.to_string()),
             Err(_) => {
