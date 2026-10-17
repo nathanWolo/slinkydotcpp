@@ -353,6 +353,8 @@ pub struct SnakeEngine {
     /// own.
     workspaces: Mutex<Vec<(String, Vec<Search>)>>,
     reuse: bool,
+    /// The run dir the weights came from.
+    dir: PathBuf,
 }
 
 impl SnakeEngine {
@@ -383,7 +385,13 @@ impl SnakeEngine {
                 .map(|(_, id)| id.clone()),
             workspaces: Mutex::new(Vec::new()),
             reuse: settings.reuse && settings.threads <= 1,
+            dir,
         }
+    }
+
+    /// The run dir the weights came from.
+    pub fn run_dir(&self) -> &std::path::Path {
+        &self.dir
     }
 
     /// The weights' load error, if any.

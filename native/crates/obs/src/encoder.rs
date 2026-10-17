@@ -75,6 +75,17 @@ impl Encoder {
         egocentric_into(state, &self.config, seat, self.hide_food, out)
     }
 
+    /// Seat `seat`'s board in structured form ([`crate::egocentric_sparse_into`]): the same
+    /// observation as [`Encoder::observe_into`] without the zeros.
+    pub fn observe_sparse_into(
+        &self,
+        state: &GameState,
+        seat: usize,
+        out: &mut crate::SparseObs,
+    ) -> Result<(), ObsError> {
+        crate::egocentric_sparse_into(state, &self.config, seat, self.hide_food, out)
+    }
+
     /// The feature rows of every seat (rows beyond `num_snakes` are zero).
     pub fn features(&self, state: &GameState) -> [[f32; NUM_FEATURES]; slinky_rules::MAX_SNAKES] {
         mode_features(state, &self.config, self.told)

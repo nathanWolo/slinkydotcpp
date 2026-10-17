@@ -25,11 +25,19 @@
 //!   the batch size is `values.len()`; `obs` is `[B][21][21][13]` (NHWC, [`OBS_LEN`] floats per row),
 //!   `feats` is `[B][7]` as produced by `modes.mode_features`. Rows are independent.
 //! * [`Network::forward`]`(&self, obs, feats) -> Result<Output, NetError>`.
+//! * [`Network::forward_boards_into`]`(&self, &mut Scratch, boards: &[BoardInput], feats, logits,
+//!   values)`: the same pass on structured boards (the window's offset, own health and length,
+//!   and the content entries: `slinky_obs::SparseObs`), which skips building the dense window
+//!   and adds the three whole-board planes from precomputed per-class sums. Outputs equal
+//!   `forward_into`'s up to float summation order (about 1e-7); the search uses this one.
 //! * [`Network::config`]`() -> &NetConfig`: includes `c_puct`, `fpu_reduction`, `draw_value`,
 //!   `hide_constrictor_food`, `game_modes` for the search and observation crates.
 //! * [`Network::num_params`], [`Network::scratch`].
 //! * [`Network::quantize_hidden_int8`]`(&mut self, on: bool)`: experimental, off by default (an
 //!   int8 hidden layer: 4x less weight memory, outputs off by up to ~1e-1; see its docs).
+//! * [`Network::store_hidden_bf16`]`(&mut self, on: bool)`: experimental, off by default (the
+//!   hidden layer's weights rounded to bfloat16, half the memory of the largest matrix; outputs
+//!   off by about 2e-3).
 //!
 //! # Speed
 //!
@@ -38,6 +46,13 @@
 //! bench -- <run dir> <golden cases.npz>` measures it: for the M net on real states, one x86-64
 //! core (Ryzen 7 5800XT, SSE2 baseline build) takes about 18 us per board at batch 1, 2, 4 or 8
 //! (the first plain version took 50 us).
+//!
+//! The inner loops run on 4-lane vectors (the private `simd` module: NEON on aarch64, SSE2 on
+//! x86-64, plain arrays elsewhere), with one multiply-add per lane exactly as the scalar code
+//! rounds it, so the outputs do not depend on the target's vector width. On the dev box's
+//! Xeon, the network on the search's own nodes takes about 30 us per row on the structured
+//! path against 35 us dense (`cargo run --release -p slinky-lambda --example bench -- <run
+//! dir>`, which also runs on the Lambda itself: `deploy/lambda-native/README.md`).
 //!
 //! The raw feature vector goes in: for `features = "no_mode"` the network masks the one-hot and
 //! shrink phase itself, for `"none"` it ignores the features. Food hiding in constrictor
@@ -48,11 +63,14 @@ mod config;
 mod error;
 mod network;
 pub mod npy;
+mod simd;
 
 pub use config::{
     FeatureMode, MODE_NAMES, NUM_ACTIONS, NUM_FEATURES, NetConfig, OBS_CHANNELS, OBS_COLS, OBS_LEN,
     OBS_ROWS,
 };
 pub use error::NetError;
-pub use network::{Network, Output, Scratch};
+pub use network::{
+    BoardInput, CH_ON_BOARD, CH_OWN_HEALTH, CH_OWN_LENGTH, Network, Output, Scratch,
+};
 pub use npy::Array;

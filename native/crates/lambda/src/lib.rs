@@ -15,6 +15,7 @@
 //! `SNAKE_AUTHOR`, `SNAKE_HEAD`, `SNAKE_TAIL`, `SNAKE_COLOR_<NAME>` and `SNAKE_HEAD_<NAME>` /
 //! `SNAKE_TAIL_<NAME>` (one snake's head and tail, over the shared ones).
 
+pub mod bench;
 pub mod engine;
 
 use engine::{By, Settings, SnakeEngine};
@@ -163,6 +164,20 @@ impl App {
     /// from there).
     pub fn handle(&self, method: &str, path: &str, body: &str, arrival: Instant) -> Reply {
         self.handle_within(method, path, body, arrival, None)
+    }
+
+    /// Runs [`bench`] (a direct invocation's `{"bench": spec}`) with the run dir of the snake
+    /// `spec.snake` names, the first by default.
+    pub fn bench(&self, spec: &Value, limit: Option<Instant>) -> Value {
+        let name = spec["snake"].as_str();
+        let snake = self
+            .snakes
+            .iter()
+            .find(|s| name.is_none_or(|n| s.name == n));
+        match snake {
+            Some(s) => bench::run(s.run_dir(), spec, limit),
+            None => json!({"error": "no such snake"}),
+        }
     }
 
     /// [`App::handle`] with an outside deadline (the Lambda invocation's end): a search

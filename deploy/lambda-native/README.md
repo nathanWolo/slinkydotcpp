@@ -22,3 +22,22 @@ Change the line-up or the think time with `SNAKES` (e.g.
 `SNAKES=az-256=az-modes:simulations=256,az-t250=az-modes:budget_ms=250`, plus that snake's
 `SNAKE_COLOR_`/`SNAKE_HEAD_`/`SNAKE_TAIL_` variables). Each move logs its `ms`, `sims`,
 `deadline_ms` and `cut` to CloudWatch (`/aws/lambda/slinky-native`).
+
+## Benchmark on the function's own CPU
+
+The binary answers a direct invocation `{"bench": {...}}` (never a Function URL request) with
+a speed report from the Graviton it runs on: per mode, ms per 256-simulation move plain, with
+the early stop and with the tree reuse, and the network's microseconds per row on the dense,
+structured and bfloat16 paths (`native/crates/lambda/src/bench.rs`). It takes about 20 s, so
+raise the timeout for the run, while no games are being played (a configuration change starts
+fresh containers), and put it back:
+
+    aws --region us-east-2 lambda update-function-configuration --function-name slinky-native --timeout 60
+    aws --region us-east-2 lambda wait function-updated --function-name slinky-native
+    aws --region us-east-2 lambda invoke --function-name slinky-native --cli-read-timeout 90 \
+        --cli-binary-format raw-in-base64-out --payload '{"bench": {}}' bench.json
+    aws --region us-east-2 lambda update-function-configuration --function-name slinky-native --timeout 3
+
+Options: `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"]}}`. The
+report stops early (`"cut_short": true`) 300 ms before the invocation's deadline. The same
+report on another machine: `cargo run --release -p slinky-lambda --example bench -- <run dir>`.

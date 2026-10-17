@@ -38,6 +38,8 @@ the M network), each move is the faithful decoupled-PUCT search of the Python ag
 | `THREADS` | root-parallel search trees, one per vCPU (`1` is the plain search) | 1 |
 | `TIE_SEED` | one fixed tie-break seed for every move (tests) | derived, see below |
 | `MEMORY_LIMIT_MB` | cap on one search tree (the search stops early when it is reached) | 256 |
+| `EARLY_STOP` | `0`: always run the whole simulation count; `1`: stop once the leading move cannot be overtaken by the simulations left (the move is the same) | `1` |
+| `REUSE` | `0`: forget each search; `1`: keep each game's last tree (the 4 most recent games) and reuse its network evaluations (bit-identical moves) | `1` |
 | `DEADLINE_MARGIN_MS` | time kept for the network and Lambda's overhead: every search stops at `game.timeout` less this (see Deadline) | 150 |
 | `DEBUG_PANIC` | `search:<game id>` or `handler:<game id>`: panic on that game's `/move` (tests only) | off |
 | `SNAKE_AUTHOR`, `SNAKE_HEAD`, `SNAKE_TAIL`, `SNAKE_COLOR_<NAME>` | info response (`<NAME>` upper case, `-` and `.` become `_`) | `slinky`, `default`, `default`, `#8b5cf6` |
@@ -186,6 +188,11 @@ own sandbox and runtime-download time, which cannot be measured here): PC 17.5 t
 runs (3.4 ms until the runtime asks for its first event, which covers the 1.6 ms weight load);
 laptop 35 ms. On Lambda add the platform's init (typically a few tens to 100+ ms for a small custom
 runtime: not measured) once per container.
+
+The same binary benchmarks the CPU it runs on when invoked directly with `{"bench": {}}`
+(search ms per move plain / with early stop / with reuse, network us per row on each path):
+see `src/bench.rs` and `deploy/lambda-native/README.md`; locally, `cargo run --release -p
+slinky-lambda --example bench -- <run dir>`.
 
 ## Lambda cost and timing
 

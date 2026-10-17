@@ -12,8 +12,8 @@
 //! rows are independent of each other.
 
 use crate::SearchError;
-use slinky_net::{NUM_ACTIONS, Network, Scratch};
-use slinky_obs::{Encoder, NUM_FEATURES, OBS_LEN};
+use slinky_net::{BoardInput, NUM_ACTIONS, Network, Scratch};
+use slinky_obs::{Encoder, NUM_FEATURES, OBS_LEN, SparseObs};
 use slinky_rules::{GameConfig, GameState, MAX_SNAKES};
 
 /// Where a node's PUCT priors come from.
@@ -95,7 +95,7 @@ pub struct NetEvaluator<'a> {
     net: &'a Network,
     encoder: Encoder,
     scratch: Scratch,
-    obs: Vec<f32>,
+    boards: [SparseObs; MAX_SNAKES],
     feats: Vec<f32>,
     /// Network evaluations made (one per call that had a seat to evaluate).
     pub calls: usize,
@@ -119,7 +119,7 @@ impl<'a> NetEvaluator<'a> {
             net,
             encoder,
             scratch: net.scratch(),
-            obs: vec![0.0; MAX_SNAKES * OBS_LEN],
+            boards: Default::default(),
             feats: vec![0.0; MAX_SNAKES * NUM_FEATURES],
             calls: 0,
             rows: 0,
@@ -158,11 +158,8 @@ impl Evaluator for NetEvaluator<'_> {
         let mut rows = [0usize; MAX_SNAKES];
         let mut b = 0;
         for seat in (0..n).filter(|&i| seats[i]) {
-            self.encoder.observe_into(
-                state,
-                seat,
-                &mut self.obs[b * OBS_LEN..(b + 1) * OBS_LEN],
-            )?;
+            self.encoder
+                .observe_sparse_into(state, seat, &mut self.boards[b])?;
             self.feats[b * NUM_FEATURES..(b + 1) * NUM_FEATURES].copy_from_slice(&feats[seat]);
             rows[b] = seat;
             b += 1;
@@ -176,9 +173,19 @@ impl Evaluator for NetEvaluator<'_> {
         }
         let mut logits = [[0.0f32; NUM_ACTIONS]; MAX_SNAKES];
         let mut values = [0.0f32; MAX_SNAKES];
-        self.net.forward_into(
+        let boards: [BoardInput; MAX_SNAKES] = std::array::from_fn(|i| {
+            let o = &self.boards[i];
+            BoardInput {
+                r0: o.r0,
+                c0: o.c0,
+                health: o.health,
+                length: o.length,
+                entries: &o.entries,
+            }
+        });
+        self.net.forward_boards_into(
             &mut self.scratch,
-            &self.obs[..b * OBS_LEN],
+            &boards[..b],
             &self.feats[..b * NUM_FEATURES],
             &mut logits[..b],
             &mut values[..b],

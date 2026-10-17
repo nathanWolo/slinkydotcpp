@@ -57,7 +57,9 @@ mod observation;
 pub use encoder::Encoder;
 pub use error::ObsError;
 pub use features::{TURN_SCALE, col, mode_features};
-pub use observation::{RECIP_100, egocentric_into, obs_len, obs_shape};
+pub use observation::{
+    RECIP_100, SparseObs, egocentric_into, egocentric_sparse_into, obs_len, obs_shape,
+};
 
 use slinky_rules::{MAX_HEIGHT, MAX_WIDTH};
 

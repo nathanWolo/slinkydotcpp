@@ -100,6 +100,10 @@ fn handle(app: &App, event: LambdaEvent<Value>) -> Value {
     let lag = front_end_lag(&event.payload);
     let arrival = entry.checked_sub(lag).unwrap_or(entry);
     let limit = invocation_limit(event.context.deadline, entry);
+    // A direct invocation's benchmark (an HTTP event never has this key).
+    if let Some(spec) = event.payload.get("bench") {
+        return app.bench(spec, limit);
+    }
     let (method, path, body) = match request_of(&event.payload) {
         Ok(r) => r,
         Err((code, text)) => return response(code, text),

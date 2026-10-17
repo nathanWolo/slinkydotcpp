@@ -187,6 +187,162 @@ pub fn egocentric_into(
     Ok(())
 }
 
+/// One seat's observation in the network's structured form (see [`egocentric_sparse_into`]):
+/// where the board lies in the window, the two scalars that fill whole planes, and every other
+/// non-zero input.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SparseObs {
+    /// Window row of the board's row 0 (`r0`; the board fills rows `r0..r0 + H`).
+    pub r0: usize,
+    /// Window column of the board's column 0 (the board fills columns `c0..c0 + W`).
+    pub c0: usize,
+    /// The [`ch::OWN_HEALTH`] value on every board cell.
+    pub health: f32,
+    /// The [`ch::OWN_LENGTH`] value on every board cell.
+    pub length: f32,
+    /// `(window pixel, channel, value)` of every other non-zero input, by pixel
+    /// (`row * (2W-1) + column`) and then channel. [`ch::ON_BOARD`] (1 on every board cell) and
+    /// the two planes above are not listed.
+    pub entries: Vec<(u16, u8, f32)>,
+}
+
+impl SparseObs {
+    /// The dense observation it stands for (`obs_len` floats, as [`egocentric_into`] writes).
+    pub fn expand_into(&self, config: &GameConfig, out: &mut [f32]) {
+        const C: usize = NUM_CHANNELS;
+        let (w, h) = (config.width(), config.height());
+        let cols = 2 * w - 1;
+        out.fill(0.0);
+        for y in 0..h {
+            for x in 0..w {
+                let px = &mut out[((y + self.r0) * cols + x + self.c0) * C..][..C];
+                px[ch::ON_BOARD] = 1.0;
+                px[ch::OWN_HEALTH] = self.health;
+                px[ch::OWN_LENGTH] = self.length;
+            }
+        }
+        for &(p, c, v) in &self.entries {
+            out[p as usize * C + c as usize] = v;
+        }
+    }
+}
+
+/// [`egocentric_into`] in structured form: the same observation, bit for bit once expanded
+/// ([`SparseObs::expand_into`]), without writing the window's thousands of zeros. `out` is
+/// reused (its entries are replaced).
+pub fn egocentric_sparse_into(
+    state: &GameState,
+    config: &GameConfig,
+    seat: usize,
+    hide_food: bool,
+    out: &mut SparseObs,
+) -> Result<(), ObsError> {
+    let (w, h, n) = (config.width(), config.height(), config.num_snakes());
+    if seat >= n {
+        return Err(ObsError::Seat {
+            seat,
+            num_snakes: n,
+        });
+    }
+    let cols = 2 * w - 1;
+    let rc = recip_cells(config);
+    let own_alive = state.alive[seat];
+    out.health = if own_alive {
+        state.health[seat] as f32 * RECIP_100
+    } else {
+        0.0
+    };
+    out.length = if own_alive {
+        state.length[seat] as f32 * rc
+    } else {
+        0.0
+    };
+    let mut opp_buf = [0usize; MAX_SNAKES];
+    let mut k = 0;
+    for j in 0..n {
+        if j != seat && state.alive[j] {
+            opp_buf[k] = j;
+            k += 1;
+        }
+    }
+    let opps = &opp_buf[..k];
+    let hx = state.head[seat][0].clamp(0, w as i32 - 1) as usize;
+    let hy = state.head[seat][1].clamp(0, h as i32 - 1) as usize;
+    let (r0, c0) = (h - 1 - hy, w - 1 - hx);
+    out.r0 = r0;
+    out.c0 = c0;
+    // Head pixels, as `egocentric_into` sets them after the cells.
+    let own_head = if own_alive {
+        state.head_cell(config, seat)
+    } else {
+        None
+    };
+    // (cell, opp_head_ge, opp_head_lt, max health) of the opponents' heads on the board.
+    let mut heads = [(usize::MAX, false, false, 0.0f32); MAX_SNAKES];
+    let mut nh = 0;
+    let own_len = state.length[seat];
+    for &j in opps {
+        if let Some(cell) = state.head_cell(config, j) {
+            let i = heads[..nh]
+                .iter()
+                .position(|e| e.0 == cell)
+                .unwrap_or_else(|| {
+                    heads[nh] = (cell, false, false, 0.0);
+                    nh += 1;
+                    nh - 1
+                });
+            if state.length[j] >= own_len {
+                heads[i].1 = true;
+            } else {
+                heads[i].2 = true;
+            }
+            heads[i].3 = heads[i].3.max(state.health[j] as f32 * RECIP_100);
+        }
+    }
+    let own_body = &state.body[seat];
+    out.entries.clear();
+    for y in 0..h {
+        for x in 0..w {
+            let cell = y * w + x;
+            let food = !hide_food && state.has_food(cell);
+            let hazard = state.hazard[cell];
+            let ob = if own_alive { own_body[cell] } else { 0 };
+            let mut opp_any = false;
+            let mut opp_max: i16 = 0;
+            for &j in opps {
+                let b = state.body[j][cell];
+                opp_any |= b > 0;
+                opp_max = opp_max.max(b);
+            }
+            let head = heads[..nh].iter().find(|e| e.0 == cell);
+            let is_own_head = own_head == Some(cell);
+            if !(food || hazard != 0 || ob != 0 || opp_any || opp_max != 0 || is_own_head)
+                && head.is_none()
+            {
+                continue;
+            }
+            let p = ((y + r0) * cols + x + c0) as u16;
+            let mut put = |c: usize, v: f32| {
+                if v != 0.0 {
+                    out.entries.push((p, c as u8, v));
+                }
+            };
+            put(ch::FOOD, if food { 1.0 } else { 0.0 });
+            put(ch::HAZARD, hazard as f32);
+            put(ch::OWN_HEAD, if is_own_head { 1.0 } else { 0.0 });
+            put(ch::OWN_BODY, f32::from(u8::from(ob > 0)));
+            put(ch::OWN_COUNTDOWN, ob as f32 * rc);
+            let (ge, lt, hp) = head.map_or((false, false, 0.0), |e| (e.1, e.2, e.3));
+            put(ch::OPP_HEAD_GE, if ge { 1.0 } else { 0.0 });
+            put(ch::OPP_HEAD_LT, if lt { 1.0 } else { 0.0 });
+            put(ch::OPP_BODY, f32::from(u8::from(opp_any)));
+            put(ch::OPP_COUNTDOWN, opp_max as f32 * rc);
+            put(ch::OPP_HEAD_HEALTH, hp);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,6 +25,17 @@
 //! computed. On real states (M net) that skips about 45% of the second convolution's
 //! multiply-adds and 20% of the dense layer's.
 //!
+//! The search feeds structured boards ([`BoardInput`], [`Network::forward_boards_into`]): of
+//! the ~400 non-zero inputs of a board, ~360 are three planes that are constant over the 121
+//! board cells (`on_board`, own health, own length). Their contribution to a first-layer output
+//! pixel depends only on which of its 3x3 taps fall on the board, one of 64 row-tap x
+//! column-tap classes, so it is precomputed per class at load time (`board_base`, per unit
+//! value) and the first layer gathers only the ~40 content entries. The rest of the pass is
+//! the dense one's.
+//!
+//! The gather kernels accumulate in [`V4`] lanes (NEON / SSE2 / plain arrays), `K = cout / 4`
+//! vectors per output pixel, each lane rounding exactly as the scalar [`madd`].
+//!
 //! Only multiply-adds by an exact zero activation, and recomputations of all-zero-input pixels,
 //! are skipped, so the result is exact for any input up to float rounding (summation order, and
 //! fused multiply-adds on aarch64): it agrees with XLA to about 1e-6, not bitwise.
@@ -34,6 +45,7 @@ use crate::config::{
 };
 use crate::error::NetError;
 use crate::npy::{Array, parse_npz};
+use crate::simd::V4;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -112,10 +124,10 @@ impl Conv {
     /// leaves out the pixels that are not live (the dense layer adds their precomputed part).
     fn apply(&self, x: &Sparse, out: &mut Sparse, last: bool, acc: &mut [f32]) {
         match self.cout {
-            8 => self.apply_k::<8>(x, out, last),
-            16 => self.apply_k::<16>(x, out, last),
-            32 => self.apply_k::<32>(x, out, last),
-            64 => self.apply_k::<64>(x, out, last),
+            8 => self.apply_k::<2>(x, out, last),
+            16 => self.apply_k::<4>(x, out, last),
+            32 => self.apply_k::<8>(x, out, last),
+            64 => self.apply_k::<16>(x, out, last),
             _ => self.apply_dyn(x, out, last, acc),
         }
     }
@@ -147,9 +159,9 @@ impl Conv {
     /// The pixel loop shared by the kernels: `pixel(oy, ox, base, idx, val)` computes one live
     /// output pixel into `idx` / `val` (room for `cout` entries, indices offset by `base`) and
     /// returns how many it wrote. Pixels that read no live input get the all-zero-board output.
-    /// `CO` is `cout` when it is a compile-time constant (so that copy is inline), else 0.
+    /// `K` is `cout / 4` when it is a compile-time constant (so that copy is inline), else 0.
     #[inline(always)]
-    fn drive<const CO: usize>(
+    fn drive<const K: usize>(
         &self,
         x: &Sparse,
         out: &mut Sparse,
@@ -186,7 +198,7 @@ impl Conv {
                     let (s, e) = (z.start[po] as usize, z.start[po + 1] as usize);
                     // A pixel has at most `cout` entries, and the zero list has room for `cout`
                     // after each pixel's start, so a fixed-length copy is in bounds.
-                    let len = if CO > 0 { CO } else { e - s };
+                    let len = if K > 0 { 4 * K } else { e - s };
                     out.idx[n..n + len].copy_from_slice(&z.idx[s..s + len]);
                     out.val[n..n + len].copy_from_slice(&z.val[s..s + len]);
                     n += e - s;
@@ -197,37 +209,94 @@ impl Conv {
         }
     }
 
-    /// [`Conv::apply`] for a compile-time `cout`, accumulating in registers.
-    fn apply_k<const CO: usize>(&self, x: &Sparse, out: &mut Sparse, last: bool) {
-        self.drive::<CO>(x, out, last, |oy, ox, base, oi, ov| {
-            let y = self.pixel::<CO>(x, oy, ox);
-            let (oi, ov) = (&mut oi[..CO], &mut ov[..CO]);
-            let mut m = 0;
-            for (j, &y) in y.iter().enumerate() {
-                oi[m] = (base + j) as u32;
-                ov[m] = y;
-                m += (y != 0.0) as usize;
-            }
-            m
+    /// [`Conv::apply`] for `cout = 4 * K`, accumulating in registers.
+    fn apply_k<const K: usize>(&self, x: &Sparse, out: &mut Sparse, last: bool) {
+        self.drive::<K>(x, out, last, |oy, ox, base, oi, ov| {
+            let y = self.pixel::<K>(x, oy, ox);
+            compact(y.as_flattened(), base, oi, ov)
         });
     }
 
-    /// `relu(conv + b)` at output pixel `(oy, ox)` for a compile-time `cout`. Not inlined, so
-    /// the compiler vectorises the accumulators on their own (the caller's per-channel
-    /// compaction otherwise talks it into scalar code).
+    /// `relu(conv + b)` at output pixel `(oy, ox)` for `cout = 4 * K`. Not inlined, so the
+    /// accumulators get the registers to themselves.
     #[inline(never)]
-    fn pixel<const CO: usize>(&self, x: &Sparse, oy: usize, ox: usize) -> [f32; CO] {
-        let rows = self.w.as_chunks::<CO>().0;
-        let bias = &self.b.as_chunks::<CO>().0[0];
-        let mut a = [[0f32; CO]; 2];
+    fn pixel<const K: usize>(&self, x: &Sparse, oy: usize, ox: usize) -> [[f32; 4]; K] {
+        let rows = self.w.as_chunks::<4>().0.as_chunks::<K>().0;
+        let bias = &self.b.as_chunks::<4>().0[..K];
+        let mut a = [[V4::zero(); K]; 2];
         self.for_taps(x, oy, ox, |off, idx, val| {
             gather(&mut a, rows, off, idx, val)
         });
-        let mut y = [0f32; CO];
-        for j in 0..CO {
-            y[j] = (a[0][j] + a[1][j] + bias[j]).max(0.0);
+        std::array::from_fn(|k| relu4(a[0][k].add(a[1][k]).add(V4::load(&bias[k]))))
+    }
+
+    /// [`Conv::apply`] of the first convolution on a structured board ([`BoardInput`]): `x`
+    /// holds the board's listed entries only, and the three whole-board planes come from
+    /// `base` (see [`Network::board_base`]). `None` when `cout` has no register kernel (the
+    /// caller then expands the board).
+    fn apply_board(
+        &self,
+        x: &Sparse,
+        board: &BoardConsts,
+        base: &[f32],
+        out: &mut Sparse,
+        last: bool,
+    ) -> Option<()> {
+        match self.cout {
+            8 => self.apply_board_k::<2>(x, board, base, out, last),
+            16 => self.apply_board_k::<4>(x, board, base, out, last),
+            32 => self.apply_board_k::<8>(x, board, base, out, last),
+            64 => self.apply_board_k::<16>(x, board, base, out, last),
+            _ => return None,
         }
-        y
+        Some(())
+    }
+
+    fn apply_board_k<const K: usize>(
+        &self,
+        x: &Sparse,
+        board: &BoardConsts,
+        base: &[f32],
+        out: &mut Sparse,
+        last: bool,
+    ) {
+        self.drive::<K>(x, out, last, |oy, ox, b, oi, ov| {
+            let y = self.pixel_board::<K>(x, board, base, oy, ox);
+            compact(y.as_flattened(), b, oi, ov)
+        });
+    }
+
+    /// [`Conv::pixel`] on a structured board: the listed entries gathered as usual, plus the
+    /// whole-board planes' share for this pixel's on-board taps.
+    #[inline(never)]
+    fn pixel_board<const K: usize>(
+        &self,
+        x: &Sparse,
+        board: &BoardConsts,
+        base: &[f32],
+        oy: usize,
+        ox: usize,
+    ) -> [[f32; 4]; K] {
+        let rows = self.w.as_chunks::<4>().0.as_chunks::<K>().0;
+        let bias = &self.b.as_chunks::<4>().0[..K];
+        let mut a = [[V4::zero(); K]; 2];
+        self.for_taps(x, oy, ox, |off, idx, val| {
+            gather(&mut a, rows, off, idx, val)
+        });
+        let mask = |o: usize, lo: usize| {
+            (0..3).fold(0, |m, d| {
+                let i = (o * self.stride + d).wrapping_sub(self.pad_lo);
+                m | (usize::from(i.wrapping_sub(lo) < BOARD) << d)
+            })
+        };
+        let class = mask(oy, board.r0) * 8 + mask(ox, board.c0);
+        let planes = base[class * 3 * 4 * K..][..3 * 4 * K].as_chunks::<4>().0;
+        std::array::from_fn(|k| {
+            let whole = V4::load(&planes[k])
+                .fma(V4::load(&planes[K + k]), board.health)
+                .fma(V4::load(&planes[2 * K + k]), board.length);
+            relu4(a[0][k].add(a[1][k]).add(whole).add(V4::load(&bias[k])))
+        })
     }
 
     /// [`Conv::apply`] for any `cout`, accumulating in memory.
@@ -258,13 +327,32 @@ impl Conv {
     }
 }
 
+/// `relu` of four lanes, as the scalar `x.max(0.0)` (a NaN becomes 0).
+#[inline(always)]
+fn relu4(x: V4) -> [f32; 4] {
+    x.to_array().map(|v| v.max(0.0))
+}
+
+/// Append the non-zero values of `y` with indices `base + j` to `oi` / `ov`; returns how many.
+#[inline(always)]
+fn compact(y: &[f32], base: usize, oi: &mut [u32], ov: &mut [f32]) -> usize {
+    let (oi, ov) = (&mut oi[..y.len()], &mut ov[..y.len()]);
+    let mut m = 0;
+    for (j, &y) in y.iter().enumerate() {
+        oi[m] = (base + j) as u32;
+        ov[m] = y;
+        m += (y != 0.0) as usize;
+    }
+    m
+}
+
 /// `a += sum_k val[k] * rows[off + idx[k]]` (wrapping offset), in registers: with two
 /// independent accumulator chains (even and odd `k`) when both fit, so the multiply-adds are not
 /// latency bound.
 #[inline(always)]
-fn gather<const N: usize>(
-    a: &mut [[f32; N]; 2],
-    rows: &[[f32; N]],
+fn gather<const K: usize>(
+    a: &mut [[V4; K]; 2],
+    rows: &[[[f32; 4]; K]],
     off: usize,
     idx: &[u32],
     val: &[f32],
@@ -272,21 +360,21 @@ fn gather<const N: usize>(
     // Work on local copies: accumulators behind a `&mut` would be stored back on every step
     // (a bounds-check panic could observe them).
     let row = |i: u32| &rows[off.wrapping_add(i as usize)];
-    if 2 * N <= ACC_FLOATS {
+    if 8 * K <= ACC_FLOATS {
         let [mut a0, mut a1] = *a;
         let (ip, ir) = idx.as_chunks::<2>();
         let (vp, vr) = val.as_chunks::<2>();
         for (i, v) in ip.iter().zip(vp) {
             let (r0, r1) = (row(i[0]), row(i[1]));
-            for j in 0..N {
-                a0[j] = madd(a0[j], v[0], r0[j]);
-                a1[j] = madd(a1[j], v[1], r1[j]);
+            for k in 0..K {
+                a0[k] = a0[k].fma(V4::load(&r0[k]), v[0]);
+                a1[k] = a1[k].fma(V4::load(&r1[k]), v[1]);
             }
         }
         if let (Some(&i), Some(&v)) = (ir.first(), vr.first()) {
             let r = row(i);
-            for j in 0..N {
-                a0[j] = madd(a0[j], v, r[j]);
+            for k in 0..K {
+                a0[k] = a0[k].fma(V4::load(&r[k]), v);
             }
         }
         *a = [a0, a1];
@@ -294,11 +382,91 @@ fn gather<const N: usize>(
         let mut a0 = a[0];
         for (&i, &v) in idx.iter().zip(val) {
             let r = row(i);
-            for j in 0..N {
-                a0[j] = madd(a0[j], v, r[j]);
+            for k in 0..K {
+                a0[k] = a0[k].fma(V4::load(&r[k]), v);
             }
         }
         a[0] = a0;
+    }
+}
+
+/// The round-to-nearest-even bfloat16 of `x` (the high half of its bits). NaN stays NaN.
+fn bf16_bits(x: f32) -> u16 {
+    let b = x.to_bits();
+    if x.is_nan() {
+        return (b >> 16) as u16 | 0x40;
+    }
+    ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
+}
+
+/// A weight type the vector hidden layer reads: `f32`, or bfloat16 bits.
+trait Weight: Copy {
+    fn v4(x: &[Self; 4]) -> V4;
+    fn f32(self) -> f32;
+}
+
+impl Weight for f32 {
+    #[inline(always)]
+    fn v4(x: &[f32; 4]) -> V4 {
+        V4::load(x)
+    }
+    #[inline(always)]
+    fn f32(self) -> f32 {
+        self
+    }
+}
+
+impl Weight for u16 {
+    #[inline(always)]
+    fn v4(x: &[u16; 4]) -> V4 {
+        V4::load_bf16(x)
+    }
+    #[inline(always)]
+    fn f32(self) -> f32 {
+        f32::from_bits(u32::from(self) << 16)
+    }
+}
+
+/// [`hidden_group`] in registers ([`V4`]); the same operations per column.
+#[inline(always)]
+fn hidden_group_v<T: Weight, const G: usize>(
+    w: &[T],
+    h: usize,
+    i: &[u32; G],
+    v: &[f32; G],
+    out: &mut [f32],
+) {
+    const KT: usize = HT / 4;
+    let tiles = h / HT;
+    let rows: [&[T]; G] = std::array::from_fn(|g| &w[i[g] as usize * h..][..h]);
+    let tiled: [&[[[T; 4]; KT]]; G] =
+        std::array::from_fn(|g| rows[g].as_chunks::<4>().0.as_chunks::<KT>().0);
+    let (ot, orest) = out.as_chunks_mut::<HT>();
+    for (t, o) in ot.iter_mut().enumerate() {
+        let o4 = o.as_chunks_mut::<4>().0;
+        let mut a0: [V4; KT] = std::array::from_fn(|k| V4::load(&o4[k]));
+        let mut a1 = [V4::zero(); KT];
+        for g in (0..G - 1).step_by(2) {
+            let (r0, r1) = (&tiled[g][t], &tiled[g + 1][t]);
+            for k in 0..KT {
+                a0[k] = a0[k].fma(T::v4(&r0[k]), v[g]);
+                a1[k] = a1[k].fma(T::v4(&r1[k]), v[g + 1]);
+            }
+        }
+        if G % 2 == 1 {
+            let r = &tiled[G - 1][t];
+            for k in 0..KT {
+                a0[k] = a0[k].fma(T::v4(&r[k]), v[G - 1]);
+            }
+        }
+        for k in 0..KT {
+            a0[k].add(a1[k]).store(&mut o4[k]);
+        }
+    }
+    for (g, r) in rows.iter().enumerate() {
+        for (o, &x) in orest.iter_mut().zip(&r[tiles * HT..]) {
+            *o = madd(*o, v[g], x.f32());
+        }
     }
 }
 
@@ -344,6 +512,28 @@ fn hidden_group<T: Copy + Into<f32>, const G: usize>(
     }
 }
 
+/// [`hidden_add`] in registers ([`hidden_group_v`]).
+fn hidden_add_v<T: Weight>(w: &[T], h: usize, idx: &[u32], val: &[f32], out: &mut [f32]) {
+    let (ig, ir) = idx.as_chunks::<HG>();
+    let (vg, vr) = val.as_chunks::<HG>();
+    for (i, v) in ig.iter().zip(vg) {
+        hidden_group_v(w, h, i, v, out);
+    }
+    let (i4, ir) = ir.as_chunks::<4>();
+    let (v4, vr) = vr.as_chunks::<4>();
+    if let (Some(i), Some(v)) = (i4.first(), v4.first()) {
+        hidden_group_v(w, h, i, v, out);
+    }
+    let (i2, ir) = ir.as_chunks::<2>();
+    let (v2, vr) = vr.as_chunks::<2>();
+    if let (Some(i), Some(v)) = (i2.first(), v2.first()) {
+        hidden_group_v(w, h, i, v, out);
+    }
+    if let (Some(&i), Some(&v)) = (ir.first(), vr.first()) {
+        hidden_group_v(w, h, &[i], &[v], out);
+    }
+}
+
 /// `out += sum_k val[k] * w[idx[k]]` for `w` = `[flat][h]` (rows of `h` floats).
 fn hidden_add<T: Copy + Into<f32>>(w: &[T], h: usize, idx: &[u32], val: &[f32], out: &mut [f32]) {
     let (ig, ir) = idx.as_chunks::<HG>();
@@ -365,6 +555,72 @@ fn hidden_add<T: Copy + Into<f32>>(w: &[T], h: usize, idx: &[u32], val: &[f32], 
     if let (Some(&i), Some(&v)) = (ir.first(), vr.first()) {
         hidden_group(w, h, &[i], &[v], out);
     }
+}
+
+/// Rows (and columns) of the board inside the 21x21 window.
+const BOARD: usize = OBS_ROWS.div_ceil(2);
+
+/// One board's input in structured form: the observation that is 1 in [`CH_ON_BOARD`], `health`
+/// in [`CH_OWN_HEALTH`] and `length` in [`CH_OWN_LENGTH`] on every cell of the 11x11 board (rows
+/// `r0..r0 + 11`, columns `c0..c0 + 11` of the window), 0 off it, plus `entries`. This is how
+/// the egocentric observation is built (`slinky_obs::SparseObs`), and it lets the first
+/// convolution add those three planes from a table instead of gathering about 360 inputs.
+#[derive(Debug, Clone, Copy)]
+pub struct BoardInput<'a> {
+    /// Window row of the board's first row.
+    pub r0: usize,
+    /// Window column of the board's first column.
+    pub c0: usize,
+    /// The value of [`CH_OWN_HEALTH`] on the board.
+    pub health: f32,
+    /// The value of [`CH_OWN_LENGTH`] on the board.
+    pub length: f32,
+    /// `(window pixel, channel, value)` of every other non-zero input, by pixel and then channel,
+    /// all on the board and none in the three planes above.
+    pub entries: &'a [(u16, u8, f32)],
+}
+
+impl BoardInput<'_> {
+    /// The dense `[21][21][13]` observation this board stands for.
+    pub fn expand_into(&self, out: &mut [f32]) -> Result<(), NetError> {
+        if out.len() != OBS_LEN || self.r0 + BOARD > OBS_ROWS || self.c0 + BOARD > OBS_COLS {
+            return Err(NetError::Input("a board outside the window".into()));
+        }
+        out.fill(0.0);
+        for y in self.r0..self.r0 + BOARD {
+            for x in self.c0..self.c0 + BOARD {
+                let px = &mut out[(y * OBS_COLS + x) * OBS_CHANNELS..][..OBS_CHANNELS];
+                px[CH_ON_BOARD] = 1.0;
+                px[CH_OWN_HEALTH] = self.health;
+                px[CH_OWN_LENGTH] = self.length;
+            }
+        }
+        for &(p, c, v) in self.entries {
+            let i = p as usize * OBS_CHANNELS + c as usize;
+            if (c as usize) >= OBS_CHANNELS || i >= OBS_LEN {
+                return Err(NetError::Input(format!(
+                    "entry ({p}, {c}) outside the window"
+                )));
+            }
+            out[i] = v;
+        }
+        Ok(())
+    }
+}
+
+/// Channel 1 on every board cell of a [`BoardInput`].
+pub const CH_ON_BOARD: usize = 0;
+/// Channel equal to [`BoardInput::health`] on every board cell.
+pub const CH_OWN_HEALTH: usize = 11;
+/// Channel equal to [`BoardInput::length`] on every board cell.
+pub const CH_OWN_LENGTH: usize = 12;
+
+/// The scalars of a [`BoardInput`] the first convolution needs.
+struct BoardConsts {
+    r0: usize,
+    c0: usize,
+    health: f32,
+    length: f32,
 }
 
 /// The non-zero activations of one board in compressed form: entries
@@ -432,6 +688,49 @@ impl Sparse {
         }
     }
 
+    /// Load a structured board's listed entries; every board pixel is live (the whole-board
+    /// planes are not zero there). `None` when an entry is off the board or out of order.
+    fn load_board(&mut self, b: &BoardInput) -> Option<()> {
+        if b.r0 + BOARD > OBS_ROWS || b.c0 + BOARD > OBS_COLS {
+            return None;
+        }
+        let pixels = OBS_ROWS * OBS_COLS;
+        let mut p = 0usize;
+        self.start[0] = 0;
+        for (n, &(px, c, v)) in b.entries.iter().enumerate() {
+            let (px, c) = (px as usize, c as usize);
+            let (y, x) = (px / OBS_COLS, px % OBS_COLS);
+            if px < p
+                || c >= OBS_CHANNELS
+                || y.wrapping_sub(b.r0) >= BOARD
+                || x.wrapping_sub(b.c0) >= BOARD
+                || n >= self.idx.len()
+            {
+                return None;
+            }
+            while p < px {
+                p += 1;
+                self.start[p] = n as u32;
+            }
+            self.idx[n] = (x * OBS_CHANNELS + c) as u32;
+            self.val[n] = v;
+        }
+        let n = b.entries.len() as u32;
+        while p < pixels {
+            p += 1;
+            self.start[p] = n;
+        }
+        let cols = ((1u32 << BOARD) - 1) << b.c0;
+        for (y, l) in self.live[..OBS_ROWS].iter_mut().enumerate() {
+            *l = if y.wrapping_sub(b.r0) < BOARD {
+                cols
+            } else {
+                0
+            };
+        }
+        Some(())
+    }
+
     /// The `(idx, val)` entries of pixels `p0..p1`.
     fn entries(&self, p0: usize, p1: usize) -> (&[u32], &[f32]) {
         let (s, e) = (self.start[p0] as usize, self.start[p1] as usize);
@@ -452,10 +751,17 @@ pub struct Network {
     id: u64,
     cfg: NetConfig,
     convs: Vec<Conv>,
+    /// The first convolution's share of the three whole-board planes of a [`BoardInput`], per
+    /// tap class: `[rows mask * 8 + columns mask][plane][cout]`, where bit `d` of a mask is set
+    /// when tap `d` of that axis is on the board, and the planes are [`CH_ON_BOARD`] (times 1),
+    /// [`CH_OWN_HEALTH`] and [`CH_OWN_LENGTH`] (times their value).
+    board_base: Vec<f32>,
     /// `hidden/w`, `[flat][hidden]`.
     hidden_w: Vec<f32>,
     /// Experimental int8 copy of `hidden/w` and its per-column scales, used instead when set.
     hidden_q: Option<(Vec<i8>, Vec<f32>)>,
+    /// bfloat16 copy of `hidden/w` (rounded to nearest even), used instead when set.
+    hidden_bf16: Option<Vec<u16>>,
     /// `[last conv pixels][hidden]`: each last-convolution pixel's share of `flat @ W` for an
     /// all-zero board, added for the pixels that are not live.
     hidden_zero: Vec<f32>,
@@ -574,14 +880,35 @@ impl Network {
         let mut hidden_zero = vec![0.0; pixels * hid];
         for (p, out) in hidden_zero.chunks_exact_mut(hid).enumerate() {
             let (idx, val) = x.entries(p, p + 1);
-            hidden_add(&hidden_w, hid, idx, val, out);
+            hidden_add_v(&hidden_w[..], hid, idx, val, out);
+        }
+        let c0 = &convs[0];
+        let mut board_base = vec![0f32; 64 * 3 * c0.cout];
+        for class in 0..64 {
+            let (rm, cm) = (class / 8, class % 8);
+            for (k, &ch) in [CH_ON_BOARD, CH_OWN_HEALTH, CH_OWN_LENGTH]
+                .iter()
+                .enumerate()
+            {
+                let out = &mut board_base[(class * 3 + k) * c0.cout..][..c0.cout];
+                for dy in (0..3).filter(|d| rm >> d & 1 == 1) {
+                    for dx in (0..3).filter(|d| cm >> d & 1 == 1) {
+                        let row = &c0.w[((3 * dy + dx) * c0.cin + ch) * c0.cout..][..c0.cout];
+                        for (o, &w) in out.iter_mut().zip(row) {
+                            *o += w;
+                        }
+                    }
+                }
+            }
         }
         Ok(Network {
             id: next_id(),
+            board_base,
             cfg,
             convs,
             hidden_w,
             hidden_q: None,
+            hidden_bf16: None,
             hidden_zero,
             hidden_b,
             feat_w,
@@ -626,6 +953,7 @@ impl Network {
     /// exactness: outputs move by up to about 1e-1 instead of 1e-6. `on = false` restores `f32`.
     pub fn quantize_hidden_int8(&mut self, on: bool) {
         self.id = next_id();
+        self.hidden_bf16 = None;
         if !on {
             self.hidden_q = None;
             return;
@@ -646,6 +974,22 @@ impl Network {
             .flat_map(|row| row.iter().zip(&scale).map(|(&w, &s)| (w / s).round() as i8))
             .collect();
         self.hidden_q = Some((q, scale));
+    }
+
+    /// **Off by default; changes the outputs.** Store the dense hidden layer's weights (93% of
+    /// the M net's parameters) as bfloat16, rounded to nearest even, and widen them to `f32` as
+    /// they are used (activations and sums stay `f32`). The layer's weights take half the memory
+    /// (1.2 MB to 0.6 MB for M: inside a 1 MB L2, as on Graviton2), each weight moves by at most
+    /// 2^-9 of itself, and outputs by about 1e-3. `on = false` restores the `f32` weights.
+    pub fn store_hidden_bf16(&mut self, on: bool) {
+        self.id = next_id();
+        self.hidden_q = None;
+        self.hidden_bf16 = on.then(|| self.hidden_w.iter().map(|&w| bf16_bits(w)).collect());
+    }
+
+    /// Whether the hidden layer uses bfloat16 weights ([`Network::store_hidden_bf16`]).
+    pub fn hidden_is_bf16(&self) -> bool {
+        self.hidden_bf16.is_some()
     }
 
     /// Rows, columns and channels of the largest compressed activation (the input or a conv
@@ -752,6 +1096,88 @@ impl Network {
         Ok(())
     }
 
+    /// [`Network::forward_into`] on structured boards ([`BoardInput`], one per row): the same
+    /// outputs up to float rounding (the whole-board planes are added in another order), without
+    /// building or scanning the dense 21x21x13 window.
+    pub fn forward_boards_into(
+        &self,
+        scratch: &mut Scratch,
+        boards: &[BoardInput],
+        feats: &[f32],
+        logits: &mut [[f32; NUM_ACTIONS]],
+        values: &mut [f32],
+    ) -> Result<(), NetError> {
+        let b = values.len();
+        if logits.len() != b || boards.len() != b || feats.len() != b * NUM_FEATURES {
+            return Err(NetError::Input(format!(
+                "batch {b}: got {} boards, {} feature floats (need {}), {} logit rows",
+                boards.len(),
+                feats.len(),
+                b * NUM_FEATURES,
+                logits.len()
+            )));
+        }
+        if !self.scratch_fits(scratch) {
+            *scratch = self.scratch();
+        }
+        let hdim = self.cfg.hidden;
+        for first in (0..b).step_by(MAX_ROWS) {
+            let rows = (b - first).min(MAX_ROWS);
+            for r in 0..rows {
+                if self.torso_board(scratch, &boards[first + r], r).is_none() {
+                    let mut dense = vec![0f32; OBS_LEN];
+                    boards[first + r].expand_into(&mut dense)?;
+                    self.torso(scratch, &dense, r);
+                }
+            }
+            self.hidden(scratch, rows);
+            for r in 0..rows {
+                let feat = &feats[(first + r) * NUM_FEATURES..][..NUM_FEATURES];
+                let h = &mut scratch.hid[r * hdim..][..hdim];
+                self.finish_hidden(h, &mut scratch.term, feat);
+                let (lg, v) = self.heads(h);
+                logits[first + r] = lg;
+                values[first + r] = v;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Network::torso`] of a structured board; `None` (nothing done) when the first
+    /// convolution has no board kernel or the board is malformed.
+    fn torso_board(&self, scratch: &mut Scratch, board: &BoardInput, r: usize) -> Option<()> {
+        let Scratch {
+            ping,
+            pong,
+            torso,
+            acc,
+            ..
+        } = scratch;
+        ping.load_board(board)?;
+        let consts = BoardConsts {
+            r0: board.r0,
+            c0: board.c0,
+            health: board.health,
+            length: board.length,
+        };
+        let last = self.convs.len() - 1;
+        let first = &self.convs[0];
+        if last == 0 {
+            return first.apply_board(ping, &consts, &self.board_base, &mut torso[r], true);
+        }
+        first.apply_board(ping, &consts, &self.board_base, pong, false)?;
+        let (mut cur, mut next) = (pong, ping);
+        for (i, conv) in self.convs.iter().enumerate().skip(1) {
+            if i == last {
+                conv.apply(cur, &mut torso[r], true, acc);
+            } else {
+                conv.apply(cur, next, false, acc);
+                std::mem::swap(&mut cur, &mut next);
+            }
+        }
+        Some(())
+    }
+
     /// The convolutions of one board, leaving the compressed output in `scratch.torso[r]`.
     fn torso(&self, scratch: &mut Scratch, board: &[f32], r: usize) {
         let Scratch {
@@ -785,7 +1211,11 @@ impl Network {
         for (t, out) in scratch.torso[..rows].iter().zip(hid.chunks_exact_mut(hdim)) {
             let (idx, val) = t.entries(0, last.out_pixels());
             match &self.hidden_q {
-                None => hidden_add(&self.hidden_w, hdim, idx, val, out),
+                None if self.hidden_bf16.is_some() => {
+                    let w = self.hidden_bf16.as_deref().unwrap_or_default();
+                    hidden_add_v(w, hdim, idx, val, out);
+                }
+                None => hidden_add_v(&self.hidden_w[..], hdim, idx, val, out),
                 Some((q, scale)) => {
                     hidden_add(q, hdim, idx, val, out);
                     for (o, &s) in out.iter_mut().zip(scale) {
@@ -1033,6 +1463,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn structured_boards_match_the_reference() {
+        let nets = [
+            random_net(&[5, 12, 7], &[2, 1, 3], 37, "all"),
+            random_net(&[8, 16, 32], &[2, 2, 1], 40, "no_mode"),
+            random_net(&[64, 6], &[1, 4], 70, "none"),
+            random_net(&[16, 32, 32], &[2, 2, 1], 256, "all"),
+            random_net(&[16], &[2], 30, "all"),
+            random_net(&[32, 8], &[3, 1], 20, "all"),
+        ];
+        let mut rng = Rng(11);
+        let mut scratch = nets[0].scratch();
+        for net in &nets {
+            for b in [1, 2, 4, 9] {
+                let mut lists = Vec::new();
+                let mut heads = Vec::new();
+                for i in 0..b {
+                    let (r0, c0) = ((3 * i + 1) % 11, (5 * i + 2) % 11);
+                    let mut e = Vec::new();
+                    for y in r0..r0 + BOARD {
+                        for x in c0..c0 + BOARD {
+                            for c in 1..CH_OWN_HEALTH {
+                                let r = rng.next();
+                                if r > 0.8 {
+                                    e.push(((y * OBS_COLS + x) as u16, c as u8, r));
+                                }
+                            }
+                        }
+                    }
+                    let (h, l) = if i % 3 == 2 {
+                        (0.0, 0.0)
+                    } else {
+                        (rng.next(), rng.next())
+                    };
+                    heads.push((r0, c0, h, l));
+                    lists.push(e);
+                }
+                let boards: Vec<BoardInput> = (0..b)
+                    .map(|i| BoardInput {
+                        r0: heads[i].0,
+                        c0: heads[i].1,
+                        health: heads[i].2,
+                        length: heads[i].3,
+                        entries: &lists[i],
+                    })
+                    .collect();
+                let mut obs = vec![0f32; b * OBS_LEN];
+                for (i, bd) in boards.iter().enumerate() {
+                    bd.expand_into(&mut obs[i * OBS_LEN..][..OBS_LEN]).unwrap();
+                }
+                let feats: Vec<f32> = (0..b * NUM_FEATURES).map(|_| rng.next()).collect();
+                let (mut lg, mut v) = (vec![[0f32; NUM_ACTIONS]; b], vec![0f32; b]);
+                net.forward_boards_into(&mut scratch, &boards, &feats, &mut lg, &mut v)
+                    .unwrap();
+                for r in 0..b {
+                    let (wl, wv) = reference(
+                        net,
+                        &obs[r * OBS_LEN..][..OBS_LEN],
+                        &feats[r * NUM_FEATURES..][..NUM_FEATURES],
+                    );
+                    let scale = wl.iter().fold(1f64, |m, l| m.max(l.abs()));
+                    for a in 0..NUM_ACTIONS {
+                        let e = (lg[r][a] as f64 - wl[a]).abs() / scale;
+                        assert!(e < 1e-5, "logit {a} row {r}/{b}: {} vs {}", lg[r][a], wl[a]);
+                    }
+                    assert!((v[r] as f64 - wv).abs() < 1e-5, "value {} vs {wv}", v[r]);
+                }
+            }
+        }
+        // A malformed board is an error or falls back, never a panic.
+        let bad = [(0u16, 1u8, 1.0f32)];
+        let b = BoardInput {
+            r0: 5,
+            c0: 5,
+            health: 0.5,
+            length: 0.1,
+            entries: &bad,
+        };
+        let (mut lg, mut v) = ([[0f32; NUM_ACTIONS]; 1], [0f32; 1]);
+        let _ =
+            nets[3].forward_boards_into(&mut scratch, &[b], &[0.0; NUM_FEATURES], &mut lg, &mut v);
     }
 
     #[test]

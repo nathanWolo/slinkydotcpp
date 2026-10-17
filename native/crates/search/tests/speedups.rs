@@ -262,3 +262,43 @@ fn early_stop_and_reuse_together() {
         }
     }
 }
+
+#[test]
+fn sparse_observations_expand_to_the_dense_ones() {
+    use slinky_obs::{Encoder, OBS_LEN, SparseObs};
+    let mut checked = 0;
+    for (m, &mode) in MODES.iter().enumerate() {
+        for hide in [false, true] {
+            for seed in 0..3u64 {
+                let mut game = Game::new(
+                    EnvConfig::for_mode(mode, None).unwrap(),
+                    300 + 7 * m as u64 + seed,
+                );
+                let enc = Encoder::new(*game.config.rules(), hide);
+                let (mut dense, mut back) = (vec![0f32; OBS_LEN], vec![0f32; OBS_LEN]);
+                let mut sparse = SparseObs::default();
+                for turn in 0..200 {
+                    let n = game.config.rules().num_snakes();
+                    for seat in 0..n {
+                        enc.observe_into(&game.state, seat, &mut dense).unwrap();
+                        enc.observe_sparse_into(&game.state, seat, &mut sparse)
+                            .unwrap();
+                        sparse.expand_into(game.config.rules(), &mut back);
+                        let same = dense
+                            .iter()
+                            .zip(&back)
+                            .all(|(a, b)| a.to_bits() == b.to_bits());
+                        assert!(same, "{mode:?} seed {seed} turn {turn} seat {seat}");
+                        checked += 1;
+                    }
+                    if game.state.done {
+                        break;
+                    }
+                    let out = search(&mut Search::new(), &game, 8, turn, &mut HashEval::default());
+                    game.step(&out.action);
+                }
+            }
+        }
+    }
+    assert!(checked > 2000, "{checked}");
+}
