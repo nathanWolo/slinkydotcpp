@@ -8,10 +8,13 @@
 //!   or a bare `<run dir>`: the az_modes agent of that run. The default is 256 simulations
 //!   (the ladder agent). `time_ms=T` searches each move for `T` ms (not deterministic), at most
 //!   `max_simulations`. `threads=K` uses K root-parallel trees (not recommended).
+//!   `early_stop=1` and `reuse=1` turn on the deployed engine's two speed-ups that keep the
+//!   moves; `int8=1` runs the network in int8 (`Network::quantize_int8`; changes the outputs).
 
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
+use slinky_net::Network;
 use slinky_search::{Agent, DEFAULT_MEMORY_LIMIT, MAX_SIMULATIONS, MoveBudget};
 
 use crate::util::Fnv;
@@ -35,6 +38,8 @@ pub enum PlayerSpec {
         early_stop: bool,
         /// Reuse the evaluations of the agent's previous search ([`Agent::with_reuse`]).
         reuse: bool,
+        /// Run the network in int8 (`Network::quantize_int8`).
+        int8: bool,
     },
 }
 
@@ -58,6 +63,7 @@ impl PlayerSpec {
         let mut memory_limit = DEFAULT_MEMORY_LIMIT;
         let mut early_stop = false;
         let mut reuse = false;
+        let mut int8 = false;
         for p in parts {
             let (key, value) = p
                 .split_once('=')
@@ -74,6 +80,7 @@ impl PlayerSpec {
                 "memory_mb" => memory_limit = (num(value)? as usize).saturating_mul(1 << 20),
                 "early_stop" => early_stop = num(value)? != 0,
                 "reuse" => reuse = num(value)? != 0,
+                "int8" => int8 = num(value)? != 0,
                 _ => return Err(format!("{text:?}: unknown field {key:?}")),
             }
         }
@@ -110,6 +117,7 @@ impl PlayerSpec {
             memory_limit,
             early_stop,
             reuse,
+            int8,
         })
     }
 
@@ -124,6 +132,7 @@ impl PlayerSpec {
                 memory_limit,
                 early_stop,
                 reuse,
+                int8,
             } => {
                 let mut s = format!("az_modes:{}", dir.display());
                 match *budget {
@@ -150,6 +159,9 @@ impl PlayerSpec {
                 if *reuse {
                     s += ":reuse=1";
                 }
+                if *int8 {
+                    s += ":int8=1";
+                }
                 s
             }
         }
@@ -166,6 +178,7 @@ impl PlayerSpec {
                 threads,
                 early_stop,
                 reuse,
+                int8,
                 ..
             } => {
                 let base = dir
@@ -183,6 +196,9 @@ impl PlayerSpec {
                 }
                 if *reuse {
                     s += "r";
+                }
+                if *int8 {
+                    s += "-int8";
                 }
                 s
             }
@@ -224,9 +240,14 @@ impl Player {
                 memory_limit,
                 early_stop,
                 reuse,
+                int8,
             } => {
-                let agent = Agent::load(dir)
-                    .map_err(|e| format!("{}: {e}", dir.display()))?
+                let mut net = Network::load(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                if *int8 {
+                    net.quantize_int8(true)
+                        .map_err(|e| format!("{}: {e}", dir.display()))?;
+                }
+                let agent = Agent::from_network(net)
                     .with_budget(*budget)
                     .with_threads(*threads)
                     .with_memory_limit(*memory_limit)
@@ -285,6 +306,12 @@ mod tests {
         assert!(!s.is_deterministic());
         assert_eq!(s.short_name(), "m@350msx2");
         assert_eq!(PlayerSpec::parse(&s.name()).unwrap(), s);
+        let s = PlayerSpec::parse("az_modes:/r/m:time_ms=50:early_stop=1:reuse=1:int8=1").unwrap();
+        assert_eq!(
+            s.name(),
+            "az_modes:/r/m:time_ms=50:early_stop=1:reuse=1:int8=1"
+        );
+        assert_eq!(s.short_name(), "m@50mser-int8");
         let s = PlayerSpec::parse("az_modes:/r/m:time_ms=100:memory_mb=64").unwrap();
         assert_eq!(s.name(), "az_modes:/r/m:time_ms=100:memory_mb=64");
         for bad in [

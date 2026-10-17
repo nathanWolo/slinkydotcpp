@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 slinky-api = { path = "../api" }
 slinky-env = { path = "../env" }
+slinky-net = { path = "../net" }
 slinky-rules = { path = "../rules" }
 slinky-search = { path = "../search" }
 serde_json = "1"

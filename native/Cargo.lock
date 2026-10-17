@@ -607,6 +607,7 @@ dependencies = [
  "serde_json",
  "slinky-api",
  "slinky-env",
+ "slinky-net",
  "slinky-rules",
  "slinky-search",
 ]

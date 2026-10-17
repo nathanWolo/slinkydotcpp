@@ -179,7 +179,9 @@ Agents:
 
 * `random_legal`;
 * `az_modes:<run dir>` with `:simulations=N` (default 256), or `:time_ms=T[:max_simulations=N]`
-  (not deterministic), and optionally `:threads=K`. A bare run dir also works.
+  (not deterministic), and optionally `:threads=K`, `:early_stop=1` and `:reuse=1` (the
+  deployed engine's speed-ups that keep the moves) and `:int8=1` (the int8 network,
+  `Network::quantize_int8`). A bare run dir also works.
 
 Options:
 
