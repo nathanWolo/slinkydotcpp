@@ -1,0 +1,11 @@
+[package]
+name = "slinky-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Full Battlesnake game simulator for native self-play (port of slinky's env.py, maps.py and modes.py around slinky-rules)"
+
+[dependencies]
+slinky-rules = { path = "../rules" }
+slinky-api = { path = "../api" }
+serde_json = "1"

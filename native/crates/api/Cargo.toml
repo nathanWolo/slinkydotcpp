@@ -1,0 +1,11 @@
+[package]
+name = "slinky-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Battlesnake API request/response types and the request -> game state conversion"
+
+[dependencies]
+slinky-rules = { path = "../rules" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

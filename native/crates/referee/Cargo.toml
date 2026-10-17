@@ -1,0 +1,17 @@
+[package]
+name = "slinky-referee"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native match runner (naz-match): strength tests between native agents in the four ladder modes, with slinky's scoring and sequential stopping"
+
+[[bin]]
+name = "naz-match"
+path = "src/main.rs"
+
+[dependencies]
+slinky-api = { path = "../api" }
+slinky-env = { path = "../env" }
+slinky-rules = { path = "../rules" }
+slinky-search = { path = "../search" }
+serde_json = "1"

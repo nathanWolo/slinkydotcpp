@@ -1,0 +1,605 @@
+{
+ "modes": [
+  "standard",
+  "duel",
+  "royale",
+  "constrictor"
+ ],
+ "requests": {
+  "standard": {
+   "game": {
+    "id": "example-standard",
+    "ruleset": {
+     "name": "standard",
+     "settings": {
+      "foodSpawnChance": 15,
+      "minimumFood": 1,
+      "hazardDamagePerTurn": 14,
+      "royale": {
+       "shrinkEveryNTurns": 25
+      }
+     }
+    },
+    "map": "standard",
+    "timeout": 500
+   },
+   "turn": 0,
+   "board": {
+    "width": 11,
+    "height": 11,
+    "food": [
+     {
+      "x": 0,
+      "y": 2
+     },
+     {
+      "x": 10,
+      "y": 2
+     },
+     {
+      "x": 5,
+      "y": 5
+     },
+     {
+      "x": 0,
+      "y": 8
+     },
+     {
+      "x": 10,
+      "y": 8
+     }
+    ],
+    "hazards": [],
+    "snakes": [
+     {
+      "id": "s0",
+      "name": "s0",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 1
+      },
+      "length": 3
+     },
+     {
+      "id": "s1",
+      "name": "s1",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 9
+      },
+      "length": 3
+     },
+     {
+      "id": "s2",
+      "name": "s2",
+      "health": 100,
+      "body": [
+       {
+        "x": 1,
+        "y": 1
+       },
+       {
+        "x": 1,
+        "y": 1
+       },
+       {
+        "x": 1,
+        "y": 1
+       }
+      ],
+      "head": {
+       "x": 1,
+       "y": 1
+      },
+      "length": 3
+     },
+     {
+      "id": "s3",
+      "name": "s3",
+      "health": 100,
+      "body": [
+       {
+        "x": 1,
+        "y": 9
+       },
+       {
+        "x": 1,
+        "y": 9
+       },
+       {
+        "x": 1,
+        "y": 9
+       }
+      ],
+      "head": {
+       "x": 1,
+       "y": 9
+      },
+      "length": 3
+     }
+    ]
+   },
+   "you": {
+    "id": "s0",
+    "name": "s0",
+    "health": 100,
+    "body": [
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     }
+    ],
+    "head": {
+     "x": 9,
+     "y": 1
+    },
+    "length": 3
+   }
+  },
+  "duel": {
+   "game": {
+    "id": "example-duel",
+    "ruleset": {
+     "name": "standard",
+     "settings": {
+      "foodSpawnChance": 15,
+      "minimumFood": 1,
+      "hazardDamagePerTurn": 14,
+      "royale": {
+       "shrinkEveryNTurns": 25
+      }
+     }
+    },
+    "map": "standard",
+    "timeout": 500
+   },
+   "turn": 0,
+   "board": {
+    "width": 11,
+    "height": 11,
+    "food": [
+     {
+      "x": 10,
+      "y": 2
+     },
+     {
+      "x": 5,
+      "y": 5
+     },
+     {
+      "x": 10,
+      "y": 8
+     }
+    ],
+    "hazards": [],
+    "snakes": [
+     {
+      "id": "s0",
+      "name": "s0",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 1
+      },
+      "length": 3
+     },
+     {
+      "id": "s1",
+      "name": "s1",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 9
+      },
+      "length": 3
+     }
+    ]
+   },
+   "you": {
+    "id": "s0",
+    "name": "s0",
+    "health": 100,
+    "body": [
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     }
+    ],
+    "head": {
+     "x": 9,
+     "y": 1
+    },
+    "length": 3
+   }
+  },
+  "royale": {
+   "game": {
+    "id": "example-royale",
+    "ruleset": {
+     "name": "royale",
+     "settings": {
+      "foodSpawnChance": 15,
+      "minimumFood": 1,
+      "hazardDamagePerTurn": 14,
+      "royale": {
+       "shrinkEveryNTurns": 25
+      }
+     }
+    },
+    "map": "royale",
+    "timeout": 500
+   },
+   "turn": 0,
+   "board": {
+    "width": 11,
+    "height": 11,
+    "food": [
+     {
+      "x": 0,
+      "y": 2
+     },
+     {
+      "x": 10,
+      "y": 2
+     },
+     {
+      "x": 5,
+      "y": 5
+     },
+     {
+      "x": 0,
+      "y": 8
+     },
+     {
+      "x": 10,
+      "y": 8
+     }
+    ],
+    "hazards": [],
+    "snakes": [
+     {
+      "id": "s0",
+      "name": "s0",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 1
+      },
+      "length": 3
+     },
+     {
+      "id": "s1",
+      "name": "s1",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 9
+      },
+      "length": 3
+     },
+     {
+      "id": "s2",
+      "name": "s2",
+      "health": 100,
+      "body": [
+       {
+        "x": 1,
+        "y": 1
+       },
+       {
+        "x": 1,
+        "y": 1
+       },
+       {
+        "x": 1,
+        "y": 1
+       }
+      ],
+      "head": {
+       "x": 1,
+       "y": 1
+      },
+      "length": 3
+     },
+     {
+      "id": "s3",
+      "name": "s3",
+      "health": 100,
+      "body": [
+       {
+        "x": 1,
+        "y": 9
+       },
+       {
+        "x": 1,
+        "y": 9
+       },
+       {
+        "x": 1,
+        "y": 9
+       }
+      ],
+      "head": {
+       "x": 1,
+       "y": 9
+      },
+      "length": 3
+     }
+    ]
+   },
+   "you": {
+    "id": "s0",
+    "name": "s0",
+    "health": 100,
+    "body": [
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     }
+    ],
+    "head": {
+     "x": 9,
+     "y": 1
+    },
+    "length": 3
+   }
+  },
+  "constrictor": {
+   "game": {
+    "id": "example-constrictor",
+    "ruleset": {
+     "name": "constrictor",
+     "settings": {
+      "foodSpawnChance": 15,
+      "minimumFood": 1,
+      "hazardDamagePerTurn": 14,
+      "royale": {
+       "shrinkEveryNTurns": 25
+      }
+     }
+    },
+    "map": "standard",
+    "timeout": 500
+   },
+   "turn": 0,
+   "board": {
+    "width": 11,
+    "height": 11,
+    "food": [],
+    "hazards": [],
+    "snakes": [
+     {
+      "id": "s0",
+      "name": "s0",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       },
+       {
+        "x": 9,
+        "y": 1
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 1
+      },
+      "length": 3
+     },
+     {
+      "id": "s1",
+      "name": "s1",
+      "health": 100,
+      "body": [
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       },
+       {
+        "x": 9,
+        "y": 9
+       }
+      ],
+      "head": {
+       "x": 9,
+       "y": 9
+      },
+      "length": 3
+     },
+     {
+      "id": "s2",
+      "name": "s2",
+      "health": 100,
+      "body": [
+       {
+        "x": 1,
+        "y": 1
+       },
+       {
+        "x": 1,
+        "y": 1
+       },
+       {
+        "x": 1,
+        "y": 1
+       }
+      ],
+      "head": {
+       "x": 1,
+       "y": 1
+      },
+      "length": 3
+     },
+     {
+      "id": "s3",
+      "name": "s3",
+      "health": 100,
+      "body": [
+       {
+        "x": 1,
+        "y": 9
+       },
+       {
+        "x": 1,
+        "y": 9
+       },
+       {
+        "x": 1,
+        "y": 9
+       }
+      ],
+      "head": {
+       "x": 1,
+       "y": 9
+      },
+      "length": 3
+     }
+    ]
+   },
+   "you": {
+    "id": "s0",
+    "name": "s0",
+    "health": 100,
+    "body": [
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     },
+     {
+      "x": 9,
+      "y": 1
+     }
+    ],
+    "head": {
+     "x": 9,
+     "y": 1
+    },
+    "length": 3
+   }
+  }
+ }
+}

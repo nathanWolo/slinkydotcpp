@@ -3,16 +3,23 @@
 The remote snake plays seat 0 through the real Battlesnake API (``/start``,
 ``/move``, ``/end``); a local agent plays seat 1. Every remote move is compared
 with the same snake's local numpy network (``snake_numpy.py``) on the same
-request::
+request, or for a native snake (``lambda_function.NATIVE``, e.g. ``az-256``)
+with a local ``slinky-engine`` process (an x86 build of the same engine, with
+the same weights and simulations: its moves are a function of the request)::
 
     python deploy/lambda/check_live.py https://<id>.lambda-url.us-east-2.on.aws/ppo \
         --games 8 --parallel 4 --opponent heuristic
+    python deploy/lambda/check_live.py https://<id>.lambda-url.us-east-2.on.aws/az-256 \
+        --engine /dev/shm/naz-target-deployprep-unwind/release/slinky-engine \
+        --native-run /home/nathan/slinky-serve/az-modes-M-s0 --simulations 256
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -26,7 +33,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import snake_numpy as sn  # noqa: E402
-from lambda_function import SNAKES  # noqa: E402  (loads no network)
+from lambda_function import NATIVE, SNAKES  # noqa: E402  (loads no network)
 
 from slinky.agents import make_agent, make_env  # noqa: E402
 from slinky.engine_json import state_to_engine  # noqa: E402
@@ -73,13 +80,42 @@ def to_request(d: dict, game_id: str, turn: int) -> dict:
     }
 
 
-def post(url: str, body: dict) -> tuple[float, dict]:
-    data = json.dumps(body).encode()
+def post(url: str, body: dict | str) -> tuple[float, dict]:
+    data = (body if isinstance(body, str) else json.dumps(body)).encode()
     req = urllib.request.Request(url, data, {"Content-Type": "application/json"})
     t = time.perf_counter()
     with urllib.request.urlopen(req, timeout=10) as r:
         out = json.loads(r.read() or b"{}")
     return (time.perf_counter() - t) * 1e3, out
+
+
+class LocalEngine:
+    """A local ``slinky-engine`` process playing the native snake ``name``."""
+
+    def __init__(self, binary: str, run: Path, name: str, simulations: int) -> None:
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "WEIGHTS_DIR": str(run.parent),
+            "SNAKES": f"{name}={run.name}:simulations={simulations}",
+        }
+        self.name = name
+        self.p = subprocess.Popen(
+            [binary],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        self.i = 0
+        self.lock = threading.Lock()
+
+    def ask(self, kind: str, body: str) -> dict:
+        with self.lock:
+            self.i += 1
+            line = {"id": self.i, "snake": self.name, "kind": kind, "body": body}
+            self.p.stdin.write(json.dumps(line).encode() + b"\n")
+            self.p.stdin.flush()
+            return json.loads(self.p.stdout.readline())["reply"]
 
 
 def main() -> None:
@@ -89,6 +125,25 @@ def main() -> None:
     p.add_argument("--parallel", type=int, default=4)
     p.add_argument("--opponent", default="heuristic")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--engine",
+        default=os.environ.get(
+            "SLINKY_ENGINE_BIN", "/dev/shm/naz-target-deployprep-unwind/release/slinky-engine"
+        ),
+        help="local slinky-engine (host build) for a native snake",
+    )
+    p.add_argument(
+        "--native-run",
+        type=Path,
+        default=Path("/home/nathan/slinky-serve/az-modes-M-s0"),
+        help="the native snake's az_modes run dir",
+    )
+    p.add_argument(
+        "--simulations",
+        type=int,
+        default=None,
+        help="the deployed SNAKE_SIMULATIONS_<NAME> (default: from lambda_function)",
+    )
     args = p.parse_args()
     base = args.url.rstrip("/")
 
@@ -97,10 +152,28 @@ def main() -> None:
         print(f"GET {base}: {json.loads(r.read())} ({(time.perf_counter() - t) * 1e3:.0f} ms)")
 
     name = base.rsplit("/", 1)[-1]
-    if name not in SNAKES:
-        p.error(f"the URL must end in a snake name: {', '.join(SNAKES)}")
-    folder = ROOT / "baselines" / "checkpoints" / SNAKES[name][0]
-    net = sn.Net(str(folder / "params.npz"), json.loads((folder / "config.json").read_text()))
+    if name not in SNAKES and name not in NATIVE:
+        p.error(f"the URL must end in a snake name: {', '.join([*SNAKES, *NATIVE])}")
+    if name in NATIVE:
+        sims = args.simulations or NATIVE[name][2]
+        engine = LocalEngine(args.engine, args.native_run, name, sims)
+        print(f"local reference: {args.engine}, {args.native_run}, {sims} simulations")
+
+        def local_move(req: dict, text: str) -> int:
+            return sn.MOVE_NAMES.index(engine.ask("move", text)["move"])
+
+        def local_event(kind: str, text: str) -> None:
+            engine.ask(kind, text)
+    else:
+        folder = ROOT / "baselines" / "checkpoints" / SNAKES[name][0]
+        net = sn.Net(str(folder / "params.npz"), json.loads((folder / "config.json").read_text()))
+
+        def local_move(req: dict, text: str) -> int:
+            return net.move(sn.Board(req))
+
+        def local_event(kind: str, text: str) -> None:
+            pass
+
     env = make_env(DUEL, False)
     opp = make_agent(args.opponent, DUEL)
     reset, step, opp_policy = jax.jit(env.reset), jax.jit(env.step), jax.jit(opp.policy)
@@ -113,13 +186,16 @@ def main() -> None:
         with lock:  # jitted calls are thread-safe, but compile once
             state, ts = reset(k)
         gid = f"check-{args.seed}-{g}"
-        post(base + "/start", to_request(state_to_engine(state, DUEL), gid, 0))
+        start = json.dumps(to_request(state_to_engine(state, DUEL), gid, 0))
+        post(base + "/start", start)
+        local_event("start", start)
         turn = 0
         while not bool(state.done):
             req = to_request(state_to_engine(state, DUEL), gid, turn)
-            ms, out = post(base + "/move", req)
+            text = json.dumps(req)  # the same bytes to the remote and the local snake
+            ms, out = post(base + "/move", text)
             remote = sn.MOVE_NAMES.index(out["move"])
-            local = net.move(sn.Board(req))
+            local = local_move(req, text)
             key, k1, k2 = jax.random.split(key, 3)
             theirs = opp_policy(k1, state, ts)
             state, ts = step(k2, state, theirs.at[0].set(remote))
@@ -128,8 +204,9 @@ def main() -> None:
                 lat.append(ms)
                 if remote != local:
                     mismatches.append((gid, turn, out["move"], sn.MOVE_NAMES[local]))
-        end = to_request(state_to_engine(state, DUEL), gid, turn)
+        end = json.dumps(to_request(state_to_engine(state, DUEL), gid, turn))
         post(base + "/end", end)
+        local_event("end", end)
         alive = np.asarray(state.alive)
         with lock:
             results.append(
@@ -147,10 +224,11 @@ def main() -> None:
     )
     print(
         f"{len(a)} moves: round trip median {np.median(a):.0f} ms, "
-        f"p95 {a[int(0.95 * len(a))]:.0f} ms, "
+        f"p95 {a[int(0.95 * len(a))]:.0f} ms, p99 {a[int(0.99 * len(a))]:.0f} ms, "
         f"max {a[-1]:.0f} ms; over 400 ms: {(a > 400).sum()}"
     )
-    print(f"moves differing from the local numpy {name}: {len(mismatches)}", mismatches[:5])
+    what = "native engine" if name in NATIVE else "numpy"
+    print(f"moves differing from the local {what} {name}: {len(mismatches)}", mismatches[:5])
 
 
 if __name__ == "__main__":
