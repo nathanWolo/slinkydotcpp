@@ -33,8 +33,10 @@
 //! * [`Network::config`]`() -> &NetConfig`: includes `c_puct`, `fpu_reduction`, `draw_value`,
 //!   `hide_constrictor_food`, `game_modes` for the search and observation crates.
 //! * [`Network::num_params`], [`Network::scratch`].
-//! * [`Network::quantize_hidden_int8`]`(&mut self, on: bool)`: experimental, off by default (an
-//!   int8 hidden layer: 4x less weight memory, outputs off by up to ~1e-1; see its docs).
+//! * [`Network::quantize_int8`]`(&mut self, on: bool) -> Result<(), NetError>`: off by default,
+//!   changes the outputs (every layer after the first convolution in int8, with dot-product
+//!   kernels where the CPU has them: [`Int8Kernel`], [`Network::int8_kernel`],
+//!   [`Network::set_int8_kernel`]).
 //! * [`Network::store_hidden_bf16`]`(&mut self, on: bool)`: experimental, off by default (the
 //!   hidden layer's weights rounded to bfloat16, half the memory of the largest matrix; outputs
 //!   off by about 2e-3).
@@ -54,6 +56,15 @@
 //! path against 35 us dense (`cargo run --release -p slinky-lambda --example lambda_bench -- <run
 //! dir>`, which also runs on the Lambda itself: `deploy/lambda-native/README.md`).
 //!
+//! [`Network::quantize_int8`] runs the layers after the first convolution on int8 dot-product
+//! instructions. On the same Xeon (AVX-VNNI, which does one 256-bit `vpdpbusd` per cycle there)
+//! the M net's rows take 16-17 us instead of 25-27, and a 200 ms search reaches 1.5-1.7x the
+//! simulations. Graviton2's `sdot` has four times the multiply-adds of its `f32` `fmla` per
+//! cycle, where the Xeon's VNNI has two, so the gain there should be larger (the Lambda
+//! benchmark reports it). The outputs move by 3e-3 to 5e-3 on average (at most about 4.5e-2,
+//! with proxy weights), the greedy move flips on about 2% of the searches' nodes, and a
+//! 256-simulation search picked the same move in 47 of 48 positions.
+//!
 //! The raw feature vector goes in: for `features = "no_mode"` the network masks the one-hot and
 //! shrink phase itself, for `"none"` it ignores the features. Food hiding in constrictor
 //! (`hide_constrictor_food`) is the observation builder's job. Only `compute_dtype = "float32"`
@@ -63,6 +74,7 @@ mod config;
 mod error;
 mod network;
 pub mod npy;
+mod quant;
 mod simd;
 
 pub use config::{
@@ -74,3 +86,4 @@ pub use network::{
     BoardInput, CH_ON_BOARD, CH_OWN_HEALTH, CH_OWN_LENGTH, Network, Output, Scratch,
 };
 pub use npy::Array;
+pub use quant::Int8Kernel;

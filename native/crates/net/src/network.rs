@@ -45,6 +45,7 @@ use crate::config::{
 };
 use crate::error::NetError;
 use crate::npy::{Array, parse_npz};
+use crate::quant::{self, Int8Kernel};
 use crate::simd::V4;
 use std::collections::HashMap;
 use std::path::Path;
@@ -327,6 +328,22 @@ impl Conv {
     }
 }
 
+/// The largest of `v` and 0, four lanes at a time (a running scalar max is one long chain).
+fn max_of(v: &[f32]) -> f32 {
+    let (fours, rest) = v.as_chunks::<4>();
+    let (pairs, odd) = fours.as_chunks::<2>();
+    let (mut a, mut b) = (V4::zero(), V4::zero());
+    for [x, y] in pairs {
+        a = a.max(V4::load(x));
+        b = b.max(V4::load(y));
+    }
+    if let Some(x) = odd.first() {
+        a = a.max(V4::load(x));
+    }
+    let m = a.max(b).to_array().into_iter().fold(0f32, f32::max);
+    rest.iter().fold(m, |m, &x| m.max(x))
+}
+
 /// `relu` of four lanes, as the scalar `x.max(0.0)` (a NaN becomes 0).
 #[inline(always)]
 fn relu4(x: V4) -> [f32; 4] {
@@ -427,7 +444,9 @@ impl Weight for u16 {
     }
 }
 
-/// [`hidden_group`] in registers ([`V4`]); the same operations per column.
+/// `out += sum_g v[g] * w[i[g]]` for `w` = `[flat][h]`, one group of `G` rows, in registers
+/// ([`V4`]): two accumulator chains (even and odd `g`), so the multiply-adds are not latency
+/// bound. The weights are `f32`, or bfloat16 ([`Network::store_hidden_bf16`]).
 #[inline(always)]
 fn hidden_group_v<T: Weight, const G: usize>(
     w: &[T],
@@ -470,49 +489,8 @@ fn hidden_group_v<T: Weight, const G: usize>(
     }
 }
 
-/// `out += sum_g v[g] * w[i[g]]` for `w` = `[flat][h]`, one group of `G` rows. The weights are
-/// `f32`, or `i8` for the experimental quantised layer ([`Network::quantize_hidden_int8`]).
-#[inline(always)]
-fn hidden_group<T: Copy + Into<f32>, const G: usize>(
-    w: &[T],
-    h: usize,
-    i: &[u32; G],
-    v: &[f32; G],
-    out: &mut [f32],
-) {
-    let tiles = h / HT;
-    let rows: [&[T]; G] = std::array::from_fn(|g| &w[i[g] as usize * h..][..h]);
-    let tiled: [&[[T; HT]]; G] = std::array::from_fn(|g| rows[g].as_chunks::<HT>().0);
-    let (ot, orest) = out.as_chunks_mut::<HT>();
-    for (t, o) in ot.iter_mut().enumerate() {
-        // Two accumulator chains (even and odd g), so the multiply-adds are not latency bound.
-        let mut a0 = *o;
-        let mut a1 = [0f32; HT];
-        for g in (0..G - 1).step_by(2) {
-            let (r0, r1) = (&tiled[g][t], &tiled[g + 1][t]);
-            for j in 0..HT {
-                a0[j] = madd(a0[j], v[g], r0[j].into());
-                a1[j] = madd(a1[j], v[g + 1], r1[j].into());
-            }
-        }
-        if G % 2 == 1 {
-            let r = &tiled[G - 1][t];
-            for j in 0..HT {
-                a0[j] = madd(a0[j], v[G - 1], r[j].into());
-            }
-        }
-        for j in 0..HT {
-            o[j] = a0[j] + a1[j];
-        }
-    }
-    for (g, r) in rows.iter().enumerate() {
-        for (o, &x) in orest.iter_mut().zip(&r[tiles * HT..]) {
-            *o = madd(*o, v[g], x.into());
-        }
-    }
-}
-
-/// [`hidden_add`] in registers ([`hidden_group_v`]).
+/// `out += sum_k val[k] * w[idx[k]]` for `w` = `[flat][h]` (rows of `h` weights), in groups of
+/// [`HG`] rows (the last < 8 in groups of 4, 2 and 1).
 fn hidden_add_v<T: Weight>(w: &[T], h: usize, idx: &[u32], val: &[f32], out: &mut [f32]) {
     let (ig, ir) = idx.as_chunks::<HG>();
     let (vg, vr) = val.as_chunks::<HG>();
@@ -531,29 +509,6 @@ fn hidden_add_v<T: Weight>(w: &[T], h: usize, idx: &[u32], val: &[f32], out: &mu
     }
     if let (Some(&i), Some(&v)) = (ir.first(), vr.first()) {
         hidden_group_v(w, h, &[i], &[v], out);
-    }
-}
-
-/// `out += sum_k val[k] * w[idx[k]]` for `w` = `[flat][h]` (rows of `h` floats).
-fn hidden_add<T: Copy + Into<f32>>(w: &[T], h: usize, idx: &[u32], val: &[f32], out: &mut [f32]) {
-    let (ig, ir) = idx.as_chunks::<HG>();
-    let (vg, vr) = val.as_chunks::<HG>();
-    for (i, v) in ig.iter().zip(vg) {
-        hidden_group(w, h, i, v, out);
-    }
-    // The last < 8 entries in groups of 4, 2 and 1.
-    let (i4, ir) = ir.as_chunks::<4>();
-    let (v4, vr) = vr.as_chunks::<4>();
-    if let (Some(i), Some(v)) = (i4.first(), v4.first()) {
-        hidden_group(w, h, i, v, out);
-    }
-    let (i2, ir) = ir.as_chunks::<2>();
-    let (v2, vr) = vr.as_chunks::<2>();
-    if let (Some(i), Some(v)) = (i2.first(), v2.first()) {
-        hidden_group(w, h, i, v, out);
-    }
-    if let (Some(&i), Some(&v)) = (ir.first(), vr.first()) {
-        hidden_group(w, h, &[i], &[v], out);
     }
 }
 
@@ -758,8 +713,8 @@ pub struct Network {
     board_base: Vec<f32>,
     /// `hidden/w`, `[flat][hidden]`.
     hidden_w: Vec<f32>,
-    /// Experimental int8 copy of `hidden/w` and its per-column scales, used instead when set.
-    hidden_q: Option<(Vec<i8>, Vec<f32>)>,
+    /// The int8 body ([`Network::quantize_int8`]), used instead when set.
+    int8: Option<QBody>,
     /// bfloat16 copy of `hidden/w` (rounded to nearest even), used instead when set.
     hidden_bf16: Option<Vec<u16>>,
     /// `[last conv pixels][hidden]`: each last-convolution pixel's share of `flat @ W` for an
@@ -773,6 +728,45 @@ pub struct Network {
     value_b: f32,
 }
 
+/// An int8 convolution ([`Network::quantize_int8`]).
+struct QConv {
+    /// `[tap][cin / 4][cout]` groups of four input channels' int8 weights.
+    w: Vec<[i8; 4]>,
+    /// Per output channel: weight = int8 * scale.
+    scale: Vec<f32>,
+    /// The `f32` all-zero-board output, dense `[pixel][cout]` (for the pixels that are not
+    /// live).
+    zero: Vec<f32>,
+}
+
+/// The int8 layers of a network: every convolution after the first, and the hidden layer.
+struct QBody {
+    kernel: Int8Kernel,
+    /// Convolutions `1..`.
+    convs: Vec<QConv>,
+    /// `[flat / 4][hidden]` groups of four torso entries' int8 weights.
+    hidden_w: Vec<[i8; 4]>,
+    hidden_scale: Vec<f32>,
+}
+
+/// Dense work buffers of the int8 body.
+struct QScratch {
+    /// A layer's dense `f32` output.
+    a: Vec<f32>,
+    /// The int8 input of the next layer.
+    x: Vec<[i8; 4]>,
+    acc: Vec<i32>,
+    /// Per output channel, the factor from an `i32` sum to `f32`.
+    scale: Vec<f32>,
+    /// Per row of a group of up to [`MAX_ROWS`]: the hidden layer's int8 input (the live
+    /// pixels of the last convolution), its scale and the live pixels.
+    hx: Vec<[i8; 4]>,
+    hscale: [f32; MAX_ROWS],
+    hlive: [[u32; OBS_ROWS]; MAX_ROWS],
+    /// `[MAX_ROWS][hidden]` sums of the hidden layer.
+    hacc: Vec<i32>,
+}
+
 /// Reusable work buffers for [`Network::forward_into`], so an evaluation allocates nothing.
 pub struct Scratch {
     ping: Sparse,
@@ -783,6 +777,7 @@ pub struct Scratch {
     hid: Vec<f32>,
     term: Vec<f32>,
     acc: Vec<f32>,
+    q: QScratch,
 }
 
 /// Policy logits and value of a batch, as returned by [`Network::forward`].
@@ -907,7 +902,7 @@ impl Network {
             cfg,
             convs,
             hidden_w,
-            hidden_q: None,
+            int8: None,
             hidden_bf16: None,
             hidden_zero,
             hidden_b,
@@ -920,7 +915,7 @@ impl Network {
     }
 
     /// An id no other network of this process has, renewed whenever this one's outputs change
-    /// ([`Network::quantize_hidden_int8`]): equal ids give bit-identical outputs, so a cache of
+    /// ([`Network::quantize_int8`], [`Network::store_hidden_bf16`]): equal ids give bit-identical outputs, so a cache of
     /// outputs can be keyed by it.
     pub fn id(&self) -> u64 {
         self.id
@@ -946,34 +941,74 @@ impl Network {
             + 1
     }
 
-    /// **Experimental, off by default.** Quantise the dense hidden layer's weights (93% of the
-    /// M net's parameters) to int8 with one symmetric scale per output column, and use them
-    /// (converted on the fly; activations stay `f32`) in every later forward pass. This cuts that
-    /// layer's weight memory 4x (1.2 MB to 0.3 MB for M, so it fits a 1 MB L2) at the cost of
-    /// exactness: outputs move by up to about 1e-1 instead of 1e-6. `on = false` restores `f32`.
-    pub fn quantize_hidden_int8(&mut self, on: bool) {
-        self.id = next_id();
-        self.hidden_bf16 = None;
+    /// **Off by default; changes the outputs.** Run every convolution after the first and the
+    /// dense hidden layer in int8 (see the `quant` module): weights rounded with one scale per
+    /// output channel, activations with one scale per board and layer, sums exact in `i32`. On
+    /// CPUs with int8 dot-product instructions (aarch64 `dotprod`, x86-64 AVX-VNNI) a row
+    /// takes about two thirds of the `f32` time or less; the outputs move by about 5e-3 (at
+    /// most about 5e-2). Elsewhere the plain Rust kernel is much slower than `f32`. Every kernel
+    /// gives the same bits. `on = false` restores `f32`. An error (nothing changed) when the
+    /// shapes have no int8 kernel: fewer than two convolutions, or channel counts or a hidden
+    /// width that are not multiples of 16.
+    pub fn quantize_int8(&mut self, on: bool) -> Result<(), NetError> {
         if !on {
-            self.hidden_q = None;
-            return;
-        }
-        let h = self.cfg.hidden;
-        let mut scale = vec![0f32; h];
-        for row in self.hidden_w.chunks_exact(h) {
-            for (s, &w) in scale.iter_mut().zip(row) {
-                *s = s.max(w.abs());
+            if self.int8.take().is_some() {
+                self.id = next_id();
             }
+            return Ok(());
         }
-        for s in scale.iter_mut() {
-            *s = if *s > 0.0 { *s / 127.0 } else { 1.0 };
-        }
-        let q = self
-            .hidden_w
-            .chunks_exact(h)
-            .flat_map(|row| row.iter().zip(&scale).map(|(&w, &s)| (w / s).round() as i8))
+        let last = &self.convs[self.convs.len() - 1];
+        let flat = last.out_pixels() * last.cout;
+        let channels: Vec<usize> = self.convs.iter().map(|c| c.cout).collect();
+        quant::check_shapes(&channels, flat, self.cfg.hidden)?;
+        let convs = self.convs[1..]
+            .iter()
+            .map(|c| {
+                let (q, scale) = quant::quantize_columns(&c.w, c.cout);
+                let mut zero = vec![0f32; c.out_pixels() * c.cout];
+                for p in 0..c.out_pixels() {
+                    let (idx, val) = c.zero.entries(p, p + 1);
+                    for (&i, &v) in idx.iter().zip(val) {
+                        zero[p * c.cout + i as usize % c.cout] = v;
+                    }
+                }
+                QConv {
+                    w: quant::group_rows(&q, c.cout),
+                    scale,
+                    zero,
+                }
+            })
             .collect();
-        self.hidden_q = Some((q, scale));
+        let (q, hidden_scale) = quant::quantize_columns(&self.hidden_w, self.cfg.hidden);
+        self.int8 = Some(QBody {
+            kernel: Int8Kernel::detect(),
+            convs,
+            hidden_w: quant::group_rows(&q, self.cfg.hidden),
+            hidden_scale,
+        });
+        self.hidden_bf16 = None;
+        self.id = next_id();
+        Ok(())
+    }
+
+    /// The int8 kernel in use, `None` when the network is `f32` ([`Network::quantize_int8`]).
+    pub fn int8_kernel(&self) -> Option<Int8Kernel> {
+        self.int8.as_ref().map(|q| q.kernel)
+    }
+
+    /// Use another int8 kernel (tests and benchmarks: all give the same outputs). An error when
+    /// this CPU cannot run it or the network is not int8.
+    pub fn set_int8_kernel(&mut self, kernel: Int8Kernel) -> Result<(), NetError> {
+        match &mut self.int8 {
+            Some(q) if kernel.supported() => {
+                q.kernel = kernel;
+                Ok(())
+            }
+            Some(_) => Err(NetError::Input(format!(
+                "this CPU has no {kernel:?} kernel"
+            ))),
+            None => Err(NetError::Input("the network is not int8".into())),
+        }
     }
 
     /// **Off by default; changes the outputs.** Store the dense hidden layer's weights (93% of
@@ -983,7 +1018,7 @@ impl Network {
     /// 2^-9 of itself, and outputs by about 1e-3. `on = false` restores the `f32` weights.
     pub fn store_hidden_bf16(&mut self, on: bool) {
         self.id = next_id();
-        self.hidden_q = None;
+        self.int8 = None;
         self.hidden_bf16 = on.then(|| self.hidden_w.iter().map(|&w| bf16_bits(w)).collect());
     }
 
@@ -1017,7 +1052,32 @@ impl Network {
             hid: vec![0.0; MAX_ROWS * self.cfg.hidden],
             term: vec![0.0; self.cfg.hidden],
             acc: vec![0.0; c],
+            q: QScratch {
+                a: vec![0.0; self.dense_len()],
+                x: vec![[0; 4]; self.dense_len().div_ceil(4)],
+                acc: vec![0; c],
+                scale: vec![0.0; c],
+                hx: vec![[0; 4]; MAX_ROWS * self.flat() / 4],
+                hscale: [0.0; MAX_ROWS],
+                hlive: [[0; OBS_ROWS]; MAX_ROWS],
+                hacc: vec![0; MAX_ROWS * self.cfg.hidden],
+            },
         }
+    }
+
+    /// Entries of the flattened torso (the last convolution's output).
+    fn flat(&self) -> usize {
+        let last = &self.convs[self.convs.len() - 1];
+        last.out_pixels() * last.cout
+    }
+
+    /// Floats of the largest dense convolution output.
+    fn dense_len(&self) -> usize {
+        self.convs
+            .iter()
+            .map(|c| c.out_pixels() * c.cout)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Whether `s` is big enough for this network (it may come from another one).
@@ -1027,6 +1087,12 @@ impl Network {
         s.hid.len() == MAX_ROWS * self.cfg.hidden
             && s.term.len() == self.cfg.hidden
             && s.acc.len() >= c
+            && s.q.a.len() >= self.dense_len()
+            && s.q.x.len() >= self.dense_len().div_ceil(4)
+            && s.q.acc.len() >= c
+            && s.q.scale.len() >= c
+            && s.q.hx.len() >= MAX_ROWS * self.flat() / 4
+            && s.q.hacc.len() >= MAX_ROWS * self.cfg.hidden
             && s.ping.fits(h, w, c)
             && s.pong.fits(h, w, c)
             && s.torso.len() == MAX_ROWS
@@ -1081,9 +1147,25 @@ impl Network {
         for first in (0..b).step_by(MAX_ROWS) {
             let rows = (b - first).min(MAX_ROWS);
             for r in 0..rows {
-                self.torso(scratch, &obs[(first + r) * OBS_LEN..][..OBS_LEN], r);
+                let board = &obs[(first + r) * OBS_LEN..][..OBS_LEN];
+                match &self.int8 {
+                    Some(q) => {
+                        scratch.ping.load_obs(board);
+                        self.convs[0].apply(
+                            &scratch.ping,
+                            &mut scratch.pong,
+                            false,
+                            &mut scratch.acc,
+                        );
+                        self.body_int8(q, scratch, r);
+                    }
+                    None => self.torso(scratch, board, r),
+                }
             }
-            self.hidden(scratch, rows);
+            match &self.int8 {
+                Some(q) => self.hidden_int8(q, scratch, rows),
+                None => self.hidden(scratch, rows),
+            }
             for r in 0..rows {
                 let feat = &feats[(first + r) * NUM_FEATURES..][..NUM_FEATURES];
                 let h = &mut scratch.hid[r * hdim..][..hdim];
@@ -1124,13 +1206,29 @@ impl Network {
         for first in (0..b).step_by(MAX_ROWS) {
             let rows = (b - first).min(MAX_ROWS);
             for r in 0..rows {
-                if self.torso_board(scratch, &boards[first + r], r).is_none() {
+                if let Some(q) = &self.int8 {
+                    if self.first_board(scratch, &boards[first + r]).is_none() {
+                        let mut dense = vec![0f32; OBS_LEN];
+                        boards[first + r].expand_into(&mut dense)?;
+                        scratch.ping.load_obs(&dense);
+                        self.convs[0].apply(
+                            &scratch.ping,
+                            &mut scratch.pong,
+                            false,
+                            &mut scratch.acc,
+                        );
+                    }
+                    self.body_int8(q, scratch, r);
+                } else if self.torso_board(scratch, &boards[first + r], r).is_none() {
                     let mut dense = vec![0f32; OBS_LEN];
                     boards[first + r].expand_into(&mut dense)?;
                     self.torso(scratch, &dense, r);
                 }
             }
-            self.hidden(scratch, rows);
+            match &self.int8 {
+                Some(q) => self.hidden_int8(q, scratch, rows),
+                None => self.hidden(scratch, rows),
+            }
             for r in 0..rows {
                 let feat = &feats[(first + r) * NUM_FEATURES..][..NUM_FEATURES];
                 let h = &mut scratch.hid[r * hdim..][..hdim];
@@ -1178,6 +1276,164 @@ impl Network {
         Some(())
     }
 
+    /// The first convolution of a structured board into `scratch.pong` (int8 networks, which
+    /// have two or more); `None` (nothing done) as for [`Network::torso_board`].
+    fn first_board(&self, scratch: &mut Scratch, board: &BoardInput) -> Option<()> {
+        scratch.ping.load_board(board)?;
+        let consts = BoardConsts {
+            r0: board.r0,
+            c0: board.c0,
+            health: board.health,
+            length: board.length,
+        };
+        self.convs[0].apply_board(
+            &scratch.ping,
+            &consts,
+            &self.board_base,
+            &mut scratch.pong,
+            false,
+        )
+    }
+
+    /// The int8 convolutions of row `r` ([`Network::quantize_int8`]): the first convolution's
+    /// compressed output in `scratch.pong` to the row's int8 hidden-layer input in
+    /// `scratch.q.hx` (with its scale and live pixels).
+    fn body_int8(&self, q: &QBody, scratch: &mut Scratch, r: usize) {
+        let Scratch { pong, q: qs, .. } = scratch;
+        // The first convolution's entries, straight to int8.
+        let c0 = &self.convs[0];
+        let vals = &pong.val[..pong.start[c0.out_pixels()] as usize];
+        let (mut sx, inv) = quant::act_scale(max_of(vals));
+        let xs = &mut qs.x[..c0.out_pixels() * c0.cout / 4];
+        xs.fill([0; 4]);
+        let bytes = xs.as_flattened_mut();
+        // A row's entries are indexed `ox * cout + channel` ([`Conv::drive`]).
+        for (oy, row) in bytes.chunks_exact_mut(c0.out_w * c0.cout).enumerate() {
+            let (idx, val) = pong.entries(oy * c0.out_w, (oy + 1) * c0.out_w);
+            for (&i, &v) in idx.iter().zip(val) {
+                row[i as usize] = quant::act(v, inv);
+            }
+        }
+        let mut live = [0u32; OBS_ROWS];
+        live[..c0.out_h].copy_from_slice(&pong.live[..c0.out_h]);
+        let last = self.convs.len() - 1;
+        for (i, qc) in q.convs.iter().enumerate() {
+            let c = &self.convs[i + 1];
+            let is_last = i + 1 == last;
+            let groups = c.cin / 4;
+            let k4 = c.cout / 4;
+            let y = &mut qs.a[..c.out_pixels() * c.cout];
+            let acc = &mut qs.acc[..c.cout];
+            // Per channel: f32 = i32 sum * (input scale * weight scale) + bias.
+            for (o, &s) in qs.scale[..c.cout].iter_mut().zip(&qc.scale) {
+                *o = sx * s;
+            }
+            let scale = qs.scale[..c.cout].as_chunks::<4>().0;
+            let bias = c.b.as_chunks::<4>().0;
+            let mut mx = V4::zero();
+            let xin = &qs.x[..c.in_h * c.in_w * groups];
+            let mut out_live = [0u32; OBS_ROWS];
+            for (oy, row_live) in out_live[..c.out_h].iter_mut().enumerate() {
+                let (dy0, dy1, iy0) = tap_range(oy, c.stride, c.pad_lo, c.in_h);
+                let rows_live = live[iy0.min(OBS_ROWS)..(iy0 + dy1 - dy0).min(OBS_ROWS)]
+                    .iter()
+                    .fold(0, |m, &l| m | l);
+                for ox in 0..c.out_w {
+                    let (dx0, dx1, ix0) = tap_range(ox, c.stride, c.pad_lo, c.in_w);
+                    let window = ((1u32 << (dx1 - dx0)) - 1).wrapping_shl(ix0 as u32);
+                    let po = oy * c.out_w + ox;
+                    let yo = y[po * c.cout..][..c.cout].as_chunks_mut::<4>().0;
+                    if rows_live & window == 0 {
+                        // Not live: the f32 all-zero-board output (the last layer's share
+                        // goes to the hidden layer in f32, so it is left out of the scale).
+                        let z = qc.zero[po * c.cout..][..c.cout].as_chunks::<4>().0;
+                        for (o, zk) in yo.iter_mut().zip(z) {
+                            *o = *zk;
+                            if !is_last {
+                                mx = mx.max(V4::load(zk));
+                            }
+                        }
+                        continue;
+                    }
+                    *row_live |= 1 << ox;
+                    // A tap row's inputs are consecutive pixels against consecutive taps.
+                    let mut runs = [quant::Run::default(); 3];
+                    for ((dy, iy), run) in (dy0..dy1).zip(iy0..).zip(&mut runs) {
+                        *run = quant::Run {
+                            x0: (iy * c.in_w + ix0) * groups,
+                            w0: (3 * dy + dx0) * groups,
+                            len: (dx1 - dx0) * groups,
+                        };
+                    }
+                    acc.fill(0);
+                    quant::dot_runs(q.kernel, acc, xin, &runs[..dy1 - dy0], &qc.w);
+                    let a4 = acc.as_chunks::<4>().0;
+                    for k in 0..k4 {
+                        let v = V4::from_i32(&a4[k])
+                            .mul_add_unfused(V4::load(&scale[k]), V4::load(&bias[k]))
+                            .relu();
+                        mx = mx.max(v);
+                        v.store(&mut yo[k]);
+                    }
+                }
+            }
+            live = out_live;
+            // This layer's output to int8 for the next layer (the last: the live pixels
+            // only, for the hidden layer).
+            (sx, _) = quant::act_scale(mx.to_array().into_iter().fold(0f32, f32::max));
+            let inv = 1.0 / sx;
+            let g = c.out_pixels() * k4;
+            let xs = if is_last {
+                &mut qs.hx[r * g..][..g]
+            } else {
+                &mut qs.x[..g]
+            };
+            for (o, yk) in xs.iter_mut().zip(y.as_chunks::<4>().0) {
+                *o = V4::load(yk).quantize(inv);
+            }
+            if is_last {
+                for (oy, &l) in live[..c.out_h].iter().enumerate() {
+                    for ox in (0..c.out_w).filter(|&ox| l & (1 << ox) == 0) {
+                        xs[(oy * c.out_w + ox) * k4..][..k4].fill([0; 4]);
+                    }
+                }
+            }
+        }
+        qs.hscale[r] = sx;
+        qs.hlive[r] = live;
+    }
+
+    /// The hidden layer of the int8 rows `0..rows` ([`Network::body_int8`]) into
+    /// `scratch.hid`, as [`Network::hidden`] leaves it: the live pixels in int8, all rows at
+    /// once (each weight vector serves several rows), plus the others' `f32` share.
+    fn hidden_int8(&self, q: &QBody, scratch: &mut Scratch, rows: usize) {
+        let Scratch { hid, q: qs, .. } = scratch;
+        let lc = &self.convs[self.convs.len() - 1];
+        let hdim = self.cfg.hidden;
+        let groups = self.flat() / 4;
+        let acc = &mut qs.hacc[..rows * hdim];
+        acc.fill(0);
+        quant::dot_rows(q.kernel, acc, hdim, &qs.hx[..rows * groups], &q.hidden_w);
+        let hs = q.hidden_scale.as_chunks::<4>().0;
+        for r in 0..rows {
+            let out = &mut hid[r * hdim..][..hdim];
+            let sx = V4::load(&[qs.hscale[r]; 4]);
+            let a = acc[r * hdim..][..hdim].as_chunks::<4>().0;
+            for ((o, a), s) in out.as_chunks_mut::<4>().0.iter_mut().zip(a).zip(hs) {
+                let s = V4::load(s).mul_add_unfused(sx, V4::zero());
+                V4::from_i32(a).mul_add_unfused(s, V4::zero()).store(o);
+            }
+            for (oy, &l) in qs.hlive[r][..lc.out_h].iter().enumerate() {
+                for ox in (0..lc.out_w).filter(|&ox| l & (1 << ox) == 0) {
+                    let z = &self.hidden_zero[(oy * lc.out_w + ox) * hdim..][..hdim];
+                    for (o, &zv) in out.iter_mut().zip(z) {
+                        *o += zv;
+                    }
+                }
+            }
+        }
+    }
+
     /// The convolutions of one board, leaving the compressed output in `scratch.torso[r]`.
     fn torso(&self, scratch: &mut Scratch, board: &[f32], r: usize) {
         let Scratch {
@@ -1210,18 +1466,9 @@ impl Network {
         hid.fill(0.0);
         for (t, out) in scratch.torso[..rows].iter().zip(hid.chunks_exact_mut(hdim)) {
             let (idx, val) = t.entries(0, last.out_pixels());
-            match &self.hidden_q {
-                None if self.hidden_bf16.is_some() => {
-                    let w = self.hidden_bf16.as_deref().unwrap_or_default();
-                    hidden_add_v(w, hdim, idx, val, out);
-                }
+            match &self.hidden_bf16 {
+                Some(w) => hidden_add_v(&w[..], hdim, idx, val, out),
                 None => hidden_add_v(&self.hidden_w[..], hdim, idx, val, out),
-                Some((q, scale)) => {
-                    hidden_add(q, hdim, idx, val, out);
-                    for (o, &s) in out.iter_mut().zip(scale) {
-                        *o *= s;
-                    }
-                }
             }
             for (oy, &live) in t.live[..last.out_h].iter().enumerate() {
                 for ox in (0..last.out_w).filter(|&ox| live & (1 << ox) == 0) {
@@ -1550,21 +1797,34 @@ mod tests {
 
     #[test]
     fn int8_is_close_and_reversible() {
-        let mut net = random_net(&[8, 16, 16], &[2, 2, 1], 64, "all");
+        let mut net = random_net(&[16, 32, 32], &[2, 2, 1], 64, "all");
         let mut rng = Rng(3);
         let obs = boards(&mut rng, 8);
         let feats: Vec<f32> = (0..8 * NUM_FEATURES).map(|_| rng.next()).collect();
         let want = net.forward(&obs, &feats).unwrap();
-        net.quantize_hidden_int8(true);
+        net.quantize_int8(true).unwrap();
         let got = net.forward(&obs, &feats).unwrap();
         assert_ne!(got, want);
-        for (g, w) in got.logits.iter().zip(&want.logits) {
-            for (a, b) in g.iter().zip(w) {
-                assert!((a - b).abs() < 0.05 * b.abs().max(1.0), "{a} vs {b}");
+        // Every kernel, and the structured path, give the same bits.
+        for k in [Int8Kernel::Scalar, Int8Kernel::Sdot, Int8Kernel::Vnni] {
+            if k.supported() {
+                net.set_int8_kernel(k).unwrap();
+                assert_eq!(net.forward(&obs, &feats).unwrap(), got, "{k:?}");
             }
         }
-        net.quantize_hidden_int8(false);
+        // Random weights on dense random boards: a loose bound (real nets: see the benchmark).
+        for (g, w) in got.logits.iter().zip(&want.logits) {
+            for (a, b) in g.iter().zip(w) {
+                assert!((a - b).abs() < 0.15 * b.abs().max(1.0), "{a} vs {b}");
+            }
+        }
+        net.quantize_int8(false).unwrap();
         assert_eq!(net.forward(&obs, &feats).unwrap(), want);
+        assert!(
+            random_net(&[8, 16], &[2, 2], 64, "all")
+                .quantize_int8(true)
+                .is_err()
+        );
     }
 
     #[test]

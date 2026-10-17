@@ -7,8 +7,9 @@
 //! ```
 //!
 //! `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"], "budget_ms":
-//! 200, "turns": 10}}` (all optional; the first snake and every mode of its network by
-//! default). For each mode it makes
+//! 200, "turns": 10, "int8_kernel": "scalar"}}` (all optional; the first snake and every mode
+//! of its network by default; `int8_kernel` forces the plain Rust int8 kernel instead of the
+//! CPU's dot-product one, reported as `int8_kernel`). For each mode it makes
 //! `positions` mid-game positions, in runs of consecutive turns (self-play with the network's
 //! greedy policy and some random moves, fixed by `seed`), then measures:
 //!
@@ -16,21 +17,24 @@
 //!   early stop and the reuse of the previous turn's tree; ms per move, simulations, and how
 //!   often seat 0's move (the seat a request view plays) equals the plain search's;
 //! * the network on every node those searches evaluated: the dense `forward_into`, the
-//!   structured `forward_boards_into`, and the structured pass with bfloat16 hidden weights;
-//!   microseconds per row (median of interleaved rounds), and the bfloat16 outputs' distance
-//!   from the `f32` ones;
-//! * the 256-simulation search with the bfloat16 network: seat 0's move against the `f32` one;
+//!   structured `forward_boards_into`, and the structured pass with bfloat16 hidden weights and
+//!   with the int8 network ([`Network::quantize_int8`]); microseconds per row (median of
+//!   interleaved rounds), and the bfloat16 and int8 outputs' distance from the `f32` ones;
+//! * the 256-simulation search with the bfloat16 and the int8 networks: seat 0's move against
+//!   the `f32` one;
 //! * the time-budget snake (`budget_ms`, default 200, cap 16,384): the simulations a search
 //!   reaches with and without the reuse of the last tree, on `turns` turns (default 10; 0 skips
-//!   it) of games where seat 0 plays the searched move. With a time budget the early stop only
-//!   ends forced moves (the cap is out of reach), so these simulations are what speed buys.
+//!   it) of games where seat 0 plays the searched move, and with the reuse on the int8
+//!   network. With a time budget the early stop only ends forced moves (the cap is out of
+//!   reach), so these simulations are what speed buys.
 //!
 //! It stops early, with what it has, 300 ms before the invocation's deadline: give the
-//! function a longer timeout for the run (about 30 s at 1769 MB with the defaults).
+//! function a longer timeout for the run (about 50 s on the dev box's Xeon with the defaults;
+//! give the Lambda 120 s).
 
 use serde_json::{Value, json};
 use slinky_env::{EnvConfig, EnvRandom, Game, Rng, random_legal};
-use slinky_net::{BoardInput, Network, Scratch};
+use slinky_net::{BoardInput, Int8Kernel, Network, Scratch};
 use slinky_obs::{Encoder, NUM_FEATURES, OBS_LEN, SparseObs};
 use slinky_rules::{Actions, GameConfig, GameState, MAX_SNAKES, Mode, NUM_ACTIONS};
 use slinky_search::{
@@ -145,11 +149,13 @@ fn positions(net: &Network, mode: Mode, count: usize, seed: u64) -> Vec<Vec<Game
     games
 }
 
-/// Simulations a `ms` search reaches with and without the reuse of the last tree, on `turns`
-/// turns (from turn 10) of games where seat 0 plays the reusing search's move and the others
-/// are [`Scripted`]. The two searches alternate which runs first.
+/// Simulations a `ms` search reaches with and without the reuse of the last tree, and with the
+/// reuse on the int8 network, on `turns` turns (from turn 10) of games where seat 0 plays the
+/// reusing `f32` search's move and the others are [`Scripted`]. The order of the searches
+/// alternates.
 fn time_budget(
     net: &Network,
+    int8: &Network,
     mode: Mode,
     ms: u64,
     turns: usize,
@@ -162,7 +168,10 @@ fn time_budget(
     let mut players = Scripted::new(net, rules, seed);
     let mut kept = Search::with_memory_limit(256 << 20);
     kept.set_reuse(true);
+    let mut kept8 = Search::with_memory_limit(256 << 20);
+    kept8.set_reuse(true);
     let (mut fresh_sims, mut reuse_sims, mut reused, mut done) = (vec![], vec![], 0usize, 0usize);
+    let mut int8_sims = vec![];
     let mut g = 0;
     while done < turns && g < 20 && !late() {
         let mut game = Game::new(env, seed.wrapping_mul(1000) + 500 + g);
@@ -173,7 +182,7 @@ fn time_budget(
         }
         while !game.state.done && done < turns && !late() {
             let noise = game.state.turn as u32;
-            let go = |ws: &mut Search| {
+            let go = |ws: &mut Search, net: &Network| {
                 let mut ev = NetEvaluator::for_game(net, rules).expect("an 11x11 ladder board");
                 let budget = Budget::millis_after(Instant::now(), ms, TIME_CAP);
                 ws.run(
@@ -187,14 +196,19 @@ fn time_budget(
                 .ok()
             };
             let mut fresh = Search::with_memory_limit(256 << 20);
-            let (f, r) = if done % 2 == 0 {
-                let f = go(&mut fresh);
-                (f, go(&mut kept))
+            let (f, r, q) = if done % 2 == 0 {
+                let f = go(&mut fresh, net);
+                let r = go(&mut kept, net);
+                (f, r, go(&mut kept8, int8))
             } else {
-                let r = go(&mut kept);
-                (go(&mut fresh), r)
+                let q = go(&mut kept8, int8);
+                let r = go(&mut kept, net);
+                (go(&mut fresh, net), r, q)
             };
-            let (Some(f), Some(r)) = (f, r) else { break };
+            let (Some(f), Some(r), Some(q)) = (f, r, q) else {
+                break;
+            };
+            int8_sims.push(q.simulations as f64);
             fresh_sims.push(f.simulations as f64);
             reuse_sims.push(r.simulations as f64);
             reused += kept.reused_nodes();
@@ -210,8 +224,119 @@ fn time_budget(
         "turns": done,
         "simulations_fresh": mean(&fresh_sims),
         "simulations_reuse": mean(&reuse_sims),
+        "simulations_reuse_int8": mean(&int8_sims),
         "reused_nodes_per_move": reused as f64 / done.max(1) as f64,
     })
+}
+
+/// The network on the recorded nodes: the dense `forward_into` and the structured pass of `net`
+/// and of each variant, in 5 interleaved rounds (microseconds per row, median), and each
+/// variant's distance from `net`'s dense outputs.
+fn network_rounds(
+    net: &Network,
+    variants: &[(&str, &Network)],
+    rules: GameConfig,
+    seen: &[(GameState, [bool; MAX_SNAKES])],
+    late: &dyn Fn() -> bool,
+) -> Value {
+    let enc = Encoder::new(rules, net.config().hide_constrictor_food);
+    let mut obs = vec![0f32; MAX_SNAKES * OBS_LEN];
+    let mut feats = [0f32; MAX_SNAKES * NUM_FEATURES];
+    let mut sparse: Vec<SparseObs> = (0..MAX_SNAKES).map(|_| SparseObs::default()).collect();
+    let mut scratch = net.scratch();
+    let rows: usize = seen
+        .iter()
+        .map(|(_, s)| s.iter().filter(|&&x| x).count())
+        .sum();
+    // Per path: seconds of each round; per variant: max and summed |dlogit|, |dvalue|, flips.
+    let mut times = vec![vec![]; 2 + variants.len()];
+    let mut err = vec![(0f32, 0f64, 0f32, 0f64, 0usize); variants.len()];
+    let argmax =
+        |l: &[f32; NUM_ACTIONS]| (0..NUM_ACTIONS).fold(0, |m, x| if l[x] > l[m] { x } else { m });
+    type Out = ([[f32; NUM_ACTIONS]; MAX_SNAKES], [f32; MAX_SNAKES]);
+    for round in 0..5 {
+        if late() {
+            break;
+        }
+        let mut t = vec![0f64; 2 + variants.len()];
+        for (state, seats) in seen {
+            let f = enc.features(state);
+            let asked: Vec<usize> = (0..MAX_SNAKES).filter(|&p| seats[p]).collect();
+            let n = asked.len();
+            for (k, &p) in asked.iter().enumerate() {
+                feats[k * NUM_FEATURES..(k + 1) * NUM_FEATURES].copy_from_slice(&f[p]);
+            }
+            let feats = &feats[..n * NUM_FEATURES];
+            let start = Instant::now();
+            for (k, &p) in asked.iter().enumerate() {
+                let _ = enc.observe_into(state, p, &mut obs[k * OBS_LEN..(k + 1) * OBS_LEN]);
+            }
+            let mut want: Out = Default::default();
+            let _ = net.forward_into(
+                &mut scratch,
+                &obs[..n * OBS_LEN],
+                feats,
+                &mut want.0[..n],
+                &mut want.1[..n],
+            );
+            t[0] += start.elapsed().as_secs_f64();
+            for (i, v) in std::iter::once(net)
+                .chain(variants.iter().map(|v| v.1))
+                .enumerate()
+            {
+                let start = Instant::now();
+                for (k, &p) in asked.iter().enumerate() {
+                    let _ = enc.observe_sparse_into(state, p, &mut sparse[k]);
+                }
+                let boards: Vec<BoardInput> = sparse[..n]
+                    .iter()
+                    .map(|o| BoardInput {
+                        r0: o.r0,
+                        c0: o.c0,
+                        health: o.health,
+                        length: o.length,
+                        entries: &o.entries,
+                    })
+                    .collect();
+                let mut got: Out = Default::default();
+                let _ = v.forward_boards_into(
+                    &mut scratch,
+                    &boards,
+                    feats,
+                    &mut got.0[..n],
+                    &mut got.1[..n],
+                );
+                t[1 + i] += start.elapsed().as_secs_f64();
+                if round == 0 && i > 0 {
+                    let e = &mut err[i - 1];
+                    for r in 0..n {
+                        let dv = (got.1[r] - want.1[r]).abs();
+                        e.2 = e.2.max(dv);
+                        e.3 += f64::from(dv);
+                        e.4 += usize::from(argmax(&got.0[r]) != argmax(&want.0[r]));
+                        for x in 0..NUM_ACTIONS {
+                            let dl = (got.0[r][x] - want.0[r][x]).abs();
+                            e.0 = e.0.max(dl);
+                            e.1 += f64::from(dl) / NUM_ACTIONS as f64;
+                        }
+                    }
+                }
+            }
+        }
+        for (all, s) in times.iter_mut().zip(t) {
+            all.push(s * 1e6 / rows.max(1) as f64);
+        }
+    }
+    let mut times = times.into_iter().map(median);
+    let mut us = json!({"dense": times.next(), "structured": times.next()});
+    let mut errors = json!({});
+    for ((name, _), (t, e)) in variants.iter().zip(times.zip(&err)) {
+        us[format!("structured_{name}")] = json!(t);
+        let r = rows.max(1) as f64;
+        errors[*name] = json!({"max_abs_logit": e.0, "mean_abs_logit": e.1 / r, "max_abs_value": e.2,
+                               "mean_abs_value": e.3 / r, "argmax_flips": e.4});
+    }
+    json!({"nodes": seen.len(), "rows": rows, "us_per_row": us, "error_vs_f32": errors})
 }
 
 /// Runs the benchmark with the run dir's network (see the module docs).
@@ -223,15 +348,27 @@ pub fn run(run_dir: &std::path::Path, spec: &Value, limit: Option<Instant>) -> V
     let seed = spec["seed"].as_u64().unwrap_or(1);
     let budget_ms = spec["budget_ms"].as_u64().unwrap_or(200).clamp(1, 2000);
     let turns = spec["turns"].as_u64().unwrap_or(10).min(100) as usize;
-    let load = |bf16: bool| -> Result<Network, String> {
+    let load = |kind: &str| -> Result<Network, String> {
         let mut n = Network::load(run_dir).map_err(|e| e.to_string())?;
-        n.store_hidden_bf16(bf16);
+        match kind {
+            "bf16" => n.store_hidden_bf16(true),
+            "int8" => {
+                n.quantize_int8(true).map_err(|e| e.to_string())?;
+                if spec["int8_kernel"].as_str() == Some("scalar") {
+                    n.set_int8_kernel(Int8Kernel::Scalar)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            _ => {}
+        }
         Ok(n)
     };
-    let (net, half) = match (load(false), load(true)) {
-        (Ok(a), Ok(b)) => (a, b),
-        (Err(e), _) | (_, Err(e)) => return json!({"error": e}),
+    let (net, half, int8) = match (load("f32"), load("bf16"), load("int8")) {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return json!({"error": e}),
     };
+    // The approximate networks, timed and compared with `net`.
+    let variants = [("bf16", &half), ("int8", &int8)];
     let settings = SearchConfig::from_net(net.config());
     let wanted = |m: Mode| match spec["modes"].as_array() {
         Some(list) => list.iter().any(|x| x.as_str() == Some(m.name())),
@@ -261,14 +398,15 @@ pub fn run(run_dir: &std::path::Path, spec: &Value, limit: Option<Instant>) -> V
                 .ok();
             (out, t.elapsed().as_secs_f64() * 1e3)
         };
-        // Searches: plain, early stop, early stop + reuse, bf16 (recording its evaluations,
-        // which are the plain search's but for the bf16 rounding).
+        // Searches: plain (recording its evaluations), early stop, early stop + reuse, and
+        // each approximate network.
         let mut rec = Recorder {
-            inner: NetEvaluator::for_game(&half, rules).expect("an 11x11 ladder board"),
+            inner: NetEvaluator::for_game(&net, rules).expect("an 11x11 ladder board"),
             seen: Vec::new(),
         };
         let (mut ms, mut ms_e, mut ms_er, mut sims_e, mut sims_er) = (vec![], vec![], vec![], 0, 0);
-        let (mut agree_e, mut agree_er, mut agree_h, mut searched) = (0, 0, 0, 0);
+        let (mut agree_e, mut agree_er, mut searched) = (0, 0, 0);
+        let mut agree_v = [0usize; 2];
         for line in &lines {
             let mut kept = Search::new();
             kept.set_reuse(true);
@@ -278,18 +416,21 @@ pub fn run(run_dir: &std::path::Path, spec: &Value, limit: Option<Instant>) -> V
                     break;
                 }
                 let turn = s.turn as u32;
-                let mut ev = NetEvaluator::for_game(&net, rules).expect("board");
-                let (full, t0) = search(&mut Search::new(), &mut ev, s, turn);
+                let (full, t0) = search(&mut Search::new(), &mut rec, s, turn);
                 let mut early = Search::new();
                 early.set_stop_when_decided(Some(0));
                 let mut ev = NetEvaluator::for_game(&net, rules).expect("board");
                 let (e, t1) = search(&mut early, &mut ev, s, turn);
                 let mut ev = NetEvaluator::for_game(&net, rules).expect("board");
                 let (er, t2) = search(&mut kept, &mut ev, s, turn);
-                let (h, _) = search(&mut Search::new(), &mut rec, s, turn);
-                let (Some(full), Some(e), Some(er), Some(h)) = (full, e, er, h) else {
+                let (Some(full), Some(e), Some(er)) = (full, e, er) else {
                     continue;
                 };
+                for (agree, (_, v)) in agree_v.iter_mut().zip(&variants) {
+                    let mut ev = NetEvaluator::for_game(v, rules).expect("board");
+                    let (o, _) = search(&mut Search::new(), &mut ev, s, turn);
+                    *agree += usize::from(o.is_some_and(|o| o.action[0] == full.action[0]));
+                }
                 searched += 1;
                 ms.push(t0);
                 ms_e.push(t1);
@@ -298,117 +439,30 @@ pub fn run(run_dir: &std::path::Path, spec: &Value, limit: Option<Instant>) -> V
                 sims_er += er.simulations;
                 agree_e += usize::from(e.action[0] == full.action[0]);
                 agree_er += usize::from(er.action[0] == full.action[0]);
-                agree_h += usize::from(h.action[0] == full.action[0]);
             }
         }
-        // The network on the recorded nodes, three ways, in interleaved rounds.
-        let enc = Encoder::new(rules, net.config().hide_constrictor_food);
-        let mut obs = vec![0f32; MAX_SNAKES * OBS_LEN];
-        let mut feats = [0f32; MAX_SNAKES * NUM_FEATURES];
-        let mut sparse: Vec<SparseObs> = (0..MAX_SNAKES).map(|_| SparseObs::default()).collect();
-        let mut scratch = net.scratch();
-        let rows: usize = rec
-            .seen
-            .iter()
-            .map(|(_, s)| s.iter().filter(|&&x| x).count())
-            .sum();
-        let (mut t_dense, mut t_struct, mut t_half) = (vec![], vec![], vec![]);
-        let (mut max_dl, mut max_dv, mut flips) = (0f32, 0f32, 0usize);
-        for round in 0..5 {
-            if late() {
-                break;
-            }
-            let (mut a, mut b, mut c) = (0f64, 0f64, 0f64);
-            for (state, seats) in &rec.seen {
-                let f = enc.features(state);
-                let asked: Vec<usize> = (0..MAX_SNAKES).filter(|&p| seats[p]).collect();
-                let n = asked.len();
-                for (k, &p) in asked.iter().enumerate() {
-                    feats[k * NUM_FEATURES..(k + 1) * NUM_FEATURES].copy_from_slice(&f[p]);
-                }
-                let t = Instant::now();
-                for (k, &p) in asked.iter().enumerate() {
-                    let _ = enc.observe_into(state, p, &mut obs[k * OBS_LEN..(k + 1) * OBS_LEN]);
-                }
-                let (mut lg, mut v) = ([[0f32; NUM_ACTIONS]; MAX_SNAKES], [0f32; MAX_SNAKES]);
-                let _ = net.forward_into(
-                    &mut scratch,
-                    &obs[..n * OBS_LEN],
-                    &feats[..n * NUM_FEATURES],
-                    &mut lg[..n],
-                    &mut v[..n],
-                );
-                let t1 = Instant::now();
-                for (k, &p) in asked.iter().enumerate() {
-                    let _ = enc.observe_sparse_into(state, p, &mut sparse[k]);
-                }
-                let boards: Vec<BoardInput> = sparse[..n]
-                    .iter()
-                    .map(|o| BoardInput {
-                        r0: o.r0,
-                        c0: o.c0,
-                        health: o.health,
-                        length: o.length,
-                        entries: &o.entries,
-                    })
-                    .collect();
-                let (mut lg2, mut v2) = ([[0f32; NUM_ACTIONS]; MAX_SNAKES], [0f32; MAX_SNAKES]);
-                let _ = net.forward_boards_into(
-                    &mut scratch,
-                    &boards,
-                    &feats[..n * NUM_FEATURES],
-                    &mut lg2[..n],
-                    &mut v2[..n],
-                );
-                let t2 = Instant::now();
-                let (mut lg3, mut v3) = ([[0f32; NUM_ACTIONS]; MAX_SNAKES], [0f32; MAX_SNAKES]);
-                let _ = half.forward_boards_into(
-                    &mut scratch,
-                    &boards,
-                    &feats[..n * NUM_FEATURES],
-                    &mut lg3[..n],
-                    &mut v3[..n],
-                );
-                let t3 = Instant::now();
-                a += (t1 - t).as_secs_f64();
-                b += (t2 - t1).as_secs_f64();
-                c += (t3 - t2).as_secs_f64();
-                if round == 0 {
-                    let argmax = |l: &[f32; NUM_ACTIONS]| {
-                        (0..NUM_ACTIONS).fold(0, |m, x| if l[x] > l[m] { x } else { m })
-                    };
-                    for r in 0..n {
-                        max_dv = max_dv.max((v3[r] - v[r]).abs());
-                        flips += usize::from(argmax(&lg3[r]) != argmax(&lg[r]));
-                        for x in 0..NUM_ACTIONS {
-                            max_dl = max_dl.max((lg3[r][x] - lg[r][x]).abs());
-                        }
-                    }
-                }
-            }
-            let per = |s: f64| s * 1e6 / rows.max(1) as f64;
-            t_dense.push(per(a));
-            t_struct.push(per(b));
-            t_half.push(per(c));
-        }
+        let nets = network_rounds(&net, &variants, rules, &rec.seen, &late);
         let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
-        let timed = (turns > 0).then(|| time_budget(&net, mode, budget_ms, turns, seed, &late));
+        let timed =
+            (turns > 0).then(|| time_budget(&net, &int8, mode, budget_ms, turns, seed, &late));
+        let mut agree = json!({"early_stop": agree_e, "early_stop_reuse": agree_er});
+        for ((name, _), a) in variants.iter().zip(agree_v) {
+            agree[*name] = json!(a);
+        }
         modes.push(json!({
-            "time_budget": timed,
             "mode": mode.name(),
             "positions": searched,
             "search_ms_per_move": {"plain": mean(&ms), "early_stop": mean(&ms_e), "early_stop_reuse": mean(&ms_er)},
             "simulations_per_move": {"plain": 256, "early_stop": sims_e as f64 / searched.max(1) as f64,
                                      "early_stop_reuse": sims_er as f64 / searched.max(1) as f64},
-            "moves_equal_plain": {"early_stop": agree_e, "early_stop_reuse": agree_er, "bf16": agree_h},
-            "network_nodes": rec.seen.len(),
-            "network_rows": rows,
-            "network_us_per_row": {"dense": median(t_dense), "structured": median(t_struct), "structured_bf16": median(t_half)},
-            "bf16_error": {"max_abs_logit": max_dl, "max_abs_value": max_dv, "argmax_flips": flips},
+            "moves_equal_plain": agree,
+            "network": nets,
+            "time_budget": timed,
         }));
     }
     json!({
         "arch": std::env::consts::ARCH,
+        "int8_kernel": format!("{:?}", int8.int8_kernel()),
         "seconds": t_start.elapsed().as_secs_f64(),
         "cut_short": late(),
         "modes": modes,

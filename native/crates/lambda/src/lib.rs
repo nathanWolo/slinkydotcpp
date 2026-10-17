@@ -166,7 +166,7 @@ impl App {
         self.handle_within(method, path, body, arrival, None)
     }
 
-    /// Runs [`bench`] (a direct invocation's `{"bench": spec}`) with the run dir of the snake
+    /// Runs [`bench::run`] (a direct invocation's `{"bench": spec}`) with the run dir of the snake
     /// `spec.snake` names, the first by default.
     pub fn bench(&self, spec: &Value, limit: Option<Instant>) -> Value {
         let name = spec["snake"].as_str();

@@ -28,18 +28,20 @@ Change the line-up or the think time with `SNAKES` (e.g.
 The binary answers a direct invocation `{"bench": {...}}` (never a Function URL request) with
 a speed report from the Graviton it runs on: per mode, ms per 256-simulation move plain, with
 the early stop and with the tree reuse, the network's microseconds per row on the dense,
-structured and bfloat16 paths, and the simulations a 200 ms search reaches with and without
-the tree reuse (`native/crates/lambda/src/bench.rs`). It takes about 30 s, so
+structured, bfloat16 and int8 paths (with the int8 outputs' error and move agreement), and the
+simulations a 200 ms search reaches with and without the tree reuse, and with the reuse on the
+int8 network (`native/crates/lambda/src/bench.rs`). It takes about a minute, so
 raise the timeout for the run, while no games are being played (a configuration change starts
 fresh containers), and put it back:
 
-    aws --region us-east-2 lambda update-function-configuration --function-name slinky-native --timeout 60
+    aws --region us-east-2 lambda update-function-configuration --function-name slinky-native --timeout 120
     aws --region us-east-2 lambda wait function-updated --function-name slinky-native
-    aws --region us-east-2 lambda invoke --function-name slinky-native --cli-read-timeout 90 \
+    aws --region us-east-2 lambda invoke --function-name slinky-native --cli-read-timeout 150 \
         --cli-binary-format raw-in-base64-out --payload '{"bench": {}}' bench.json
     aws --region us-east-2 lambda update-function-configuration --function-name slinky-native --timeout 3
 
 Options: `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"],
-"budget_ms": 200, "turns": 10}}`. The
+"budget_ms": 200, "turns": 10, "int8_kernel": "scalar"}}` (`int8_kernel` forces the plain
+Rust int8 kernel, to compare with `sdot`). The
 report stops early (`"cut_short": true`) 300 ms before the invocation's deadline. The same
 report on another machine: `cargo run --release -p slinky-lambda --example lambda_bench -- <run dir>`.

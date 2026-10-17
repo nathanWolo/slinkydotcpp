@@ -2,8 +2,8 @@
 //! microseconds per `forward_into` call at batch sizes 1, 2, 4 and 8, on whatever core the
 //! process runs (pin it: `taskset -c 2 ...`). With a golden `cases.npz` the boards are its real
 //! game states (`kind < 4`); otherwise a dense synthetic board. Prints the best and median of
-//! `reps` timed rounds of about 0.2 s each. `INT8=1` benchmarks the experimental int8 hidden
-//! layer ([`Network::quantize_hidden_int8`]) and prints its error against the `f32` network.
+//! `reps` timed rounds of about 0.2 s each. `INT8=1` benchmarks the int8 network
+//! ([`Network::quantize_int8`]) and prints its error against the `f32` network.
 use slinky_net::{NUM_FEATURES, Network, OBS_LEN, npy};
 use std::time::Instant;
 
@@ -28,7 +28,7 @@ fn main() {
     if std::env::var("INT8").is_ok_and(|v| v == "1") {
         let n = feats.len() / NUM_FEATURES;
         let want = net.forward(&obs, &feats).unwrap();
-        net.quantize_hidden_int8(true);
+        net.quantize_int8(true).unwrap();
         let got = net.forward(&obs, &feats).unwrap();
         let (mut dl, mut dv, mut ml, mut flips) = (0f32, 0f32, 0f32, 0);
         let argmax = |l: &[f32; 4]| (0..4).fold(0, |b, a| if l[a] > l[b] { a } else { b });
@@ -41,7 +41,8 @@ fn main() {
             dv = dv.max((got.values[r] - want.values[r]).abs());
         }
         println!(
-            "int8 hidden layer: max |dlogit| {dl:.3e} (max |logit| {ml:.1}), max |dvalue| {dv:.3e}, policy argmax changed on {flips} of {n} boards"
+            "int8 ({:?}): max |dlogit| {dl:.3e} (max |logit| {ml:.1}), max |dvalue| {dv:.3e}, policy argmax changed on {flips} of {n} boards",
+            net.int8_kernel()
         );
     }
     let reps: usize = args.get(3).map_or(7, |s| s.parse().unwrap());
