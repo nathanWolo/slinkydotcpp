@@ -623,6 +623,10 @@ fn time_budget_counts_from_the_front_end_receipt() {
     let mut env = weights_env(&run);
     env.retain(|(k, _)| *k != "SNAKES");
     env.push(("SNAKES", format!("t={subdir}:budget_ms=300")));
+    // The same position each time: with the tree reuse and the early stop a repeat can be
+    // decided before its budget ends (the move cannot change before the cap).
+    env.push(("EARLY_STOP", "0".to_string()));
+    env.push(("REUSE", "0".to_string()));
     let mut rt = Runtime::start(&env);
     let body = examples()["requests"]["duel"].to_string();
     let now_ms = || {

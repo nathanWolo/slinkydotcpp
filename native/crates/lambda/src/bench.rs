@@ -6,8 +6,9 @@
 //!     --cli-binary-format raw-in-base64-out out.json
 //! ```
 //!
-//! `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"]}}` (all
-//! optional; the first snake and every mode of its network by default). For each mode it makes
+//! `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"], "budget_ms":
+//! 200, "turns": 10}}` (all optional; the first snake and every mode of its network by
+//! default). For each mode it makes
 //! `positions` mid-game positions, in runs of consecutive turns (self-play with the network's
 //! greedy policy and some random moves, fixed by `seed`), then measures:
 //!
@@ -18,20 +19,27 @@
 //!   structured `forward_boards_into`, and the structured pass with bfloat16 hidden weights;
 //!   microseconds per row (median of interleaved rounds), and the bfloat16 outputs' distance
 //!   from the `f32` ones;
-//! * the 256-simulation search with the bfloat16 network: seat 0's move against the `f32` one.
+//! * the 256-simulation search with the bfloat16 network: seat 0's move against the `f32` one;
+//! * the time-budget snake (`budget_ms`, default 200, cap 16,384): the simulations a search
+//!   reaches with and without the reuse of the last tree, on `turns` turns (default 10; 0 skips
+//!   it) of games where seat 0 plays the searched move. With a time budget the early stop only
+//!   ends forced moves (the cap is out of reach), so these simulations are what speed buys.
 //!
 //! It stops early, with what it has, 300 ms before the invocation's deadline: give the
-//! function a longer timeout for the run (about 20 s at 1769 MB with the defaults).
+//! function a longer timeout for the run (about 30 s at 1769 MB with the defaults).
 
 use serde_json::{Value, json};
 use slinky_env::{EnvConfig, EnvRandom, Game, Rng, random_legal};
-use slinky_net::{BoardInput, Network};
+use slinky_net::{BoardInput, Network, Scratch};
 use slinky_obs::{Encoder, NUM_FEATURES, OBS_LEN, SparseObs};
-use slinky_rules::{GameState, MAX_SNAKES, Mode, NUM_ACTIONS};
+use slinky_rules::{Actions, GameConfig, GameState, MAX_SNAKES, Mode, NUM_ACTIONS};
 use slinky_search::{
     Budget, Evaluator, JaxNoise, NetEvaluator, NodeEval, Search, SearchConfig, SearchError,
 };
 use std::time::{Duration, Instant};
+
+/// The simulation cap of a time-budget snake (the engine's default with `BUDGET_MS`).
+const TIME_CAP: usize = 16_384;
 
 /// Records what it evaluates, answering with the network.
 struct Recorder<'a> {
@@ -58,14 +66,62 @@ fn median(mut v: Vec<f64>) -> f64 {
     v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
 }
 
+/// The scripted players: the network's greedy policy, with a random legal move 20% of the time.
+struct Scripted<'a> {
+    net: &'a Network,
+    rules: GameConfig,
+    enc: Encoder,
+    scratch: Scratch,
+    rng: Rng,
+}
+
+impl<'a> Scripted<'a> {
+    fn new(net: &'a Network, rules: GameConfig, seed: u64) -> Scripted<'a> {
+        Scripted {
+            net,
+            rules,
+            enc: Encoder::new(rules, net.config().hide_constrictor_food),
+            scratch: net.scratch(),
+            rng: Rng::new(seed),
+        }
+    }
+
+    fn moves(&mut self, state: &GameState) -> Actions {
+        let n = self.rules.num_snakes();
+        let mut obs = vec![0f32; n * OBS_LEN];
+        let mut feats = vec![0f32; n * NUM_FEATURES];
+        let f = self.enc.features(state);
+        for p in 0..n {
+            let _ = self
+                .enc
+                .observe_into(state, p, &mut obs[p * OBS_LEN..(p + 1) * OBS_LEN]);
+            feats[p * NUM_FEATURES..(p + 1) * NUM_FEATURES].copy_from_slice(&f[p]);
+        }
+        let (mut lg, mut v) = ([[0f32; NUM_ACTIONS]; MAX_SNAKES], [0f32; MAX_SNAKES]);
+        let _ = self
+            .net
+            .forward_into(&mut self.scratch, &obs, &feats, &mut lg[..n], &mut v[..n]);
+        let legal = state.legal_moves(&self.rules);
+        let mut actions = random_legal(&mut self.rng, &self.rules, state);
+        for p in 0..n {
+            if self.rng.below(5) != 0 {
+                let best = (0..NUM_ACTIONS)
+                    .filter(|&a| legal[p][a])
+                    .max_by(|&a, &b| lg[p][a].total_cmp(&lg[p][b]));
+                if let Some(a) = best {
+                    actions[p] = a as u8;
+                }
+            }
+        }
+        actions
+    }
+}
+
 /// Positions of `mode`: runs of consecutive turns (a quarter of `count` each, from turn 10,
-/// 35, 60 or 85) of self-play games with the network's greedy policy and 20% random moves.
+/// 35, 60 or 85) of games between [`Scripted`] players.
 fn positions(net: &Network, mode: Mode, count: usize, seed: u64) -> Vec<Vec<GameState>> {
     let env = EnvConfig::ladder(mode).expect("a ladder mode");
-    let rules = *env.rules();
-    let enc = Encoder::new(rules, net.config().hide_constrictor_food);
-    let mut scratch = net.scratch();
-    let mut rng = Rng::new(seed);
+    let mut players = Scripted::new(net, *env.rules(), seed);
     let (mut games, mut total) = (Vec::new(), 0);
     let mut g = 0;
     while total < count && g < 100 {
@@ -75,28 +131,7 @@ fn positions(net: &Network, mode: Mode, count: usize, seed: u64) -> Vec<Vec<Game
         g += 1;
         let mut line = Vec::new();
         while !game.state.done && line.len() < run {
-            let n = rules.num_snakes();
-            let mut obs = vec![0f32; n * OBS_LEN];
-            let mut feats = vec![0f32; n * NUM_FEATURES];
-            let f = enc.features(&game.state);
-            for p in 0..n {
-                let _ = enc.observe_into(&game.state, p, &mut obs[p * OBS_LEN..(p + 1) * OBS_LEN]);
-                feats[p * NUM_FEATURES..(p + 1) * NUM_FEATURES].copy_from_slice(&f[p]);
-            }
-            let (mut lg, mut v) = ([[0f32; NUM_ACTIONS]; MAX_SNAKES], [0f32; MAX_SNAKES]);
-            let _ = net.forward_into(&mut scratch, &obs, &feats, &mut lg[..n], &mut v[..n]);
-            let legal = game.state.legal_moves(&rules);
-            let mut actions = random_legal(&mut rng, &rules, &game.state);
-            for p in 0..n {
-                if rng.below(5) != 0 {
-                    let best = (0..NUM_ACTIONS)
-                        .filter(|&a| legal[p][a])
-                        .max_by(|&a, &b| lg[p][a].total_cmp(&lg[p][b]));
-                    if let Some(a) = best {
-                        actions[p] = a as u8;
-                    }
-                }
-            }
+            let actions = players.moves(&game.state);
             if game.state.turn >= from {
                 line.push(game.state);
             }
@@ -110,6 +145,75 @@ fn positions(net: &Network, mode: Mode, count: usize, seed: u64) -> Vec<Vec<Game
     games
 }
 
+/// Simulations a `ms` search reaches with and without the reuse of the last tree, on `turns`
+/// turns (from turn 10) of games where seat 0 plays the reusing search's move and the others
+/// are [`Scripted`]. The two searches alternate which runs first.
+fn time_budget(
+    net: &Network,
+    mode: Mode,
+    ms: u64,
+    turns: usize,
+    seed: u64,
+    late: &dyn Fn() -> bool,
+) -> Value {
+    let env = EnvConfig::ladder(mode).expect("a ladder mode");
+    let rules = *env.rules();
+    let settings = SearchConfig::from_net(net.config());
+    let mut players = Scripted::new(net, rules, seed);
+    let mut kept = Search::with_memory_limit(256 << 20);
+    kept.set_reuse(true);
+    let (mut fresh_sims, mut reuse_sims, mut reused, mut done) = (vec![], vec![], 0usize, 0usize);
+    let mut g = 0;
+    while done < turns && g < 20 && !late() {
+        let mut game = Game::new(env, seed.wrapping_mul(1000) + 500 + g);
+        g += 1;
+        while !game.state.done && game.state.turn < 10 {
+            let a = players.moves(&game.state);
+            game.step(&a);
+        }
+        while !game.state.done && done < turns && !late() {
+            let noise = game.state.turn as u32;
+            let go = |ws: &mut Search| {
+                let mut ev = NetEvaluator::for_game(net, rules).expect("an 11x11 ladder board");
+                let budget = Budget::millis_after(Instant::now(), ms, TIME_CAP);
+                ws.run(
+                    &rules,
+                    &game.state,
+                    &settings,
+                    budget,
+                    &mut ev,
+                    &mut JaxNoise::from_seed(noise),
+                )
+                .ok()
+            };
+            let mut fresh = Search::with_memory_limit(256 << 20);
+            let (f, r) = if done % 2 == 0 {
+                let f = go(&mut fresh);
+                (f, go(&mut kept))
+            } else {
+                let r = go(&mut kept);
+                (go(&mut fresh), r)
+            };
+            let (Some(f), Some(r)) = (f, r) else { break };
+            fresh_sims.push(f.simulations as f64);
+            reuse_sims.push(r.simulations as f64);
+            reused += kept.reused_nodes();
+            done += 1;
+            let mut actions = players.moves(&game.state);
+            actions[0] = r.action[0];
+            game.step(&actions);
+        }
+    }
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    json!({
+        "budget_ms": ms,
+        "turns": done,
+        "simulations_fresh": mean(&fresh_sims),
+        "simulations_reuse": mean(&reuse_sims),
+        "reused_nodes_per_move": reused as f64 / done.max(1) as f64,
+    })
+}
+
 /// Runs the benchmark with the run dir's network (see the module docs).
 pub fn run(run_dir: &std::path::Path, spec: &Value, limit: Option<Instant>) -> Value {
     let t_start = Instant::now();
@@ -117,6 +221,8 @@ pub fn run(run_dir: &std::path::Path, spec: &Value, limit: Option<Instant>) -> V
     let late = || stop_at.is_some_and(|s| Instant::now() >= s);
     let count = spec["positions"].as_u64().unwrap_or(12).clamp(1, 200) as usize;
     let seed = spec["seed"].as_u64().unwrap_or(1);
+    let budget_ms = spec["budget_ms"].as_u64().unwrap_or(200).clamp(1, 2000);
+    let turns = spec["turns"].as_u64().unwrap_or(10).min(100) as usize;
     let load = |bf16: bool| -> Result<Network, String> {
         let mut n = Network::load(run_dir).map_err(|e| e.to_string())?;
         n.store_hidden_bf16(bf16);
@@ -286,7 +392,9 @@ pub fn run(run_dir: &std::path::Path, spec: &Value, limit: Option<Instant>) -> V
             t_half.push(per(c));
         }
         let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+        let timed = (turns > 0).then(|| time_budget(&net, mode, budget_ms, turns, seed, &late));
         modes.push(json!({
+            "time_budget": timed,
             "mode": mode.name(),
             "positions": searched,
             "search_ms_per_move": {"plain": mean(&ms), "early_stop": mean(&ms_e), "early_stop_reuse": mean(&ms_er)},

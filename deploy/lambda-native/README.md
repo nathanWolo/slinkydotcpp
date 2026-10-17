@@ -27,8 +27,9 @@ Change the line-up or the think time with `SNAKES` (e.g.
 
 The binary answers a direct invocation `{"bench": {...}}` (never a Function URL request) with
 a speed report from the Graviton it runs on: per mode, ms per 256-simulation move plain, with
-the early stop and with the tree reuse, and the network's microseconds per row on the dense,
-structured and bfloat16 paths (`native/crates/lambda/src/bench.rs`). It takes about 20 s, so
+the early stop and with the tree reuse, the network's microseconds per row on the dense,
+structured and bfloat16 paths, and the simulations a 200 ms search reaches with and without
+the tree reuse (`native/crates/lambda/src/bench.rs`). It takes about 30 s, so
 raise the timeout for the run, while no games are being played (a configuration change starts
 fresh containers), and put it back:
 
@@ -38,6 +39,7 @@ fresh containers), and put it back:
         --cli-binary-format raw-in-base64-out --payload '{"bench": {}}' bench.json
     aws --region us-east-2 lambda update-function-configuration --function-name slinky-native --timeout 3
 
-Options: `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"]}}`. The
+Options: `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"],
+"budget_ms": 200, "turns": 10}}`. The
 report stops early (`"cut_short": true`) 300 ms before the invocation's deadline. The same
 report on another machine: `cargo run --release -p slinky-lambda --example lambda_bench -- <run dir>`.

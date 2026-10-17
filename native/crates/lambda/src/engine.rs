@@ -34,7 +34,10 @@
 //!
 //! Two speed-ups that never change a move. With `EARLY_STOP`, a search stops once our move
 //! leads every other root move by more than the simulations left
-//! (`Search::set_stop_when_decided`): the full count would choose the same move. With `REUSE`,
+//! (`Search::set_stop_when_decided`): the full count would choose the same move. With
+//! `BUDGET_MS` the simulations left are counted to the cap (`SIMULATIONS`, 16,384), so it ends
+//! forced moves and searches whose leader is out of reach before the cap; the deadline would
+//! have ended them with the same move, later (it saves time and billing, not strength). With `REUSE`,
 //! the engine keeps the last tree of each of the [`GAME_TREES`] most recent games, and the
 //! next move's search copies the network evaluation of every node it shares with that tree
 //! (`Search::set_reuse`). The tree and the move are bit-identical to a search without it; only
