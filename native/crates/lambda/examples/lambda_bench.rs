@@ -1,7 +1,7 @@
 //! The Lambda's `{"bench": ...}` invocation run locally (see `slinky_lambda::bench`):
 //!
 //! ```text
-//! cargo run --release -p slinky-lambda --example bench -- <run dir> ['{"positions": 12}']
+//! cargo run --release -p slinky-lambda --example lambda_bench -- <run dir> ['{"positions": 12}']
 //! ```
 
 fn main() {

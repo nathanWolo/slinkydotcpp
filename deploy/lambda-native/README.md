@@ -40,4 +40,4 @@ fresh containers), and put it back:
 
 Options: `{"bench": {"snake": "az-256", "positions": 12, "seed": 1, "modes": ["duel"]}}`. The
 report stops early (`"cut_short": true`) 300 ms before the invocation's deadline. The same
-report on another machine: `cargo run --release -p slinky-lambda --example bench -- <run dir>`.
+report on another machine: `cargo run --release -p slinky-lambda --example lambda_bench -- <run dir>`.

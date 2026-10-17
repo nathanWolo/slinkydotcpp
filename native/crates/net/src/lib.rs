@@ -51,7 +51,7 @@
 //! x86-64, plain arrays elsewhere), with one multiply-add per lane exactly as the scalar code
 //! rounds it, so the outputs do not depend on the target's vector width. On the dev box's
 //! Xeon, the network on the search's own nodes takes about 30 us per row on the structured
-//! path against 35 us dense (`cargo run --release -p slinky-lambda --example bench -- <run
+//! path against 35 us dense (`cargo run --release -p slinky-lambda --example lambda_bench -- <run
 //! dir>`, which also runs on the Lambda itself: `deploy/lambda-native/README.md`).
 //!
 //! The raw feature vector goes in: for `features = "no_mode"` the network masks the one-hot and

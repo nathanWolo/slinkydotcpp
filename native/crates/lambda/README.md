@@ -192,7 +192,7 @@ runtime: not measured) once per container.
 The same binary benchmarks the CPU it runs on when invoked directly with `{"bench": {}}`
 (search ms per move plain / with early stop / with reuse, network us per row on each path):
 see `src/bench.rs` and `deploy/lambda-native/README.md`; locally, `cargo run --release -p
-slinky-lambda --example bench -- <run dir>`.
+slinky-lambda --example lambda_bench -- <run dir>`.
 
 ## Lambda cost and timing
 
